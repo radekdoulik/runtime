@@ -12,7 +12,7 @@ abstract class BenchTask
     readonly List<Result> results = new();
     public Regex pattern;
 
-    public async Task<string> RunBatch(List<Result> results, int measurementIdx, int milliseconds = 1000)
+    public async Task<string> RunBatch(List<Result> results, int measurementIdx, int milliseconds = 100)
     {
         var measurement = Measurements[measurementIdx];
         await measurement.BeforeBatch();
