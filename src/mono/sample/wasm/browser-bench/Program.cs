@@ -19,9 +19,10 @@ namespace Sample
 
         BenchTask[] tasks =
         {
-            new ExceptionsTask(),
-            new JsonTask (),
-            new WebSocketTask()
+            new ProseTask(),
+            //new ExceptionsTask(),
+            //new JsonTask (),
+            //new WebSocketTask()
         };
         static Test instance = new Test ();
 
@@ -82,6 +83,9 @@ namespace Sample
 
         bool NextTask ()
         {
+            if (Task != null)
+                Task.Finish ();
+
             bool hasMeasurement;
             do {
                 if (taskCounter == tasks.Length)

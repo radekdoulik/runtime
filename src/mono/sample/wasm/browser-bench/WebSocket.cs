@@ -50,7 +50,7 @@ namespace Sample
                 await client.ConnectAsync(EchoServer, CancellationToken.None);
             }
 
-            public override Task AfterBatch()
+            public override Task AfterBatch(Result _)
             {
                 client.Abort();
                 client.Dispose();

@@ -6,6 +6,8 @@
 
   <ItemGroup>
     <WasmExtraFilesToDeploy Include="index.html" />
+    <ProjectReference Include="$(ProseSources)\MultiModality\PowerApps.Repair\Microsoft.ProgramSynthesis.MultiModality.PowerApps.Repair.csproj" />
+    <WasmFilesToIncludeInFileSystem Include="files/*" />
   </ItemGroup>
 
   <PropertyGroup>

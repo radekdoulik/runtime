@@ -12,18 +12,19 @@ abstract class BenchTask
     readonly List<Result> results = new();
     public Regex pattern;
 
-    public async Task<string> RunBatch(List<Result> results, int measurementIdx, int milliseconds = 5000)
+    public async Task<string> RunBatch(List<Result> results, int measurementIdx, int milliseconds = 1000)
     {
         var measurement = Measurements[measurementIdx];
         await measurement.BeforeBatch();
         var result = measurement.RunBatch(this, milliseconds);
         results.Add(result);
-        await measurement.AfterBatch();
+        await measurement.AfterBatch(result);
 
         return result.ToString();
     }
 
     public virtual void Initialize() { }
+    public virtual void Finish() { }
 
     public abstract Measurement[] Measurements { get; }
 
@@ -46,7 +47,7 @@ abstract class BenchTask
 
         public virtual Task BeforeBatch() { return Task.CompletedTask; }
 
-        public virtual Task AfterBatch() { return Task.CompletedTask; }
+        public virtual Task AfterBatch(Result result) { return Task.CompletedTask; }
 
         public abstract void RunStep();
 
