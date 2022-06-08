@@ -80,6 +80,9 @@ if /i "%1" == "x64"                   (set __BuildArch=x64&set processedArgs=!pr
 if /i "%1" == "x86"                   (set __BuildArch=x86&set processedArgs=!processedArgs! %1&shift&goto Arg_Loop)
 if /i "%1" == "arm"                   (set __BuildArch=arm&set processedArgs=!processedArgs! %1&shift&goto Arg_Loop)
 if /i "%1" == "arm64"                 (set __BuildArch=arm64&set processedArgs=!processedArgs! %1&shift&goto Arg_Loop)
+if /i "%1" == "wasm"                  (set __BuildArch=wasm&set processedArgs=!processedArgs! %1&shift&goto Arg_Loop)
+
+if /i "%1" == "Browser"               (set __TargetOS=Browser&set __SkipNative=1&set processedArgs=!processedArgs! %1&shift&goto Arg_Loop)
 
 if /i "%1" == "debug"                 (set __BuildType=Debug&set processedArgs=!processedArgs! %1&shift&goto Arg_Loop)
 if /i "%1" == "release"               (set __BuildType=Release&set processedArgs=!processedArgs! %1&shift&goto Arg_Loop)

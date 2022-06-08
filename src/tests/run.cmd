@@ -44,6 +44,9 @@ if /i "%1" == "x64"                                     (set __BuildArch=x64&shi
 if /i "%1" == "x86"                                     (set __BuildArch=x86&shift&goto Arg_Loop)
 if /i "%1" == "arm"                                     (set __BuildArch=arm&shift&goto Arg_Loop)
 if /i "%1" == "arm64"                                   (set __BuildArch=arm64&shift&goto Arg_Loop)
+if /i "%1" == "wasm"                                    (set __BuildArch=wasm&shift&goto Arg_Loop)
+
+if /i "%1" == "Browser"                                 (set __TargetOS=Browser&shift&goto Arg_Loop)
 
 if /i "%1" == "debug"                                   (set __BuildType=Debug&shift&goto Arg_Loop)
 if /i "%1" == "release"                                 (set __BuildType=Release&shift&goto Arg_Loop)
@@ -106,7 +109,7 @@ if not defined XunitTestReportDirBase set  XunitTestReportDirBase=%XunitTestBinB
 
 REM We are not running in the official build scenario, call run.py
 
-set __RuntestPyArgs=-arch %__BuildArch% -build_type %__BuildType%
+set __RuntestPyArgs=-arch %__BuildArch% -build_type %__BuildType% -os %__TargetOS%
 
 if defined DoLink (
     set __RuntestPyArgs=%__RuntestPyArgs% --il_link
