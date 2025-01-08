@@ -27,6 +27,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Microsoft.NET.WebAssembly.Webcil\Microsoft.NET.WebAssembly.Webcil.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\mono\wasm\tools\wa-info\wa-lib\wa-lib.csproj" />
 
     <!-- Reference Microsoft.Build.Tasks.Core directly to avoid bringing in it's package closure.
          This assembly is provided by MSbuild.  -->

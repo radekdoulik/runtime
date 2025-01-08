@@ -10,7 +10,7 @@ using NameMap = System.Collections.Generic.Dictionary<uint, string>;
 
 namespace WebAssemblyInfo
 {
-    public abstract class WasmReaderBase
+    public abstract class WasmReaderBase : IDisposable
     {
         public WasmContext Context;
 
@@ -224,6 +224,20 @@ namespace WebAssemblyInfo
                 value |= (~(long)0 << offset);
 
             return value;
+        }
+
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                Reader.Dispose();
+            }
         }
     }
 }

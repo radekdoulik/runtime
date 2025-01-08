@@ -7,7 +7,7 @@ using System.Collections.Generic;
 
 namespace WebAssemblyInfo
 {
-    internal sealed class WasmRewriter : WasmReaderBase
+    internal sealed class WasmRewriter : WasmRewriterBase
     {
         private readonly string DestinationPath;
         private readonly BinaryWriter Writer;
@@ -36,30 +36,24 @@ namespace WebAssemblyInfo
             Writer.Write(Version);
         }
 
-        protected override void ReadSection(SectionInfo section)
+        protected override bool RewriteSection(SectionInfo section)
         {
             if (File.Exists(editContext.DataSectionFile))
             {
                 if (section.id == SectionId.Data)
                 {
                     RewriteDataSection();
-                    return;
+                    return true;
                 }
 
                 if (section.id == SectionId.DataCount)
                 {
                     // omit DataCount section for now, it is not needed
-                    return;
+                    return true;
                 }
             }
 
-            WriteSection(section);
-        }
-
-        private void WriteSection(SectionInfo section)
-        {
-            Reader.BaseStream.Seek(section.offset, SeekOrigin.Begin);
-            Writer.Write(Reader.ReadBytes((int)section.size + (int)(section.begin - section.offset)));
+            return false;
         }
 
         private struct Chunk
@@ -182,75 +176,6 @@ namespace WebAssemblyInfo
 
             Console.WriteLine();
             Writer.BaseStream.Position = pos;
-        }
-
-        private static uint ConstI32ExprLen(int cn) => 2 + I32Len(cn);
-
-        // i32.const <cn>
-        private void WriteConstI32Expr(int cn)
-        {
-            Writer.Write((byte)Opcode.I32_Const);
-            WriteI32(cn);
-            Writer.Write((byte)Opcode.End);
-        }
-
-        public void WriteU32(uint n)
-        {
-            do
-            {
-                byte b = (byte)(n & 0x7f);
-                n >>= 7;
-                if (n != 0)
-                    b |= 0x80;
-                Writer.Write(b);
-            } while (n != 0);
-        }
-
-        public static uint U32Len(uint n)
-        {
-            uint len = 0u;
-            do
-            {
-                n >>= 7;
-                len++;
-            } while (n != 0);
-
-            return len;
-        }
-
-        public void WriteI32(int n)
-        {
-            var final = false;
-            do
-            {
-                byte b = (byte)(n & 0x7f);
-                n >>= 7;
-
-                if ((n == 0 && ((b & 0x40) == 0)) || (n == -1 && ((b & 0x40) == 0x40)))
-                    final = true;
-                else
-                    b |= 0x80;
-
-                Writer.Write(b);
-            } while (!final);
-        }
-
-        public static uint I32Len(int n)
-        {
-            var final = false;
-            var len = 0u;
-            do
-            {
-                byte b = (byte)(n & 0x7f);
-                n >>= 7;
-
-                if ((n == 0 && ((b & 0x40) == 0)) || (n == -1 && ((b & 0x40) == 0x40)))
-                    final = true;
-
-                len++;
-            } while (!final);
-
-            return len;
         }
     }
 }

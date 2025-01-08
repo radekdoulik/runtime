@@ -749,4 +749,10 @@ namespace WebAssemblyInfo
         ElemSegmentNames = 8,
         DataSegmentNames = 9,
     }
+
+    public struct ProducerValue
+    {
+        public string Name;
+        public string Version;
+    }
 }

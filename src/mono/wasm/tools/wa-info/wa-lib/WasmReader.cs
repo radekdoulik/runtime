@@ -48,10 +48,10 @@ namespace WebAssemblyInfo
             foreach (var line in lines)
             {
                 var idx = line.IndexOf(':');
-                if (idx < 0 || !uint.TryParse(line.AsSpan(0, idx), out var fIdx))
+                if (idx < 0 || !uint.TryParse(line.Substring(0, idx), out var fIdx))
                     continue;
 
-                var name = line[(idx + 1)..];
+                var name = line.Substring(idx + 1);
                 if (string.IsNullOrEmpty(name))
                     continue;
 
@@ -67,6 +67,11 @@ namespace WebAssemblyInfo
         }
 
         protected override void ReadSection(SectionInfo section)
+        {
+            ReadSectionContent(section);
+        }
+
+        protected void ReadSectionContent(SectionInfo section)
         {
             switch (section.id)
             {
@@ -1149,6 +1154,9 @@ namespace WebAssemblyInfo
                 case "linking":
                     ReadCustomLinkingSection(remainingSize);
                     break;
+                case "producers":
+                    ReadCustomProducersSection(remainingSize);
+                    break;
                 default:
                     if (name.StartsWith("reloc."))
                         ReadCustomRelocSection(remainingSize, name.Substring(6));
@@ -1169,6 +1177,36 @@ namespace WebAssemblyInfo
         private readonly NameMap globalNames = new();
         private readonly NameMap dataSegmentNames = new();
         private readonly Dictionary<uint, NameMap> localNames = new();
+
+        protected Dictionary<string, List<ProducerValue>> producers = new();
+        protected void ReadCustomProducersSection(uint size)
+        {
+            if (Context.Verbose2)
+                Console.WriteLine();
+
+            var count = ReadU32();
+            if (Context.Verbose2)
+                Console.WriteLine($"  producers count: {count}");
+
+            for (int i = 0; i < count; i++)
+            {
+                var name = ReadString();
+                if (Context.Verbose2)
+                    Console.WriteLine($"  name: {name}");
+
+                var valuesCount = ReadU32();
+                var values = new ProducerValue[valuesCount];
+                for (int j = 0; j < valuesCount; j++)
+                {
+                    values[j].Name = ReadString();
+                    values[j].Version = ReadString();
+                    if (Context.Verbose2)
+                        Console.WriteLine($"    value name: {values[j].Name} version: {values[j].Version}");
+                }
+
+                producers[name] = values.ToList();
+            }
+        }
 
         private void ReadCustomNameSection(uint size)
         {

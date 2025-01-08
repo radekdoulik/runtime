@@ -8,6 +8,7 @@
   <Import Project="$(WasmCommonTargetsPath)WasmApp.Common.targets" />
 
   <UsingTask TaskName="Microsoft.WebAssembly.Build.Tasks.WasmAppBuilder" AssemblyFile="$(WasmAppBuilderTasksAssemblyPath)" />
+  <UsingTask TaskName="Microsoft.WebAssembly.Build.Tasks.ProducersSection" AssemblyFile="$(WasmAppBuilderTasksAssemblyPath)" />
 
   <PropertyGroup>
     <PrepareForWasmBuildNativeDependsOn>
@@ -337,6 +338,7 @@
       <_EmccLDFlags Include="@(_EmccCommonFlags)" />
       <_EmccLDFlags Include="-s EXPORT_ES6=1 -lexports.js" />
       <_EmccLDFlags Condition="'$(WasmEnableExceptionHandling)' != 'false'" Include="-s EXPORT_EXCEPTION_HANDLING_HELPERS=1"   />
+      <_EmccLDFlags Condition="'$(WasmEnableProducersSection)' != 'false'" Include="-s EMIT_PRODUCERS_SECTION=1"   />
 
       <_RuntimeCDependencies Include="$(_WasmPInvokeHPath);$(_WasmICallTablePath)" />
       <_RuntimeCDependencies Include="$(_DriverGenCPath)" Condition="'$(_DriverGenCNeeded)' == 'true'" />
@@ -505,6 +507,18 @@
       <Output TaskParameter="ConsoleOutput" PropertyName="_EmccLinkStepConsoleOutput" />
       <Output TaskParameter="ExitCode" PropertyName="_EmccLinkStepExitCode" />
     </Exec>
+    <Move SourceFiles="$(_WasmIntermediateOutputPath)dotnet.native.wasm"
+          DestinationFiles="$(_WasmIntermediateOutputPath)dotnet.native.wasm.tmp"
+          Condition="'$(_EmccLinkStepExitCode)' == '0' and '$(WasmEnableProducersSection)' != 'false'" />
+    <ItemGroup>
+      <_WasmProducers Include="sdk">
+        <Values>.NETCore SDK,$(NETCoreSdkVersion)</Values>
+      </_WasmProducers>
+    </ItemGroup>
+    <ProducersSection SourceWasmFile="$(_WasmIntermediateOutputPath)dotnet.native.wasm.tmp"
+                      DestinationWasmFile="$(_WasmIntermediateOutputPath)dotnet.native.wasm"
+                      Producers="@(_WasmProducers)"
+                      Condition="'$(_EmccLinkStepExitCode)' == '0' and '$(WasmEnableProducersSection)' != 'false'" />
     <ItemGroup>
       <FileWrites Include="$(_WasmIntermediateOutputPath)dotnet.native.wasm" />
       <FileWrites Include="$(_WasmIntermediateOutputPath)dotnet.native.js" />
