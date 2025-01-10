@@ -1,6 +1,7 @@
 <Project>
+  <Import Project="../../../Directory.Build.props" />
   <PropertyGroup>
     <ProductVersion>0.5</ProductVersion>
+    <AppendTargetFrameworkToOutputPath>true</AppendTargetFrameworkToOutputPath>
   </PropertyGroup>
-  <Import Project="../../../Directory.Build.props" />
 </Project>

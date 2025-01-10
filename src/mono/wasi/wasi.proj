@@ -191,6 +191,7 @@
                       Overwrite="true" />
   </Target>
 
+  <UsingTask TaskName="Microsoft.WebAssembly.Build.Tasks.ProducersSection" AssemblyFile="$(WasmAppBuilderTasksAssemblyPath)" />
 
   <!-- This is a documented target that is invoked by developers in their innerloop work. -->
   <Target Name="BuildWasiRuntimes"
@@ -280,7 +281,22 @@
           SkipUnchangedFiles="true" />
 
     <Exec Command="$(CMakeBuildRuntimeConfigureCmd)" WorkingDirectory="$(NativeBinDir)" />
-    <Exec Command="$(CMakeBuildRuntimeCmd)"  WorkingDirectory="$(NativeBinDir)" />
+    <Exec Command="$(CMakeBuildRuntimeCmd)"  WorkingDirectory="$(NativeBinDir)">
+      <Output TaskParameter="ExitCode" PropertyName="_BuildExitCode" />
+    </Exec>
+
+    <Move SourceFiles="$(NativeBinDir)dotnet.wasm"
+          DestinationFiles="$(NativeBinDir)dotnet.wasm.tmp"
+          Condition="'$(_BuildExitCode)' == '0' and '$(WasmEnableProducersSection)' != 'false'" />
+    <ItemGroup>
+      <_WasmProducers Include="sdk">
+        <Values>.NET SDK,$(NETCoreSdkVersion)</Values>
+      </_WasmProducers>
+    </ItemGroup>
+    <ProducersSection SourceWasmFile="$(NativeBinDir)dotnet.wasm.tmp"
+                      DestinationWasmFile="$(NativeBinDir)dotnet.wasm"
+                      Producers="@(_WasmProducers)"
+                      Condition="'$(_BuildExitCode)' == '0' and '$(WasmEnableProducersSection)' != 'false'" />
 
     <ItemGroup>
       <IcuDataFiles Include="$(NativeBinDir)*.dat" />
