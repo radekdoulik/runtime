@@ -512,7 +512,7 @@
           Condition="'$(_EmccLinkStepExitCode)' == '0' and '$(WasmEnableProducersSection)' != 'false'" />
     <ItemGroup>
       <_WasmProducers Include="sdk">
-        <Values>.NETCore SDK,$(NETCoreSdkVersion)</Values>
+        <Values>.NET SDK,$(NETCoreSdkVersion)</Values>
       </_WasmProducers>
     </ItemGroup>
     <ProducersSection SourceWasmFile="$(_WasmIntermediateOutputPath)dotnet.native.wasm.tmp"
