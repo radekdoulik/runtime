@@ -110,14 +110,7 @@ namespace WebAssemblyInfo
                     ReadMemorySection();
                     break;
                 case SectionId.WitCoreModule:
-                    InWitComponent = false;
-                    EndOfModulePositions.Push(Reader.BaseStream.Position + section.size);
-
-                    var reader = CreateEmbeddedReader(Context, Reader.BaseStream, section.size);
-                    reader.ReadModule();
-                    ModuleReaders.Add(reader);
-                    EndOfModulePositions.Pop();
-                    InWitComponent = true;
+                    ReadWitCoreModuleSection(section);
                     break;
                 case SectionId.WitImport:
                     ReadWitImportSection();
@@ -128,6 +121,18 @@ namespace WebAssemblyInfo
                 default:
                     break;
             }
+        }
+
+        protected void ReadWitCoreModuleSection(SectionInfo section)
+        {
+            InWitComponent = false;
+            EndOfModulePositions.Push(Reader.BaseStream.Position + section.size);
+
+            var reader = CreateEmbeddedReader(Context, Reader.BaseStream, section.size);
+            reader.ReadModule();
+            ModuleReaders.Add(reader);
+            EndOfModulePositions.Pop();
+            InWitComponent = true;
         }
 
         private (uint, uint) ReadLimits()

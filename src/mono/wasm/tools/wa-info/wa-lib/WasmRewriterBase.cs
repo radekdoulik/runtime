@@ -25,15 +25,30 @@ namespace WebAssemblyInfo
             Writer = new BinaryWriter(stream);
         }
 
+        public WasmRewriterBase(WasmContext context, Stream source, long len, Stream destination) : base(context, source, len)
+        {
+            Context = context;
+            DestinationPath = "[embedded]";
+            Writer = new BinaryWriter(destination);
+        }
+
+        protected override WasmReader CreateEmbeddedReader(WasmContext context, Stream stream, long length)
+        {
+            return new WasmRewriterBase(context, stream, length, Writer.BaseStream);
+        }
+
         protected override void ReadModule()
         {
             Writer.Write(MagicWasm);
-            Writer.Write(1); // Version
+            var versionPosition = Writer.BaseStream.Position;
+            Writer.Write((uint)(InWitComponent ? 0x1000d : 1)); // Version
 
             base.ReadModule();
 
-            Writer.BaseStream.Position = MagicWasm.Length;
-            Writer.Write(Version);
+            var endPosition = Writer.BaseStream.Position;
+            Writer.BaseStream.Position = versionPosition;
+            Writer.Write((uint)Version);
+            Writer.BaseStream.Position = endPosition;
         }
 
         protected virtual bool RewriteSection(SectionInfo _) => false;
@@ -42,6 +57,24 @@ namespace WebAssemblyInfo
         {
             if (RewriteSection(section))
                 return;
+
+            if (section.id == SectionId.WitCoreModule) {
+                Writer.Write((byte)((uint)SectionId.WitCoreModule & 0xff));
+                var sizePosition = Writer.BaseStream.Position;
+                WriteU32Padded(section.size);
+
+                var moduleStartPosition = Writer.BaseStream.Position;
+                ReadWitCoreModuleSection(section);
+
+                if (Writer.BaseStream.Position != moduleStartPosition + section.size) {
+                    var endPosition = Writer.BaseStream.Position;
+                    Writer.BaseStream.Position = sizePosition;
+                    WriteU32Padded((uint)(endPosition - moduleStartPosition));
+                    Writer.BaseStream.Position = endPosition;
+                }
+
+                return;
+            }
 
             WriteSection(section);
         }
@@ -72,6 +105,21 @@ namespace WebAssemblyInfo
                     b |= 0x80;
                 Writer.Write(b);
             } while (n != 0);
+        }
+
+        public void WriteU32Padded(uint n)
+        {
+            int round = 0;
+
+            do
+            {
+                byte b = (byte)(n & 0x7f);
+                n >>= 7;
+                if (n != 0 || round < 4)
+                    b |= 0x80;
+                Writer.Write(b);
+                round++;
+            } while (n != 0 || round < 5);
         }
 
         public static uint U32Len(uint n)

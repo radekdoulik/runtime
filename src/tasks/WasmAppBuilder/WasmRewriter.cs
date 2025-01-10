@@ -2,19 +2,32 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Collections.Generic;
+using System.IO;
 using WebAssemblyInfo;
 
 namespace Microsoft.WebAssembly.Build.Tasks
 {
     public class WasmRewriter : WasmRewriterBase
     {
+        private Dictionary<string, List<ProducerValue>> additionalProducers = new();
         private bool producersSectionWritten;
 
         public WasmRewriter(WasmContext context, string sourceWasmFile, string destinationWasmFile) : base(context, sourceWasmFile, destinationWasmFile)
         {
         }
 
-        private Dictionary<string, List<ProducerValue>> additionalProducers = new();
+        public WasmRewriter(WasmContext context, Stream source, long len, Stream destination) : base(context, source, len, destination)
+        {
+        }
+
+        protected override WasmReader CreateEmbeddedReader(WasmContext context, Stream stream, long length)
+        {
+            var rewritter = new WasmRewriter(context, stream, length, Writer.BaseStream);
+            rewritter.additionalProducers = additionalProducers;
+            rewritter.producersSectionWritten = producersSectionWritten;
+
+            return rewritter;
+        }
 
         public void AddProducer(string name, List<ProducerValue> values)
         {
@@ -23,7 +36,7 @@ namespace Microsoft.WebAssembly.Build.Tasks
 
         protected override bool RewriteSection(SectionInfo section)
         {
-            if (additionalProducers.Count > 0 && section.id == SectionId.Custom)
+            if (additionalProducers.Count > 0 && section.id == SectionId.Custom && !producersSectionWritten)
             {
                 var start = Reader.BaseStream.Position;
                 var name = Reader.ReadString();
@@ -107,7 +120,7 @@ namespace Microsoft.WebAssembly.Build.Tasks
         {
             Parse();
 
-            if (!producersSectionWritten)
+            if (!producersSectionWritten && !InWitComponent)
             {
                 Writer.BaseStream.Position = Writer.BaseStream.Length;
                 MergeProducers();
