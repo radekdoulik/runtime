@@ -7689,6 +7689,8 @@ UINT_PTR GetEstablisherFrame(REGDISPLAY* pvRegDisplay, ExInfo* exInfo)
     return pvRegDisplay->SP;
 #elif defined(HOST_LOONGARCH64)
     return pvRegDisplay->SP;
+#elif defined(HOST_WASM)
+    return -1;
 #endif
 }
 
@@ -7927,6 +7929,8 @@ extern "C" void * QCALLTYPE CallCatchFunclet(QCall::ObjectHandleOnStack exceptio
 #define FIRST_ARG_REG R0
 #elif defined(HOST_RISCV64) || defined(HOST_LOONGARCH64)
 #define FIRST_ARG_REG A0
+#elif defined(HOST_WASM)
+#define FIRST_ARG_REG DummyReg
 #endif
 #ifdef HOST_WINDOWS
         if (pLongJmpBuf != NULL)

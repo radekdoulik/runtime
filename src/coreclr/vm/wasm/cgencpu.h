@@ -114,9 +114,13 @@ struct ArgumentRegisters {
 class StubLinkerCPU : public StubLinker
 {
 public:
-    static void Init();
-    void EmitShuffleThunk(struct ShuffleEntry *pShuffleEntryArray);
-    VOID EmitComputedInstantiatingMethodStub(MethodDesc* pSharedMD, struct ShuffleEntry *pShuffleEntryArray, void* extraArg);
+    static void Init() { /* no-op on wasm */ }
+    inline void EmitShuffleThunk(struct ShuffleEntry *pShuffleEntryArray) {
+        _ASSERTE("The EmitShuffleThunk is not implemented on wasm");
+    }
+    inline VOID EmitComputedInstantiatingMethodStub(MethodDesc* pSharedMD, struct ShuffleEntry *pShuffleEntryArray, void* extraArg) {
+        _ASSERTE("The EmitComputedInstantiatingMethodStub is not implemented on wasm");
+    }
 };
 
 //**********************************************************************

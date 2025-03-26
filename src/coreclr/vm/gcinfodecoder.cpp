@@ -2086,7 +2086,6 @@ void GcInfoDecoder::ReportRegisterToGC(
 
     pCallBack(hCallBack, pObjRef, gcFlags DAC_ARG(DacSlotLocation(regNum, 0, false)));
 }
-
 #else // Unknown platform
 
 OBJECTREF* GcInfoDecoder::GetRegisterSlot(
@@ -2119,6 +2118,15 @@ void GcInfoDecoder::ReportRegisterToGC(
                                 void *          hCallBack)
 {
     _ASSERTE( !"NYI" );
+}
+
+OBJECTREF* GcInfoDecoder::GetCapturedRegister(
+    int             regNum,
+    PREGDISPLAY     pRD
+    )
+{
+    _ASSERTE( !"NYI" );
+    return nullptr;
 }
 
 #endif // Unknown platform
