@@ -41,7 +41,10 @@
         static void unwindLazyState(LazyMachState* baseState,
                                     MachState* lazyState,
                                     DWORD threadId,
-                                    int funCallDepth = 1);
+                                    int funCallDepth = 1)
+        {
+            _ASSERTE("LazyMachState::unwindLazyState is not implemented");
+        }
     
         friend class HelperMethodFrame;
         friend class CheckAsmOffsets;
@@ -60,7 +63,10 @@
     // as light weight as possible, as we may never need the state that
     // we capture.  Thus to complete the process you need to call
     // 'getMachState()', which finishes the process
-    EXTERN_C void LazyMachStateCaptureState(struct LazyMachState *pState);
+    EXTERN_C inline void LazyMachStateCaptureState(struct LazyMachState *pState)
+    {
+        _ASSERTE("LazyMachStateCaptureState is not implemented");
+    }
     
     // CAPTURE_STATE captures just enough register state so that the state of the
     // processor can be deterined just after the routine that has CAPTURE_STATE in

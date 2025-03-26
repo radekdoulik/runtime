@@ -70,9 +70,9 @@ add_dependencies(coreclr coreclr_exports)
 set_property(TARGET coreclr APPEND_STRING PROPERTY LINK_FLAGS ${EXPORTS_LINKER_OPTION})
 set_property(TARGET coreclr APPEND_STRING PROPERTY LINK_DEPENDS ${EXPORTS_FILE})
 
-if (CLR_CMAKE_HOST_UNIX)
+if (CLR_CMAKE_HOST_UNIX AND NOT CLR_CMAKE_TARGET_ARCH_WASM)
     set(LIB_UNWINDER unwinder_wks)
-endif (CLR_CMAKE_HOST_UNIX)
+endif (CLR_CMAKE_HOST_UNIX AND NOT CLR_CMAKE_TARGET_ARCH_WASM)
 
 # IMPORTANT! Please do not rearrange the order of the libraries. The linker on Linux is
 # order dependent and changing the order can result in undefined symbols in the shared
@@ -80,7 +80,7 @@ endif (CLR_CMAKE_HOST_UNIX)
 set(CORECLR_LIBRARIES
     utilcode
     ${START_LIBRARY_GROUP} # Start group of libraries that have circular references
-    cordbee_wks
+#    cordbee_wks
     debug-pal
     ${LIB_UNWINDER}
     v3binder
@@ -95,10 +95,10 @@ set(CORECLR_LIBRARIES
     utilcode
     v3binder
     System.Globalization.Native-Static
-    interop
+#    interop
     coreclrminipal
     gc_pal
-    cdac_contract_descriptor
+#    cdac_contract_descriptor
 )
 
 if(CLR_CMAKE_TARGET_ARCH_AMD64)

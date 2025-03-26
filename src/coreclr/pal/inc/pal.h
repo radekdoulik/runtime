@@ -2453,6 +2453,7 @@ typedef struct _KNONVOLATILE_CONTEXT_POINTERS {
 
 typedef struct _CONTEXT {
     ULONG ContextFlags;
+    UINT32 DummyReg;
 } CONTEXT, *PCONTEXT, *LPCONTEXT;
 
 typedef struct _KNONVOLATILE_CONTEXT_POINTERS {
