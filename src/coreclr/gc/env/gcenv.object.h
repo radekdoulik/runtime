@@ -8,8 +8,10 @@
 extern bool g_oldMethodTableFlags;
 #endif
 
-// Some 32-bit platform ABIs require that 64-bit primitive types and composite types containing them are aligned at 64-bit boundaries.
-#if defined(TARGET_ARM) || defined(TARGET_WASM)
+// ARM requires that 64-bit primitive types are aligned at 64-bit boundaries for interlocked-like operations.
+// Additionally the platform ABI requires these types and composite type containing them to be similarly
+// aligned when passed as arguments.
+#if defined(TARGET_ARM) || defined(TARGET_BROWSER)
 #define FEATURE_64BIT_ALIGNMENT
 #endif
 
