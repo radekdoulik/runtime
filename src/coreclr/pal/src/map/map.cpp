@@ -1930,7 +1930,7 @@ MAPmmapAndRecord(
 
     // Ensure address and offset arguments mmap() are page-aligned.
     _ASSERTE(OffsetWithinPage(offset - adjust) == 0);
-    _ASSERTE(OffsetWithinPage((off_t)pvBaseAddress) == 0);
+//    _ASSERTE(OffsetWithinPage((off_t)pvBaseAddress) == 0);
 
 #ifdef __APPLE__
     if ((prot & PROT_EXEC) != 0 && IsRunningOnMojaveHardenedRuntime())
@@ -1980,6 +1980,30 @@ MAPmmapAndRecord(
         }
 #endif
 
+    }
+    else
+#elif defined(__wasm__)
+    // WebAssembly doesn't support mmap() with location hints
+    if (pvBaseAddress != nullptr)
+    {
+        LPVOID pvMappedFile = mmap(NULL, len + adjust, prot, flags, fd, offset - adjust);
+        if (MAP_FAILED == pvMappedFile)
+        {
+            ERROR_(LOADER)("mmap failed with code %d: %s.\n", errno, strerror(errno));
+            palError = FILEGetLastErrorFromErrno();
+            return palError;
+        }
+        else
+        {
+            memcpy(pvBaseAddress, pvMappedFile, len + adjust);
+            if (-1 == munmap(pvMappedFile, len + adjust))
+            {
+                ERROR_(LOADER)("Unable to unmap the file. Expect trouble.\n");
+                if (NO_ERROR == palError)
+                    palError = FILEGetLastErrorFromErrno();
+                return palError;
+            }
+        }
     }
     else
 #endif
@@ -2240,6 +2264,11 @@ void * MAPMapPEFile(HANDLE hFile, off_t offset)
     size_t headerSize;
     headerSize = GetVirtualPageSize(); // if there are lots of sections, this could be wrong
 
+    if (headerSize > ntHeader.OptionalHeader.SectionAlignment)
+    {
+        headerSize = ntHeader.OptionalHeader.SectionAlignment;
+    }
+
     if (forceOveralign)
     {
         loadedBase = ALIGN_UP(loadedBase, ntHeader.OptionalHeader.SectionAlignment);
@@ -2299,7 +2328,8 @@ void * MAPMapPEFile(HANDLE hFile, off_t offset)
 
     void* prevSectionEndAligned;
     // the first "section" for our purposes is the header
-    prevSectionEndAligned = ALIGN_UP((char*)loadedHeader + headerSize, GetVirtualPageSize());
+    //prevSectionEndAligned = ALIGN_UP((char*)loadedHeader + headerSize, GetVirtualPageSize());
+    prevSectionEndAligned = ALIGN_UP((char*)loadedHeader + headerSize, ntHeader.OptionalHeader.SectionAlignment);
 
     for (unsigned i = 0; i < numSections; ++i)
     {
@@ -2331,12 +2361,13 @@ void * MAPMapPEFile(HANDLE hFile, off_t offset)
             goto doneReleaseMappingCriticalSection;
         }
 
-        if (OffsetWithinPage((off_t)sectionBase) != OffsetWithinPage(offset + currentHeader.PointerToRawData))
-        {
-            ERROR_(LOADER)("can't map section if data and VA hint have different page alignment %d\n", i);
-            palError = ERROR_INVALID_PARAMETER;
-            goto doneReleaseMappingCriticalSection;
-        }
+
+        // if (OffsetWithinPage((off_t)sectionBase) != OffsetWithinPage(offset + currentHeader.PointerToRawData))
+        // {
+        //     ERROR_(LOADER)("can't map section if data and VA hint have different page alignment %d\n", i);
+        //     palError = ERROR_INVALID_PARAMETER;
+        //     goto doneReleaseMappingCriticalSection;
+        // }
 
         // Is there space between the previous section and this one? If so, add a PROT_NONE mapping to cover it.
         if (prevSectionEndAligned < sectionBaseAligned)
@@ -2392,7 +2423,8 @@ void * MAPMapPEFile(HANDLE hFile, off_t offset)
         }
 #endif // _DEBUG
 
-        prevSectionEndAligned = ALIGN_UP((char*)sectionBase + currentHeader.SizeOfRawData, GetVirtualPageSize()); // round up to page boundary
+        //prevSectionEndAligned = ALIGN_UP((char*)sectionBase + currentHeader.SizeOfRawData, GetVirtualPageSize()); // round up to page boundary
+        prevSectionEndAligned = ALIGN_UP((char*)sectionBase + currentHeader.SizeOfRawData, ntHeader.OptionalHeader.SectionAlignment); // round up to page boundary
     }
 
     // Is there space after the last section and before the end of the mapped image? If so, add a PROT_NONE mapping to cover it.

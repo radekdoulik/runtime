@@ -168,6 +168,10 @@ class AsmOffsets
 #elif TARGET_LOONGARCH64
     public const int OFFSETOF__PAL_LIMITED_CONTEXT__IP = 0x108;
     public const int OFFSETOF__PAL_LIMITED_CONTEXT__FP = 0xb8;
+#elif TARGET_WASM
+    // offset to dummy field
+    public const int OFFSETOF__PAL_LIMITED_CONTEXT__IP = 0x04;
+    public const int OFFSETOF__PAL_LIMITED_CONTEXT__FP = 0x04;
 #endif
 
     // Offsets / sizes that are different in 64 / 32 bit mode

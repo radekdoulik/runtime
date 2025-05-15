@@ -579,6 +579,8 @@ namespace
     }
 }
 
+static int _rodo_class_count = 0;
+
 //
 // check the basic consistency between CoreLib and VM
 //
@@ -634,13 +636,24 @@ void CoreLibBinder::Check()
             if (p->expectedClassSize == sizeof(NoClass))
                 continue;
 
+            _rodo_class_count++;
+
             // hidden size of the type that participates in the alignment calculation
             DWORD hiddenSize = pMT->IsValueType() ? sizeof(MethodTable*) : 0;
+
+            if (_rodo_class_count == 20)
+            {
+                printf("set breakpoint object size %lu loader size %lu\n", sizeof (Object), sizeof(AssemblyLoadContextBaseObject));
+                printf("size of int64_t: %lu OBJECTREF: %lu INT_PTR: %lu DWORD: %lu CLR_BOOL: %lu\n", sizeof(int64_t), sizeof(OBJECTREF), sizeof(INT_PTR), sizeof(DWORD), sizeof(CLR_BOOL));
+            }
 
             DWORD size = pMT->GetBaseSize() - (sizeof(ObjHeader)+hiddenSize);
 
             DWORD expectedsize = (DWORD)ALIGN_UP(p->expectedClassSize + (sizeof(ObjHeader) + hiddenSize),
                 DATA_ALIGNMENT) - (sizeof(ObjHeader) + hiddenSize);
+
+            printf("base size: %d hidden size: %d expected class size: %lu size of header: %lu size: %d expected size: %d class: %s count: %d\n", 
+                pMT->GetBaseSize(), hiddenSize, p->expectedClassSize, sizeof(ObjHeader), size, expectedsize, pMT->GetDebugClassName(), _rodo_class_count);
 
             CONSISTENCY_CHECK_MSGF(size == expectedsize,
                 ("Managed object size does not match unmanaged object size\n"

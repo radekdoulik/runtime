@@ -52,6 +52,7 @@ extern PCODE GetPreStubEntryPoint();
 
 struct ThisPtrRetBufPrecode {
     static const int Type = 0x01;
+    int Dummy[2];
 
     void Init(MethodDesc* pMD, LoaderAllocator *pLoaderAllocator)
     {

@@ -6735,6 +6735,7 @@ MethodDesc *MethodTable::MethodDataObject::GetImplMethodDesc(UINT32 slotNumber)
     while (!pEntry->GetImplMethodDesc() && PopulateNextLevel());
 
     MethodDesc *pMDRet = pEntry->GetImplMethodDesc();
+    // printf("method name: %s\n", pMDRet->GetName());
 
     if (pMDRet == NULL)
     {
@@ -6745,6 +6746,28 @@ MethodDesc *MethodTable::MethodDataObject::GetImplMethodDesc(UINT32 slotNumber)
     }
     else
     {
+        // printf("slotNumber: %d, GetNumVirtuals(): %d\n",
+        //        slotNumber,
+        //        GetNumVirtuals());
+        // if (slotNumber < GetNumVirtuals()) {
+        //     printf("pMDRet: %p, m_pDeclMT: %p, MethodDescForSlot: %p\n",
+        //         pMDRet,
+        //         m_pDeclMT,
+        //         m_pDeclMT->GetMethodDescForSlot_NoThrow(slotNumber));
+        //     for (int i = 0; i < GetNumVirtuals(); i++)
+        //     {
+        //         MethodDesc *pMD = m_pDeclMT->GetMethodDescForSlot_NoThrow(i);
+        //         if (pMD != NULL)
+        //             printf("GetMethodDescForSlot_NoThrow(%d): %p %s\n",
+        //                 i,
+        //                 pMD,
+        //                 pMD->GetName());
+        //         else
+        //             printf("GetMethodDescForSlot_NoThrow(%d): %p %s\n",
+        //                 i,
+        //                 m_pDeclMT->GetMethodDescForSlot_NoThrow(i), "NULL");
+        //     }
+        // }
         _ASSERTE(slotNumber >= GetNumVirtuals() || pMDRet == m_pDeclMT->GetMethodDescForSlot_NoThrow(slotNumber));
     }
 
