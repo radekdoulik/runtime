@@ -1,17 +1,45 @@
-extern "C" int coreclr_initialize(
-    const char* exePath,
-    const char* appDomainFriendlyName,
-    int propertyCount,
-    const char** propertyKeys,
-    const char** propertyValues,
-    void** hostHandle,
-    unsigned int* domainId);
+#include <cstdio>
+#include <coreclrhost.h>
 
-int main()
+static void log_error_info(const char* line)
 {
-    coreclr_initialize("<wasm>", "corewasmrun", 0, nullptr, nullptr, nullptr, nullptr);
+    std::fprintf(stderr, "log error: %s\n", line);
+}
+
+// The current CoreCLR instance details.
+static void* CurrentClrInstance;
+static unsigned int CurrentAppDomainId;
+
+static int run()
+{
+    const char* exe_path = "<coreclr-wasm>";
+    const char* app_domain_name = "corewasmrun";
+    const char* entry_assembly = "ManagedAssembly.dll";
+
+    coreclr_set_error_writer(log_error_info);
+
+    printf("call coreclr_initialize\n");
+    int retval = coreclr_initialize(exe_path, app_domain_name, 0, nullptr, nullptr, &CurrentClrInstance, &CurrentAppDomainId);
+
+    if (retval < 0)
+    {
+        std::fprintf(stderr, "coreclr_initialize failed - Error: 0x%08x\n", retval);
+        return -1;
+    }
+    else
+    {
+        printf("coreclr_initialize succeeded - retval: 0x%08x\n", retval);
+    }
+
     // coreclr_execute_assembly();
     // coreclr_shutdown();
 
-    return 0;
+    return retval;
+}
+
+int main()
+{
+    int retval = run();
+
+    return retval;
 }

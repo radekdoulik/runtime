@@ -9,10 +9,10 @@
     <pre id="log"></pre>
     <script>
         Module = {
-            preRun: function () {
+            preRun: [ function () {
                 ENV.PAL_DBG_CHANNELS="+all.all";
                 // ENV.PAL_DBG_CHANNELS="+all.ERROR";
-            },
+            }],
             onExit: function (code) {
                 console.log("onExit, code: " + code);
             },
@@ -28,13 +28,9 @@
                     'Content-Type': 'text/plain'
                 }
             });
-            if (capturingTestCaseNames) {
-                capturedTestCaseNames.push(message.trim());
-            } else {
-                const elt = document.createElement("span");
-                elt.textContent = message + "\n";
-                document.querySelector("#log").appendChild(elt);
-            }
+            const elt = document.createElement("span");
+            elt.textContent = message + "\n";
+            document.querySelector("#log").appendChild(elt);
         };
         const originalConsoleError = console.error;
         console.error = function(message) {
