@@ -294,6 +294,32 @@ extern "C" void RhpVTableOffsetDispatch()
     PORTABILITY_ASSERT("RhpVTableOffsetDispatch is not implemented on wasm");
 }
 
+typedef uint8_t CODE_LOCATION;
+CODE_LOCATION RhpAssignRefAVLocation;
+CODE_LOCATION RhpCheckedAssignRefAVLocation;
+CODE_LOCATION RhpByRefAssignRefAVLocation1;
+CODE_LOCATION RhpByRefAssignRefAVLocation2;
+
+extern "C" void ThisPtrRetBufPrecodeWorker()
+{
+    PORTABILITY_ASSERT("ThisPtrRetBufPrecodeWorker is not implemented on wasm");
+}
+
+extern "C" FCDECL2(VOID, RhpAssignRef, Object **dst, Object *ref)
+{
+    PORTABILITY_ASSERT("RhpAssignRef is not implemented on wasm");
+}
+
+extern "C" FCDECL2(VOID, RhpCheckedAssignRef, Object **dst, Object *ref)
+{
+    PORTABILITY_ASSERT("RhpCheckedAssignRef is not implemented on wasm");
+}
+
+extern "C" FCDECL2(VOID, RhpByRefAssignRef, Object **dst, Object *ref)
+{
+    PORTABILITY_ASSERT("RhpByRefAssignRef is not implemented on wasm");
+}
+
 extern "C" void RhpInterfaceDispatchAVLocation1()
 {
     PORTABILITY_ASSERT("RhpInterfaceDispatchAVLocation1 is not implemented on wasm");
@@ -375,6 +401,12 @@ int StompWriteBarrierResize(bool isRuntimeSuspended, bool bReqUpperBoundsCheck)
 void FlushWriteBarrierInstructionCache()
 {
     PORTABILITY_ASSERT("FlushWriteBarrierInstructionCache is not implemented on wasm");
+}
+
+EXTERN_C Thread * JIT_InitPInvokeFrame(InlinedCallFrame *pFrame)
+{
+    PORTABILITY_ASSERT("JIT_InitPInvokeFrame is not implemented on wasm");
+    return nullptr;
 }
 
 void _DacGlobals::Initialize()

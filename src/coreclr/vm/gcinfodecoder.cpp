@@ -2182,7 +2182,7 @@ template <typename GcInfoEncoding> void TGcInfoDecoder<GcInfoEncoding>::ReportRe
     _ASSERTE( !"NYI" );
 }
 
-OBJECTREF* GcInfoDecoder::GetCapturedRegister(
+template <typename GcInfoEncoding> OBJECTREF* TGcInfoDecoder<GcInfoEncoding>::GetCapturedRegister(
     int             regNum,
     PREGDISPLAY     pRD
     )
