@@ -13273,12 +13273,17 @@ PCODE UnsafeJitFunction(PrepareCodeConfig* config,
     LPWSTR interpreterConfig;
     IfFailThrow(CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_Interpreter, &interpreterConfig));
 
-    if ((interpreterConfig != NULL) && !interpreterMgr->LoadInterpreter())
+    if (
+#ifndef TARGET_WASM
+        (interpreterConfig != NULL) &&
+#endif
+        !interpreterMgr->LoadInterpreter())
     {
         EEPOLICY_HANDLE_FATAL_ERROR_WITH_MESSAGE(COR_E_EXECUTIONENGINE, W("Failed to load interpreter"));
     }
 #endif // FEATURE_INTERPRETER
 
+#ifndef TARGET_WASM
     EEJitManager *jitMgr = ExecutionManager::GetEEJitManager();
     if (!jitMgr->LoadJIT())
     {
@@ -13298,6 +13303,7 @@ PCODE UnsafeJitFunction(PrepareCodeConfig* config,
         EEPOLICY_HANDLE_FATAL_ERROR_WITH_MESSAGE(COR_E_EXECUTIONENGINE, W("Failed to load JIT compiler"));
 #endif // ALLOW_SXS_JIT
     }
+#endif // !TARGET_WASM
 
 #ifdef _DEBUG
     // This is here so we can see the name and class easily in the debugger
@@ -13351,6 +13357,12 @@ PCODE UnsafeJitFunction(PrepareCodeConfig* config,
     }
 #endif // FEATURE_INTERPRETER
 
+#ifdef TARGET_WASM
+    if (!ret)
+    {
+        _ASSERTE(!"WASM cannot jit yet");
+    }
+#elif // !TARGET_WASM
     if (!ret)
     {
 #if defined(TARGET_AMD64) || defined(TARGET_ARM64)
@@ -13437,6 +13449,7 @@ PCODE UnsafeJitFunction(PrepareCodeConfig* config,
             break;
         }
     }
+#endif // !TARGET_WASM
 
 #ifdef _DEBUG
     static BOOL fHeartbeat = -1;
