@@ -74,13 +74,19 @@ if (CLR_CMAKE_HOST_UNIX AND NOT CLR_CMAKE_TARGET_ARCH_WASM)
     set(LIB_UNWINDER unwinder_wks)
 endif (CLR_CMAKE_HOST_UNIX AND NOT CLR_CMAKE_TARGET_ARCH_WASM)
 
+if (NOT CLR_CMAKE_TARGET_ARCH_WASM)
+    set(LIB_CORDBEE cordbee_wks)
+    set(LIB_INTEROP interop)
+    set(LIB_CDAC_CONTRACT_DESCRIPTOR cdac_contract_descriptor)
+endif (NOT CLR_CMAKE_TARGET_ARCH_WASM)
+
 # IMPORTANT! Please do not rearrange the order of the libraries. The linker on Linux is
 # order dependent and changing the order can result in undefined symbols in the shared
 # library.
 set(CORECLR_LIBRARIES
     utilcode
     ${START_LIBRARY_GROUP} # Start group of libraries that have circular references
-#    cordbee_wks
+    ${LIB_CORDBEE}
     debug-pal
     ${LIB_UNWINDER}
     v3binder
@@ -95,10 +101,10 @@ set(CORECLR_LIBRARIES
     utilcode
     v3binder
     System.Globalization.Native-Static
-#    interop
+    ${LIB_INTEROP}
     coreclrminipal
     gc_pal
-#    cdac_contract_descriptor
+    ${LIB_CDAC_CONTRACT_DESCRIPTOR}
 )
 
 if(CLR_CMAKE_TARGET_ARCH_AMD64)
