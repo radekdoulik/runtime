@@ -2148,6 +2148,7 @@ template <typename GcInfoEncoding> void TGcInfoDecoder<GcInfoEncoding>::ReportRe
 
     pCallBack(hCallBack, pObjRef, gcFlags DAC_ARG(DacSlotLocation(regNum, 0, false)));
 }
+
 #else // Unknown platform
 
 template <typename GcInfoEncoding> OBJECTREF* TGcInfoDecoder<GcInfoEncoding>::GetRegisterSlot(

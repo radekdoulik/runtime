@@ -1931,6 +1931,7 @@ MAPmmapAndRecord(
 #ifndef __wasm__
     _ASSERTE(OffsetWithinPage((off_t)pvBaseAddress) == 0);
 #endif
+
 #ifdef __APPLE__
     if ((prot & PROT_EXEC) != 0 && IsRunningOnMojaveHardenedRuntime())
     {
