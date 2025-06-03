@@ -321,8 +321,13 @@ private:
     CORINFO_METHOD_INFO* m_methodInfo;
 #ifdef DEBUG
     const char *m_methodName;
+#ifdef __wasm__
+    // enable verbose output on wasm temporarily
     bool m_verbose = true;
-#endif
+#else
+    bool m_verbose = false;
+#endif // __wasm__
+#endif // DEBUG
 
     static int32_t InterpGetMovForType(InterpType interpType, bool signExtend);
 
