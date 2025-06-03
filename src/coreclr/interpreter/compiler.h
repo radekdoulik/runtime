@@ -321,7 +321,7 @@ private:
     CORINFO_METHOD_INFO* m_methodInfo;
 #ifdef DEBUG
     const char *m_methodName;
-    bool m_verbose = false;
+    bool m_verbose = true;
 #endif
 
     static int32_t InterpGetMovForType(InterpType interpType, bool signExtend);
