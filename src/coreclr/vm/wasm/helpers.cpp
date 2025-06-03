@@ -94,11 +94,6 @@ extern "C" void RhpInitialInterfaceDispatch()
     PORTABILITY_ASSERT("RhpInitialInterfaceDispatch is not implemented on wasm");
 }
 
-extern "C" void STDCALL CallDescrWorkerInternal(CallDescrData * pCallDescrData)
-{
-    PORTABILITY_ASSERT("CallDescrWorkerInternal is not implemented on wasm");
-}
-
 unsigned FuncEvalFrame::GetFrameAttribs_Impl(void)
 {
     PORTABILITY_ASSERT("FuncEvalFrame::GetFrameAttribs_Impl is not implemented on wasm");

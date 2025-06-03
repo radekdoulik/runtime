@@ -162,6 +162,11 @@ namespace System
             }
         }
 
+        internal static int Test(int a)
+        {
+            return a + 42;
+        }
+
 #if MONO
         internal static unsafe void Setup(char** pNames, uint* pNameLengths, char** pValues, uint* pValueLengths, int count)
         {

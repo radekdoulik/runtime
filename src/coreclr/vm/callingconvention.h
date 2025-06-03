@@ -1801,9 +1801,9 @@ int ArgIteratorTemplate<ARGITERATOR_BASE>::GetNextOffset()
 #elif defined(TARGET_WASM)
     int cbArg = ALIGN_UP(StackElemSize(argSize), TARGET_POINTER_SIZE);
     int argOfs = TransitionBlock::GetOffsetOfArgs() + m_ofsStack;
-    
+
     m_ofsStack += cbArg;
-    
+
     return argOfs;
 #else
     PORTABILITY_ASSERT("ArgIteratorTemplate::GetNextOffset");

@@ -570,6 +570,19 @@ HRESULT CorHost2::CreateAppDomainWithManager(
 
     {
         GCX_COOP();
+        MethodDescCallSite test(METHOD__APPCONTEXT__TEST);
+
+        ARG_SLOT argsT[1];
+        argsT[0] =(INT64)11;
+
+        int rv = test.Call_RetI4(argsT);
+        printf("APPCONTEXT_TEST returned %d (expected 11 + 42 = 53)\n", rv);
+
+        MethodDescCallSite test2(METHOD__APPCONTEXT__TEST);
+        argsT[0] =(INT64)127;
+
+        rv = test2.Call_RetI4(argsT);
+        printf("APPCONTEXT_TEST returned %d (expected 127 + 42 = 169)\n", rv);
 
         MethodDescCallSite setup(METHOD__APPCONTEXT__SETUP);
 

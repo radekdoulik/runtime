@@ -13283,7 +13283,7 @@ PCODE UnsafeJitFunction(PrepareCodeConfig* config,
     }
 #endif // FEATURE_INTERPRETER
 
-#ifndef TARGET_WASM
+#ifdef FEATURE_JIT
     EEJitManager *jitMgr = ExecutionManager::GetEEJitManager();
     if (!jitMgr->LoadJIT())
     {
@@ -13303,7 +13303,7 @@ PCODE UnsafeJitFunction(PrepareCodeConfig* config,
         EEPOLICY_HANDLE_FATAL_ERROR_WITH_MESSAGE(COR_E_EXECUTIONENGINE, W("Failed to load JIT compiler"));
 #endif // ALLOW_SXS_JIT
     }
-#endif // !TARGET_WASM
+#endif // FEATURE_JIT
 
 #ifdef _DEBUG
     // This is here so we can see the name and class easily in the debugger
@@ -13357,12 +13357,12 @@ PCODE UnsafeJitFunction(PrepareCodeConfig* config,
     }
 #endif // FEATURE_INTERPRETER
 
-#ifdef TARGET_WASM
+#ifndef FEATURE_JIT
     if (!ret)
     {
-        _ASSERTE(!"WASM cannot jit yet");
+        _ASSERTE(!"this platform does not support JIT compilation");
     }
-#elif // !TARGET_WASM
+#else // !FEATURE_JIT
     if (!ret)
     {
 #if defined(TARGET_AMD64) || defined(TARGET_ARM64)
@@ -13449,7 +13449,7 @@ PCODE UnsafeJitFunction(PrepareCodeConfig* config,
             break;
         }
     }
-#endif // !TARGET_WASM
+#endif // !FEATURE_JIT
 
 #ifdef _DEBUG
     static BOOL fHeartbeat = -1;

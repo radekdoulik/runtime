@@ -1775,12 +1775,7 @@ static void LoadAndInitializeJIT(LPCWSTR pwzJitName DEBUGARG(LPCWSTR pwzJitPath)
     *phJit = NULL;
     *ppICorJitCompiler = NULL;
 
-#ifdef TARGET_WASM
-// we are statically linking the interpreter into the host
-    HRESULT hr = S_OK;
-#elif
     HRESULT hr = E_FAIL;
-#endif
 
 #ifdef _DEBUG
     if (pwzJitPath != NULL)
@@ -1839,11 +1834,7 @@ static void LoadAndInitializeJIT(LPCWSTR pwzJitName DEBUGARG(LPCWSTR pwzJitPath)
         EX_TRY
         {
             typedef void (* pjitStartup)(ICorJitHost*);
-#ifdef TARGET_WASM
-            pjitStartup jitStartupFn = jitStartup;
-#else
             pjitStartup jitStartupFn = (pjitStartup) GetProcAddress(*phJit, "jitStartup");
-#endif
 
             if (jitStartupFn)
             {
@@ -1855,11 +1846,7 @@ static void LoadAndInitializeJIT(LPCWSTR pwzJitName DEBUGARG(LPCWSTR pwzJitPath)
             }
 
             typedef ICorJitCompiler* (__stdcall* pGetJitFn)();
-#ifdef TARGET_WASM
-            pGetJitFn getJitFn = getJit;
-#else
             pGetJitFn getJitFn = (pGetJitFn) GetProcAddress(*phJit, "getJit");
-#endif
 
             if (getJitFn)
             {
@@ -1975,7 +1962,7 @@ BOOL EEJitManager::LoadJIT()
     IfFailThrow(CLRConfig::GetConfigValue(CLRConfig::INTERNAL_JitPath, &mainJitPath));
 #endif
     LoadAndInitializeJIT(ExecutionManager::GetJitName() DEBUGARG(mainJitPath), &m_JITCompiler, &newJitCompiler, &g_JitLoadData, getClrVmOs());
-#endif // !FEATURE_MERGE_JIT_AND_ENGINE
+#endif // !FEATURE_STATICALLY_LINKED
 
 #ifdef ALLOW_SXS_JIT
 
@@ -5172,7 +5159,7 @@ BOOL ExecutionManager::IsReadyToRunCode(PCODE currentPC)
     return FALSE;
 }
 
-#ifndef FEATURE_MERGE_JIT_AND_ENGINE
+#ifndef FEATURE_STATICALLY_LINKED
 /*********************************************************************/
 // This static method returns the name of the jit dll
 //
@@ -5193,7 +5180,7 @@ LPCWSTR ExecutionManager::GetJitName()
     return pwzJitName;
 }
 
-#endif // !FEATURE_MERGE_JIT_AND_ENGINE
+#endif // !FEATURE_STATICALLY_LINKED
 
 #ifdef FEATURE_INTERPRETER
 
