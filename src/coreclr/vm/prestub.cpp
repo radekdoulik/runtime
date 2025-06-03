@@ -2033,7 +2033,7 @@ extern "C" void STDCALL ExecuteInterpretedMethodWithArgs(TransitionBlock* pTrans
     if (pReturnValue != nullptr && returnValueSize > 0)
     {
         // Copy the return value from the stack to the returnValue pointer
-        memcpy(pReturnValue, sp, returnValueSize);
+        memcpy(pReturnValue, &retVal, returnValueSize);
     }
 
     frames.interpreterFrame.Pop();
