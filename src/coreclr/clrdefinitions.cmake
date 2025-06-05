@@ -273,11 +273,4 @@ function(set_target_definitions_to_custom_os_and_arch)
     target_compile_definitions(${TARGETDETAILS_TARGET} PRIVATE ARM_SOFTFP)
   endif()
 
-  set(CMAKE_STACKTRACE_DEPTH 10)
-  message(WARNING " TARGETDETAILS_ARCH: ${TARGETDETAILS_ARCH}")
-  if ((TARGETDETAILS_ARCH STREQUAL "wasm32") AND (TARGETDETAILS_OS STREQUAL "browser"))
-    target_compile_definitions(${TARGETDETAILS_TARGET} PRIVATE TARGET_BROWSER)
-    message(WARNING " TARGET_BROWSER")
-    endif()
-
 endfunction()
