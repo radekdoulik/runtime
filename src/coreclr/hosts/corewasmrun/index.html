@@ -21,7 +21,7 @@
         const originalConsoleLog = console.log;
         console.log = function(message) {
             originalConsoleLog(message);
-            fetch('/log=paltests-log.txt', {
+            fetch('/log=corewasmrun-log.txt', {
                 method: 'POST',
                 body: ('stdout: ' + message),
                 headers: {
@@ -35,7 +35,7 @@
         const originalConsoleError = console.error;
         console.error = function(message) {
             originalConsoleError(message);
-            fetch('/log=paltests-log.txt', {
+            fetch('/log=corewasmrun-log.txt', {
                 method: 'POST',
                 body: ('stderr: ' + message),
                 headers: {
