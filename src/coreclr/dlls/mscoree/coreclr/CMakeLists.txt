@@ -56,8 +56,14 @@ endif (CLR_CMAKE_HOST_WIN32)
 
 add_definitions(-DFX_VER_INTERNALNAME_STR=CoreCLR.dll)
 
+if (CLR_CMAKE_TARGET_ARCH_WASM)
+    set(LINK_TYPE STATIC)
+else()
+    set(LINK_TYPE SHARED)
+endif()
+
 add_library_clr(coreclr
-    SHARED
+    ${LINK_TYPE}
     ${CLR_SOURCES}
 )
 
