@@ -1771,7 +1771,7 @@ MAIN_LOOP:
                     printf("helperFtn: %p, helperArg: %p pIL: %p\n", helperFtn, helperArg, pILTargetMethod);
                     if (pILTargetMethod != nullptr) {
                         returnOffset = ip[1];
-                        int stackOffset = ALIGN_UP(120, INTERP_STACK_ALIGNMENT);
+                        int stackOffset = pMethod->allocaSize;
                         callArgsOffset = stackOffset;
 
                         LOCAL_VAR(stackOffset, void*) = helperArg;
@@ -1804,7 +1804,7 @@ MAIN_LOOP:
                     printf("helperFtn: %p, helperArg: %p pIL: %p\n", helperFtn, helperArg, pILTargetMethod);
                     if (pILTargetMethod != nullptr) {
                         returnOffset = ip[1];
-                        int stackOffset = ALIGN_UP(120, INTERP_STACK_ALIGNMENT);
+                        int stackOffset = pMethod->allocaSize;
                         callArgsOffset = stackOffset;
 
                         LOCAL_VAR(stackOffset, void*) = helperArg;
@@ -1839,10 +1839,7 @@ MAIN_LOOP:
                     printf("helperFtn: %p, helperArg: %p pIL: %p\n", helperFtn, helperArg, pILTargetMethod);
                     if (pILTargetMethod != nullptr) {
                         returnOffset = ip[1];
-                        // we need to put the helperArg on stack for the call of the interpreted method
-                        // 120 here is a hack, I think we will need to calculate the value in the interpreter compiler
-                        // and put it in ip array
-                        int stackOffset = ALIGN_UP(120, INTERP_STACK_ALIGNMENT);
+                        int stackOffset = pMethod->allocaSize;
                         callArgsOffset = stackOffset;
 
                         LOCAL_VAR(stackOffset, void*) = helperArg;
