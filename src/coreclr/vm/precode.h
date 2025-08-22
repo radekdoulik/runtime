@@ -384,7 +384,7 @@ struct FixupPrecode
     static const SIZE_T CodeSize = 32;
     static const int FixupCodeOffset = 10;
 #elif defined(TARGET_WASM)
-    static const SIZE_T CodeSize = 2*sizeof(void*);
+    static const SIZE_T CodeSize = 3*sizeof(void*);
     static const int FixupCodeOffset = 0;
 #endif // TARGET_AMD64
 

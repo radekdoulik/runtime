@@ -173,7 +173,7 @@ inline void SetFirstArgReg(T_CONTEXT *context, TADDR value)
 
 inline TADDR GetFirstArgReg(T_CONTEXT *context)
 {
-    PORTABILITY_ASSERT("GetFirstArgReg is not implemented on wasm");
+    // WASM-TODO: look at how this is used and possibly modify callers to be aware about wasm/interpreter scenario
     return 0;
 }
 

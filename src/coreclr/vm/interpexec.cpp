@@ -213,12 +213,22 @@ static OBJECTREF CreateMultiDimArray(MethodTable* arrayClass, int8_t* stack, int
 #define LOCAL_VAR(offset,type) (*LOCAL_VAR_ADDR(offset, type))
 #define NULL_CHECK(o) do { if ((o) == NULL) { COMPlusThrow(kNullReferenceException); } } while (0)
 
-template <typename THelper> static THelper GetPossiblyIndirectHelper(const InterpMethod *pMethod, int32_t _data)
+template <typename THelper> static THelper GetPossiblyIndirectHelper(const InterpMethod *pMethod, int32_t _data, MethodDesc **pILTargetMethod = NULL)
 {
     InterpHelperData data;
     memcpy(&data, &_data, sizeof(int32_t));
 
     void *addr = pMethod->pDataItems[data.addressDataItemIndex];
+#ifdef TARGET_WASM
+    if (pILTargetMethod != nullptr) {
+        Precode* precode = (Precode*)((int8_t*) addr - GetOsPageSize());
+        _ASSERTE(Precode::IsValidType(precode->GetType()));
+        *pILTargetMethod = precode->GetMethodDesc();
+        if (*pILTargetMethod != nullptr && (*pILTargetMethod)->CanBeInterpreted())
+            return nullptr;
+        *pILTargetMethod = nullptr;
+    }
+#endif // TARGET_WASM
     switch (data.accessType) {
         case IAT_VALUE:
             return (THelper)addr;
@@ -1755,8 +1765,21 @@ MAIN_LOOP:
 
                 case INTOP_CALL_HELPER_P_P:
                 {
-                    HELPER_FTN_P_P helperFtn = GetPossiblyIndirectHelper<HELPER_FTN_P_P>(pMethod, ip[2]);
+                    MethodDesc *pILTargetMethod;
+                    HELPER_FTN_P_P helperFtn = GetPossiblyIndirectHelper<HELPER_FTN_P_P>(pMethod, ip[2], &pILTargetMethod);
                     void* helperArg = pMethod->pDataItems[ip[3]];
+                    printf("helperFtn: %p, helperArg: %p pIL: %p\n", helperFtn, helperArg, pILTargetMethod);
+                    if (pILTargetMethod != nullptr) {
+                        returnOffset = ip[1];
+                        int stackOffset = ALIGN_UP(120, INTERP_STACK_ALIGNMENT);
+                        callArgsOffset = stackOffset;
+
+                        LOCAL_VAR(stackOffset, void*) = helperArg;
+
+                        targetMethod = pILTargetMethod;
+                        ip += 4;
+                        goto CALL_INTERP_METHOD;
+                    }
 
                     LOCAL_VAR(ip[1], void*) = helperFtn(helperArg);
                     ip += 4;
@@ -1775,8 +1798,21 @@ MAIN_LOOP:
 
                 case INTOP_CALL_HELPER_P_PS:
                 {
-                    HELPER_FTN_P_PP helperFtn = GetPossiblyIndirectHelper<HELPER_FTN_P_PP>(pMethod, ip[3]);
+                    MethodDesc *pILTargetMethod;
+                    HELPER_FTN_P_PP helperFtn = GetPossiblyIndirectHelper<HELPER_FTN_P_PP>(pMethod, ip[3], &pILTargetMethod);
                     void* helperArg = pMethod->pDataItems[ip[4]];
+                    printf("helperFtn: %p, helperArg: %p pIL: %p\n", helperFtn, helperArg, pILTargetMethod);
+                    if (pILTargetMethod != nullptr) {
+                        returnOffset = ip[1];
+                        int stackOffset = ALIGN_UP(120, INTERP_STACK_ALIGNMENT);
+                        callArgsOffset = stackOffset;
+
+                        LOCAL_VAR(stackOffset, void*) = helperArg;
+
+                        targetMethod = pILTargetMethod;
+                        ip += 5;
+                        goto CALL_INTERP_METHOD;
+                    }
 
                     LOCAL_VAR(ip[1], void*) = helperFtn(helperArg, LOCAL_VAR(ip[2], void*));
                     ip += 5;
@@ -1798,8 +1834,23 @@ MAIN_LOOP:
                     InterpGenericLookup *pLookup = (InterpGenericLookup*)&pMethod->pDataItems[ip[4]];
                     void* helperArg = DoGenericLookup(LOCAL_VAR(ip[2], void*), pLookup);
 
-                    HELPER_FTN_P_P helperFtn = GetPossiblyIndirectHelper<HELPER_FTN_P_P>(pMethod, ip[3]);
+                    MethodDesc *pILTargetMethod;
+                    HELPER_FTN_P_P helperFtn = GetPossiblyIndirectHelper<HELPER_FTN_P_P>(pMethod, ip[3], &pILTargetMethod);
+                    printf("helperFtn: %p, helperArg: %p pIL: %p\n", helperFtn, helperArg, pILTargetMethod);
+                    if (pILTargetMethod != nullptr) {
+                        returnOffset = ip[1];
+                        // we need to put the helperArg on stack for the call of the interpreted method
+                        // 120 here is a hack, I think we will need to calculate the value in the interpreter compiler
+                        // and put it in ip array
+                        int stackOffset = ALIGN_UP(120, INTERP_STACK_ALIGNMENT);
+                        callArgsOffset = stackOffset;
 
+                        LOCAL_VAR(stackOffset, void*) = helperArg;
+
+                        targetMethod = pILTargetMethod;
+                        ip += 5;
+                        goto CALL_INTERP_METHOD;
+                    }
                     LOCAL_VAR(ip[1], void*) = helperFtn(helperArg);
                     ip += 5;
                     break;
@@ -1973,7 +2024,7 @@ CALL_INTERP_METHOD:
                             pInterpreterFrame->SetTopInterpMethodContextFrame(pFrame);
                             GCX_PREEMP();
                             // Attempt to setup the interpreter code for the target method.
-                            if ((targetMethod->IsIL() || targetMethod->IsNoMetadata()) && !targetMethod->IsUnboxingStub())
+                            if (targetMethod->CanBeInterpreted())
                             {
                                 targetMethod->PrepareInitialCode(CallerGCMode::Coop);
                             }

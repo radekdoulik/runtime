@@ -10848,6 +10848,7 @@ void CEECodeGenInfo::getHelperFtn(CorInfoHelpFunc    ftnNum,               /* IN
                     activeCodeVersion = manager->GetActiveILCodeVersion(helperMD).GetActiveNativeCodeVersion(helperMD);
                 }
 
+#ifndef TARGET_WASM
                 // activeCodeVersion may be a null version if the current active ILCodeVersion
                 // does not have an associated NativeCodeVersion
                 if (!activeCodeVersion.IsNull() && activeCodeVersion.IsFinalTier())
@@ -10865,6 +10866,7 @@ void CEECodeGenInfo::getHelperFtn(CorInfoHelpFunc    ftnNum,               /* IN
                         goto exit;
                     }
                 }
+#endif // !TARGET_WASM
             }
 
             if (IndirectionAllowedForJitHelper(ftnNum))

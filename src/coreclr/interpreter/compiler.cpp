@@ -969,7 +969,7 @@ class InterpGcSlotAllocator
     unsigned m_slotTableSize;
 
 #ifdef DEBUG
-    bool m_verbose;
+    bool m_verbose = true;
 #endif
 
     GcSlotId* LocateGcSlotTableEntry(uint32_t offsetBytes, GcSlotFlags flags)
@@ -1258,7 +1258,7 @@ InterpCompiler::InterpCompiler(COMP_HANDLE compHnd,
                             /* includeReturnType */ false,
                             /* includeThis */ false);
 
-    if (InterpConfig.InterpDump().contains(compHnd, m_methodHnd, m_classHnd, &m_methodInfo->args))
+    //if (InterpConfig.InterpDump().contains(compHnd, m_methodHnd, m_classHnd, &m_methodInfo->args))
         m_verbose = true;
 #endif
 }

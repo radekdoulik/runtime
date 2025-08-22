@@ -2076,6 +2076,10 @@ public:
 
 #ifndef DACCESS_COMPILE
 public:
+    inline bool CanBeInterpreted()
+    {
+        return (IsIL() || IsNoMetadata()) && !IsUnboxingStub();
+    }
     PCODE PrepareInitialCode(CallerGCMode callerGCMode = CallerGCMode::Unknown);
     PCODE PrepareCode(PrepareCodeConfig* pConfig);
 

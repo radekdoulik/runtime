@@ -225,7 +225,14 @@ void * DispatchCallSimple(
     callDescrData.pTarget = pTargetAddress;
 
 #ifdef TARGET_WASM
-    PORTABILITY_ASSERT("wasm need to fill call description data");
+    if (*(int*)pTargetAddress == 2) // fixup precode
+    {
+        callDescrData.pMD = *(MethodDesc**)((int8_t*)pTargetAddress + 4);
+        callDescrData.pTransitionBlock = (TransitionBlock*)((int8_t*)pSrc - sizeof(TransitionBlock));
+        callDescrData.nArgsSize = numStackSlotsToCopy*8;
+    } else {
+        PORTABILITY_ASSERT("wasm need to fill call description data");
+    }
 #endif
 
     if ((dwDispatchCallSimpleFlags & DispatchCallSimple_CatchHandlerFoundNotification) != 0)

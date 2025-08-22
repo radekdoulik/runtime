@@ -2,6 +2,8 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 //
 
+#include "runtimehandles.h"
+
 extern "C" void STDCALL CallCountingStubCode()
 {
     PORTABILITY_ASSERT("CallCountingStubCode is not implemented on wasm");
@@ -117,7 +119,8 @@ void FuncEvalFrame::UpdateRegDisplay_Impl(const PREGDISPLAY pRD, bool updateFloa
 
 void InlinedCallFrame::UpdateRegDisplay_Impl(const PREGDISPLAY pRD, bool updateFloats)
 {
-    PORTABILITY_ASSERT("InlinedCallFrame::UpdateRegDisplay_Impl is not implemented on wasm");
+    // WASM-TODO: check what we need to do here
+    // PORTABILITY_ASSERT("InlinedCallFrame::UpdateRegDisplay_Impl is not implemented on wasm");
 }
 
 void FaultingExceptionFrame::UpdateRegDisplay_Impl(const PREGDISPLAY pRD, bool updateFloats)
@@ -483,8 +486,56 @@ void InvokeCalliStub(PCODE ftn, CallStubHeader *stubHeaderTemplate, int8_t *pArg
     PORTABILITY_ASSERT("InvokeCalliStub is not implemented on wasm");
 }
 
+void CallWasmFuncVoidI32(void (*fn)(int), int8_t* pArgs)
+{
+    (*fn)(((int*)pArgs)[0]);
+}
+
+void CallWasmFuncVoidI32I32(void (*fn)(int, int), int8_t* pArgs)
+{
+    (*fn)(((int*)pArgs)[0], ((int*)pArgs)[2]);
+}
+
+void CallWasmFuncVoidI32I32I32(void (*fn)(int, int, int), int8_t* pArgs)
+{
+    (*fn)(((int*)pArgs)[0], ((int*)pArgs)[2], ((int*)pArgs)[4]);
+}
+
 void InvokeCompiledMethod(MethodDesc *pMD, int8_t *pArgs, int8_t *pRet, PCODE target)
 {
+    MetaSig sig(pMD);
+    int numArgs = sig.NumFixedArgs() + (sig.HasThis() ? 1 : 0);
+
+    if (pMD->IsPInvoke())
+    {
+        PInvokeMethodDesc *ndMD = (PInvokeMethodDesc*)pMD;
+        printf("InvokeCompiledMethod: %s.%s --> %s [entrypoint]\n", pMD->m_pszDebugClassName, pMD->m_pszDebugMethodName, ndMD->GetEntrypointName());
+        printf("IsQCall: %d\n", ndMD->IsQCall());
+        if (ndMD->IsQCall()) {
+            printf("QCallResolveDllImport(pNMD->GetEntrypointName()): %p\n", QCallResolveDllImport(ndMD->GetEntrypointName()));
+            switch(numArgs) {
+                case 1: {
+                        void (*fn1)(int) = (void (*)(int)) QCallResolveDllImport(ndMD->GetEntrypointName());
+                        CallWasmFuncVoidI32(fn1, pArgs);
+                    }
+                    break;
+                case 2: {
+                        void (*fn2)(int, int) = (void (*)(int, int)) QCallResolveDllImport(ndMD->GetEntrypointName());
+                        CallWasmFuncVoidI32I32(fn2, pArgs);
+                    }
+                    break;
+                case 3: {
+                        void (*fn3)(int, int, int) = (void (*)(int, int, int)) QCallResolveDllImport(ndMD->GetEntrypointName());
+                        CallWasmFuncVoidI32I32I32(fn3, pArgs);
+                    }
+                    break;
+                default:
+                    PORTABILITY_ASSERT("InvokeCompiledMethod: PInvokeImportPrecode with more than 2 arguments needs to be implemented");
+                    break;
+            }
+            return;
+        }
+    }
     PORTABILITY_ASSERT("Attempted to execute non-interpreter code from interpreter on wasm, this is not yet implemented");
 }
 
