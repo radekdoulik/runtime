@@ -347,27 +347,9 @@ extern "C" void RhpVTableOffsetDispatchAVLocation()
     PORTABILITY_ASSERT("RhpVTableOffsetDispatchAVLocation is not implemented on wasm");
 }
 
-EXTERN_C FCDECL2(Object*, RhpNewVariableSizeObject, CORINFO_CLASS_HANDLE typeHnd_, INT_PTR size)
-{
-    PORTABILITY_ASSERT("RhpNewVariableSizeObject is not implemented on wasm");
-    return nullptr;
-}
-
 EXTERN_C FCDECL1(Object*, RhpNewMaybeFrozen, CORINFO_CLASS_HANDLE typeHnd_)
 {
     PORTABILITY_ASSERT("RhpNewMaybeFrozen is not implemented on wasm");
-    return nullptr;
-}
-
-EXTERN_C FCDECL2(Object*, RhpNewArrayFast, CORINFO_CLASS_HANDLE typeHnd_, INT_PTR size)
-{
-    PORTABILITY_ASSERT("RhpNewArrayFast is not implemented on wasm");
-    return nullptr;
-}
-
-EXTERN_C FCDECL2(Object*, RhpNewPtrArrayFast, CORINFO_CLASS_HANDLE typeHnd_, INT_PTR size)
-{
-    PORTABILITY_ASSERT("RhpNewPtrArrayFast is not implemented on wasm");
     return nullptr;
 }
 

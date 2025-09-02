@@ -919,6 +919,7 @@ elseif(CLR_CMAKE_TARGET_ARCH_WASM)
         ${ARCH_SOURCES_DIR}/helpers.cpp
         exceptionhandling.cpp
         gcinfodecoder.cpp
+        ${RUNTIME_DIR}/${ARCH_SOURCES_DIR}/AllocFast.cpp
     )
 endif()
 
