@@ -82,9 +82,9 @@
   <Import Project="$(MSBuildThisFileDirectory)tests.android.targets"
           Condition="'$(TargetOS)' == 'android'" />
   <Import Project="$(MSBuildThisFileDirectory)tests.ioslike.targets"
-          Condition="'$(TargetsAppleMobile)' == 'true'" />
+          Condition="'$(TargetsAppleMobile)' == 'true' and '$(RuntimeFlavor)' == 'Mono'" />
   <Import Project="$(MSBuildThisFileDirectory)tests.browser.targets"
-          Condition="'$(TargetOS)' == 'browser'" />
+          Condition="'$(TargetOS)' == 'browser' and '$(RuntimeFlavor)' == 'Mono'" />
   <Import Project="$(MSBuildThisFileDirectory)tests.wasi.targets"
           Condition="'$(TargetOS)' == 'wasi'" />
 

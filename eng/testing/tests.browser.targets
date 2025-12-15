@@ -1,6 +1,6 @@
 <Project TreatAsLocalProperty="ArchiveTests">
   <PropertyGroup>
-    <_UseWasmSymbolicator Condition="'$(TestTrimming)' != 'true'">true</_UseWasmSymbolicator>
+    <_UseWasmSymbolicator Condition="'$(TestTrimming)' != 'true' and '$(RuntimeFlavor)' == 'Mono'">true</_UseWasmSymbolicator>
   </PropertyGroup>
 
   <Import Project="tests.wasm.targets" />
