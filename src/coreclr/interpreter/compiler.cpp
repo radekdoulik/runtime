@@ -2841,12 +2841,12 @@ void InterpCompiler::EmitBinaryArithmeticOp(int32_t opBase)
     }
     else
     {
-        if (type1 == StackTypeByRef)
+        if (type1 == StackTypeByRef || type1 == StackTypeLocalVariableAddress)
         {
             m_pStackPointer[-2].BashStackTypeToI_ForLocalVariableAddress();
             type1 = m_pStackPointer[-2].GetStackType();
         }
-        if (type2 == StackTypeByRef)
+        if (type2 == StackTypeByRef || type2 == StackTypeLocalVariableAddress)
         {
             m_pStackPointer[-1].BashStackTypeToI_ForLocalVariableAddress();
             type2 = m_pStackPointer[-1].GetStackType();
@@ -2934,6 +2934,17 @@ void InterpCompiler::EmitBinaryArithmeticOp(int32_t opBase)
         {
             EmitConv(m_pStackPointer - 2, StackTypeI8, InterpOpForWideningArgForImplicitUpcast((InterpOpcode)opBase));
             type1 = StackTypeI8;
+        }
+#else
+        if (type1 == StackTypeI4 && type2 == StackTypeI8)
+        {
+            EmitConv(m_pStackPointer - 1, StackTypeI4, INTOP_MOV_8);
+            type2 = StackTypeI4;
+        }
+        else if (type1 == StackTypeI8 && type2 == StackTypeI4)
+        {
+            EmitConv(m_pStackPointer - 2, StackTypeI4, INTOP_MOV_8);
+            type1 = StackTypeI4;
         }
 #endif
         if (type1 == StackTypeR8 && type2 == StackTypeR4)
