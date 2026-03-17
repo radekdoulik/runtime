@@ -2,7 +2,7 @@ project(corerun)
 
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
-set(CORERUN_IN_BROWSER 0)
+set(CORERUN_IN_BROWSER 1)
 
 if(CLR_CMAKE_HOST_WIN32)
     add_definitions(-DFX_VER_INTERNALNAME_STR=corerun.exe)
