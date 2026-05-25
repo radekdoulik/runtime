@@ -49,6 +49,13 @@ function libBrowserHostFactory() {
         $libBrowserHostFn: libBrowserHost,
         $BROWSER_HOST__postset: "BROWSER_HOST.selfInitialize()",
         $BROWSER_HOST__deps: commonDeps,
+        CoreClrWasmDebugOnBreakpointHit: (eventAddress, eventLength) => {
+            if (typeof globalThis.CoreClrWasmDebugOnBreakpointHit === "function") {
+                return globalThis.CoreClrWasmDebugOnBreakpointHit(eventAddress >>> 0, eventLength >>> 0) | 0;
+            }
+
+            return 0;
+        },
     };
 
     let assignExportsBuilder = "";
