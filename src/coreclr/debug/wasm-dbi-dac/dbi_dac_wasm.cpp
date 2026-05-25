@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 #include <new>
+#include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -91,6 +92,8 @@ int32_t ReadRuntimeContractDescriptor(
     WasmDacDataTarget& dataTarget,
     uint32_t runtimeBase,
     ContractDescriptorLayout* descriptor);
+
+int32_t SendRuntimeCommand(const char* command, uint32_t commandLength);
 
 class WasmDacDataTarget final :
     public ICLRDataTarget,
@@ -403,6 +406,8 @@ extern "C" HRESULT DacDbiInterfaceInstance(
     IUnknown* metaDataLookup,
     void** dacDbi);
 
+extern "C" int32_t coreclr_wasm_dbi_dac_transport_get_last_event(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress);
+
 namespace
 {
 HRESULT WasmDacDataTarget::ReadTargetMemory(
@@ -504,6 +509,19 @@ int32_t ReadRuntimeContractDescriptor(
     }
 
     return Success;
+}
+
+int32_t SendRuntimeCommand(const char* command, uint32_t commandLength)
+{
+    if ((command == nullptr && commandLength != 0) || commandLength >= MaxTransportMessageBytes)
+    {
+        return InvalidArgument;
+    }
+
+    int32_t result = coreclr_wasm_dbi_dac_send_ipc_to_runtime(
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(command)),
+        commandLength);
+    return result == Success ? Success : result;
 }
 }
 
@@ -798,6 +816,64 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_session_create_process()
     }
 
     return result;
+}
+
+extern "C" int32_t coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_name(uint32_t nameAddress, uint32_t nameLength)
+{
+    if (g_cordb == nullptr || (nameAddress == 0 && nameLength != 0))
+    {
+        return E_FAIL;
+    }
+
+    static constexpr char Prefix[] = "dbi-command:set-breakpoint:name=";
+    constexpr uint32_t PrefixLength = sizeof(Prefix) - 1;
+    if (nameLength == 0 || nameLength >= MaxTransportMessageBytes - PrefixLength)
+    {
+        return InvalidArgument;
+    }
+
+    char command[MaxTransportMessageBytes];
+    memcpy(command, Prefix, PrefixLength);
+    memcpy(command + PrefixLength, reinterpret_cast<void*>(static_cast<uintptr_t>(nameAddress)), nameLength);
+    return SendRuntimeCommand(command, PrefixLength + nameLength);
+}
+
+extern "C" int32_t coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_token(uint32_t methodToken, uint32_t ilOffset)
+{
+    if (g_cordb == nullptr)
+    {
+        return E_FAIL;
+    }
+
+    if (methodToken == 0 || ilOffset != 0)
+    {
+        return E_NOTIMPL;
+    }
+
+    char command[MaxTransportMessageBytes];
+    int written = snprintf(command, sizeof(command), "dbi-command:set-breakpoint:token=0x%08x", methodToken);
+    if (written < 0 || static_cast<uint32_t>(written) >= MaxTransportMessageBytes)
+    {
+        return InvalidArgument;
+    }
+
+    return SendRuntimeCommand(command, static_cast<uint32_t>(written));
+}
+
+extern "C" int32_t coreclr_wasm_dbi_dac_dbi_continue()
+{
+    if (g_cordb == nullptr)
+    {
+        return E_FAIL;
+    }
+
+    static constexpr char ContinueCommand[] = "dbi-command:continue";
+    return SendRuntimeCommand(ContinueCommand, sizeof(ContinueCommand) - 1);
+}
+
+extern "C" int32_t coreclr_wasm_dbi_dac_dbi_poll_event(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
+{
+    return coreclr_wasm_dbi_dac_transport_get_last_event(bufferAddress, bufferLength, bytesWrittenAddress);
 }
 
 extern "C" int32_t coreclr_wasm_dbi_dac_dbi_session_destroy()

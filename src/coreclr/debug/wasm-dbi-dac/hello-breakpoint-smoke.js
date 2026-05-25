@@ -9,7 +9,7 @@ const { performance } = require("perf_hooks");
 const { pathToFileURL } = require("url");
 const { spawnSync } = require("child_process");
 
-const BreakpointCommand = "dbi-command:set-breakpoint:name=BreakHere";
+const BreakpointMethodName = "BreakHere";
 
 function fail(message) {
     throw new Error(message);
@@ -222,6 +222,18 @@ async function waitForBreakpointHit(runtimeExports) {
     return { hitCount: 0, event: "", copyResult: -1 };
 }
 
+function pollDbiEvent(debuggerInstance) {
+    const stack = debuggerInstance.exports.stackSave();
+    const eventAddress = debuggerInstance.exports.stackAlloc(256);
+    const bytesWrittenAddress = debuggerInstance.exports.stackAlloc(4);
+    const pollResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_poll_event(eventAddress, 256, bytesWrittenAddress);
+    const bytesWritten = new DataView(debuggerInstance.module.HEAPU8.buffer, bytesWrittenAddress, 4).getUint32(0, true);
+    const event = pollResult === 0 ? readAscii(debuggerInstance.module.HEAPU8, eventAddress, bytesWritten) : "";
+    debuggerInstance.exports.stackRestore(stack);
+
+    return { pollResult, event, bytesWritten };
+}
+
 async function main() {
     const coreclrObjDirectory = path.resolve(process.cwd(), process.argv[2] ?? "artifacts/obj/coreclr/browser.wasm.Debug");
     const repoRoot = path.resolve(__dirname, "../../../..");
@@ -240,6 +252,8 @@ async function main() {
     let debuggerInstance;
     let sawBreakpointBeforeContinue = false;
     let callbackEvent = "";
+    let dbiEventDuringCallback = { pollResult: -1, event: "", bytesWritten: 0 };
+    let continueDuringCallbackResult = -1;
 
     debuggerInstance = await loadDebugger(debuggerJsPath, (messageAddress, messageLength) => {
         const message = debuggerInstance.module.HEAPU8.slice(messageAddress, messageAddress + messageLength);
@@ -267,31 +281,49 @@ async function main() {
                 debuggerInstance.exports.stackRestore(stack);
 
                 if (event.includes("breakpoint-hit:name=BreakHere")) {
+                    dbiEventDuringCallback = pollDbiEvent(debuggerInstance);
+                    continueDuringCallbackResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_continue();
                     sawBreakpointBeforeContinue = true;
                 }
 
                 return receiveResult;
             };
 
-            const message = new TextEncoder().encode(BreakpointCommand);
+            const sessionCreateResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_session_create();
+            if (sessionCreateResult !== 0) {
+                fail(`failed to create DBI session: ${sessionCreateResult}`);
+            }
+
+            const methodName = new TextEncoder().encode(BreakpointMethodName);
             const stack = debuggerInstance.exports.stackSave();
-            const messageAddress = debuggerInstance.exports.stackAlloc(message.length);
-            writeBytes(debuggerInstance.module.HEAPU8, messageAddress, message);
-            const sendResult = debuggerInstance.module._coreclr_wasm_dbi_dac_transport_send_test_message(messageAddress, message.length);
+            const methodNameAddress = debuggerInstance.exports.stackAlloc(methodName.length);
+            writeBytes(debuggerInstance.module.HEAPU8, methodNameAddress, methodName);
+            const breakpointResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_name(methodNameAddress, methodName.length);
             debuggerInstance.exports.stackRestore(stack);
-            if (sendResult !== 0) {
-                fail(`failed to send breakpoint command: ${sendResult}`);
+            if (breakpointResult !== 0) {
+                fail(`failed to set breakpoint: ${breakpointResult}`);
             }
         });
 
         const result = await waitForBreakpointHit(runtimeExports);
+        const continueCount = runtimeExports.CoreClrWasmDebugGetContinueCount();
+        const sessionDestroyResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_session_destroy();
         result.callbackEvent = callbackEvent;
+        result.dbiEvent = dbiEventDuringCallback;
+        result.continueDuringCallbackResult = continueDuringCallbackResult;
+        result.continueCount = continueCount;
+        result.sessionDestroyResult = sessionDestroyResult;
         result.sawBreakpointBeforeContinue = sawBreakpointBeforeContinue;
         console.log(JSON.stringify(result, null, 2));
 
         if (result.hitCount !== 1 ||
             result.copyResult !== 0 ||
             !result.event.includes("breakpoint-hit:name=BreakHere") ||
+            dbiEventDuringCallback.pollResult !== 0 ||
+            !dbiEventDuringCallback.event.includes("breakpoint-hit:name=BreakHere") ||
+            continueDuringCallbackResult !== 0 ||
+            continueCount !== 1 ||
+            sessionDestroyResult !== 0 ||
             !sawBreakpointBeforeContinue) {
             fail("HelloWorld breakpoint was not reached");
         }

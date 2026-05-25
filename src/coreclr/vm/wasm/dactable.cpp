@@ -40,7 +40,10 @@ uint32_t g_wasmDebugLastEventLength;
 char g_wasmDebugBreakpointMethodName[64];
 uint32_t g_wasmDebugBreakpointMethodToken;
 bool g_wasmDebugBreakpointArmed;
+bool g_wasmDebugBreakpointStopped;
+bool g_wasmDebugContinueRequested;
 uint32_t g_wasmDebugBreakpointHitCount;
+uint32_t g_wasmDebugContinueCount;
 
 void SetWasmDebugEvent(const char* event)
 {
@@ -97,7 +100,25 @@ void ArmWasmDebugBreakpointFromCommand(const char* command)
     }
     g_wasmDebugBreakpointHitCount = 0;
     g_wasmDebugLastEventLength = 0;
+    g_wasmDebugBreakpointStopped = false;
+    g_wasmDebugContinueRequested = false;
+    g_wasmDebugContinueCount = 0;
     g_wasmDebugBreakpointArmed = true;
+}
+
+void ContinueWasmDebugBreakpointFromCommand(const char* command)
+{
+    static constexpr char ContinueCommand[] = "dbi-command:continue";
+    if (strcmp(command, ContinueCommand) != 0)
+    {
+        return;
+    }
+
+    if (g_wasmDebugBreakpointStopped)
+    {
+        g_wasmDebugContinueRequested = true;
+        g_wasmDebugContinueCount++;
+    }
 }
 
 void DacGlobals::InitializeEntries()
@@ -142,6 +163,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReceiveCommand(const uin
     }
     g_wasmDebugLastCommand[commandLength] = 0;
 
+    ContinueWasmDebugBreakpointFromCommand(reinterpret_cast<const char*>(g_wasmDebugLastCommand));
     ArmWasmDebugBreakpointFromCommand(reinterpret_cast<const char*>(g_wasmDebugLastCommand));
 
     return 0;
@@ -192,6 +214,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetBreakpointHitCount()
     return g_wasmDebugBreakpointHitCount;
 }
 
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetContinueCount()
+{
+    return g_wasmDebugContinueCount;
+}
+
 extern "C" void CoreClrWasmDebugMaybeHitInterpreterMethod(MethodDesc* methodDesc, uint32_t ilOffset)
 {
     if (!g_wasmDebugBreakpointArmed || methodDesc == nullptr || ilOffset != 0)
@@ -215,6 +242,8 @@ extern "C" void CoreClrWasmDebugMaybeHitInterpreterMethod(MethodDesc* methodDesc
     }
 
     g_wasmDebugBreakpointArmed = false;
+    g_wasmDebugBreakpointStopped = true;
+    g_wasmDebugContinueRequested = false;
     g_wasmDebugBreakpointHitCount++;
 
     char event[WasmDebugMessageBufferSize];
@@ -233,4 +262,6 @@ extern "C" void CoreClrWasmDebugMaybeHitInterpreterMethod(MethodDesc* methodDesc
         }
         return 0;
     }, g_wasmDebugLastEvent, g_wasmDebugLastEventLength);
+
+    g_wasmDebugBreakpointStopped = false;
 }
