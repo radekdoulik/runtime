@@ -45,12 +45,13 @@ uint32_t g_wasmDebugBreakpointHitCount;
 void SetWasmDebugEvent(const char* event)
 {
     size_t eventLength = strlen(event);
-    if (eventLength > WasmDebugMessageBufferSize)
+    if (eventLength >= WasmDebugMessageBufferSize)
     {
-        eventLength = WasmDebugMessageBufferSize;
+        eventLength = WasmDebugMessageBufferSize - 1;
     }
 
     memcpy(g_wasmDebugLastEvent, event, eventLength);
+    g_wasmDebugLastEvent[eventLength] = 0;
     g_wasmDebugLastEventLength = static_cast<uint32_t>(eventLength);
 }
 
@@ -225,4 +226,11 @@ extern "C" void CoreClrWasmDebugMaybeHitInterpreterMethod(MethodDesc* methodDesc
         methodToken,
         ilOffset);
     SetWasmDebugEvent(event);
+
+    EM_ASM_INT({
+        if (typeof globalThis.CoreClrWasmDebugOnBreakpointHit === "function") {
+            return globalThis.CoreClrWasmDebugOnBreakpointHit($0, $1) | 0;
+        }
+        return 0;
+    }, g_wasmDebugLastEvent, g_wasmDebugLastEventLength);
 }

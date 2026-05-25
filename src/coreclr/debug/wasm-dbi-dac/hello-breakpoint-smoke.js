@@ -163,8 +163,14 @@ async function loadAndRunRuntime(runtimeJsPath, appPath, sharedFrameworkPath, on
                 noExitRuntime: true,
                 arguments: ["-c", sharedFrameworkPath, appPath],
                 locateFile: fileName => path.join(runtimeDirectory, fileName),
-                print() {},
-                printErr() {},
+                print(text) {
+                    process.stdout.write(`${text}\n`);
+                },
+                printErr(text) {
+                    if (!String(text).startsWith("program exited (with status: 0), but keepRuntimeAlive()")) {
+                        process.stderr.write(`${text}\n`);
+                    }
+                },
                 instantiateWasm(imports, receiveInstance) {
                     const wasmPath = path.join(runtimeDirectory, "corerun.wasm");
                     WebAssembly.instantiate(fs.readFileSync(wasmPath), imports).then(({ instance, module }) => {
@@ -232,6 +238,8 @@ async function main() {
     let runtimeExports;
     let runtimeMemory;
     let debuggerInstance;
+    let sawBreakpointBeforeContinue = false;
+    let callbackEvent = "";
 
     debuggerInstance = await loadDebugger(debuggerJsPath, (messageAddress, messageLength) => {
         const message = debuggerInstance.module.HEAPU8.slice(messageAddress, messageAddress + messageLength);
@@ -243,28 +251,52 @@ async function main() {
         return result;
     });
 
-    await loadAndRunRuntime(runtimeJsPath, appPath, sharedFrameworkPath, instance => {
-        runtimeExports = instance.exports;
-        runtimeMemory = new Uint8Array(runtimeExports.memory.buffer);
+    try {
+        await loadAndRunRuntime(runtimeJsPath, appPath, sharedFrameworkPath, instance => {
+            runtimeExports = instance.exports;
+            runtimeMemory = new Uint8Array(runtimeExports.memory.buffer);
+            globalThis.CoreClrWasmDebugOnBreakpointHit = (eventAddress, eventLength) => {
+                const currentRuntimeMemory = new Uint8Array(runtimeExports.memory.buffer);
+                const event = readAscii(currentRuntimeMemory, eventAddress >>> 0, eventLength >>> 0);
+                callbackEvent = event;
+                const eventBytes = new TextEncoder().encode(event);
+                const stack = debuggerInstance.exports.stackSave();
+                const debuggerEventAddress = debuggerInstance.exports.stackAlloc(eventBytes.length);
+                writeBytes(debuggerInstance.module.HEAPU8, debuggerEventAddress, eventBytes);
+                const receiveResult = debuggerInstance.module._coreclr_wasm_dbi_dac_receive_runtime_event(debuggerEventAddress, eventBytes.length);
+                debuggerInstance.exports.stackRestore(stack);
 
-        const message = new TextEncoder().encode(BreakpointCommand);
-        const stack = debuggerInstance.exports.stackSave();
-        const messageAddress = debuggerInstance.exports.stackAlloc(message.length);
-        writeBytes(debuggerInstance.module.HEAPU8, messageAddress, message);
-        const sendResult = debuggerInstance.module._coreclr_wasm_dbi_dac_transport_send_test_message(messageAddress, message.length);
-        debuggerInstance.exports.stackRestore(stack);
-        if (sendResult !== 0) {
-            fail(`failed to send breakpoint command: ${sendResult}`);
+                if (event.includes("breakpoint-hit:name=BreakHere")) {
+                    sawBreakpointBeforeContinue = true;
+                }
+
+                return receiveResult;
+            };
+
+            const message = new TextEncoder().encode(BreakpointCommand);
+            const stack = debuggerInstance.exports.stackSave();
+            const messageAddress = debuggerInstance.exports.stackAlloc(message.length);
+            writeBytes(debuggerInstance.module.HEAPU8, messageAddress, message);
+            const sendResult = debuggerInstance.module._coreclr_wasm_dbi_dac_transport_send_test_message(messageAddress, message.length);
+            debuggerInstance.exports.stackRestore(stack);
+            if (sendResult !== 0) {
+                fail(`failed to send breakpoint command: ${sendResult}`);
+            }
+        });
+
+        const result = await waitForBreakpointHit(runtimeExports);
+        result.callbackEvent = callbackEvent;
+        result.sawBreakpointBeforeContinue = sawBreakpointBeforeContinue;
+        console.log(JSON.stringify(result, null, 2));
+
+        if (result.hitCount !== 1 ||
+            result.copyResult !== 0 ||
+            !result.event.includes("breakpoint-hit:name=BreakHere") ||
+            !sawBreakpointBeforeContinue) {
+            fail("HelloWorld breakpoint was not reached");
         }
-    });
-
-    const result = await waitForBreakpointHit(runtimeExports);
-    console.log(JSON.stringify(result, null, 2));
-
-    if (result.hitCount !== 1 ||
-        result.copyResult !== 0 ||
-        !result.event.includes("breakpoint-hit:name=BreakHere")) {
-        fail("HelloWorld breakpoint was not reached");
+    } finally {
+        delete globalThis.CoreClrWasmDebugOnBreakpointHit;
     }
 }
 
