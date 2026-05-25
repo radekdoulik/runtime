@@ -299,6 +299,31 @@ function pollDbiEventRecord(debuggerInstance) {
     return { pollResult, bytesWritten, record };
 }
 
+function readFrameRecord(memory, address) {
+    const view = new DataView(memory.buffer, address, 88);
+    return {
+        methodToken: view.getUint32(0, true),
+        ilOffset: view.getUint32(4, true),
+        interpreterIP: view.getUint32(8, true),
+        frameAddress: view.getUint32(12, true),
+        stackAddress: view.getUint32(16, true),
+        firstStackSlotI32: view.getInt32(20, true),
+        methodName: readNullTerminatedAscii(memory, address + 24, 64)
+    };
+}
+
+function pollDbiFrameRecord(debuggerInstance) {
+    const stack = debuggerInstance.exports.stackSave();
+    const recordAddress = debuggerInstance.exports.stackAlloc(88);
+    const bytesWrittenAddress = debuggerInstance.exports.stackAlloc(4);
+    const pollResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_poll_frame_record(recordAddress, 88, bytesWrittenAddress);
+    const bytesWritten = new DataView(debuggerInstance.module.HEAPU8.buffer, bytesWrittenAddress, 4).getUint32(0, true);
+    const record = pollResult === 0 ? readFrameRecord(debuggerInstance.module.HEAPU8, recordAddress) : null;
+    debuggerInstance.exports.stackRestore(stack);
+
+    return { pollResult, bytesWritten, record };
+}
+
 function readTestData(memory, address) {
     const view = new DataView(memory.buffer, address, 48);
     return {
@@ -345,6 +370,7 @@ async function main() {
     let callbackEvent = "";
     let dbiEventDuringCallback = { pollResult: -1, event: "", bytesWritten: 0 };
     let dbiEventRecordDuringCallback = { pollResult: -1, bytesWritten: 0, record: null };
+    let dbiFrameRecordDuringCallback = { pollResult: -1, bytesWritten: 0, record: null };
     let testDataDuringCallback = { readResult: -1, testData: null };
     let continueDuringCallbackResult = -1;
 
@@ -429,8 +455,28 @@ async function main() {
                         return receiveRecordResult;
                     }
 
+                    const frameRecordSize = runtimeExports.CoreClrWasmDebugGetLastFrameRecordSize();
+                    const runtimeFrameStack = runtimeExports.stackSave();
+                    const runtimeFrameRecordAddress = runtimeExports.stackAlloc(frameRecordSize);
+                    const copyFrameRecordResult = runtimeExports.CoreClrWasmDebugCopyLastFrameRecord(runtimeFrameRecordAddress, frameRecordSize);
+                    const frameRecordBytes = new Uint8Array(runtimeExports.memory.buffer).slice(runtimeFrameRecordAddress, runtimeFrameRecordAddress + frameRecordSize);
+                    runtimeExports.stackRestore(runtimeFrameStack);
+                    if (copyFrameRecordResult !== 0) {
+                        return copyFrameRecordResult;
+                    }
+
+                    const debuggerFrameStack = debuggerInstance.exports.stackSave();
+                    const debuggerFrameRecordAddress = debuggerInstance.exports.stackAlloc(frameRecordBytes.length);
+                    writeBytes(debuggerInstance.module.HEAPU8, debuggerFrameRecordAddress, frameRecordBytes);
+                    const receiveFrameRecordResult = debuggerInstance.module._coreclr_wasm_dbi_dac_receive_runtime_frame_record(debuggerFrameRecordAddress, frameRecordBytes.length);
+                    debuggerInstance.exports.stackRestore(debuggerFrameStack);
+                    if (receiveFrameRecordResult !== 0) {
+                        return receiveFrameRecordResult;
+                    }
+
                     dbiEventDuringCallback = pollDbiEvent(debuggerInstance);
                     dbiEventRecordDuringCallback = pollDbiEventRecord(debuggerInstance);
+                    dbiFrameRecordDuringCallback = pollDbiFrameRecord(debuggerInstance);
                     testDataDuringCallback = readDbiTestData(debuggerInstance);
                     continueDuringCallbackResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_continue();
                     sawBreakpointBeforeContinue = true;
@@ -467,6 +513,7 @@ async function main() {
         result.callbackEvent = callbackEvent;
         result.dbiEvent = dbiEventDuringCallback;
         result.dbiEventRecord = dbiEventRecordDuringCallback;
+        result.dbiFrameRecord = dbiFrameRecordDuringCallback;
         result.testDataAtBreakpoint = testDataDuringCallback;
         result.continueDuringCallbackResult = continueDuringCallbackResult;
         result.continueCount = continueCount;
@@ -485,6 +532,14 @@ async function main() {
             dbiEventRecordDuringCallback.record?.kind !== 1 ||
             dbiEventRecordDuringCallback.record?.methodName !== "BreakHere" ||
             dbiEventRecordDuringCallback.record?.message !== result.event ||
+            dbiFrameRecordDuringCallback.pollResult !== 0 ||
+            dbiFrameRecordDuringCallback.bytesWritten !== 88 ||
+            dbiFrameRecordDuringCallback.record?.methodName !== "BreakHere" ||
+            dbiFrameRecordDuringCallback.record?.methodToken !== dbiEventRecordDuringCallback.record?.methodToken ||
+            dbiFrameRecordDuringCallback.record?.ilOffset !== 0 ||
+            dbiFrameRecordDuringCallback.record?.interpreterIP === 0 ||
+            dbiFrameRecordDuringCallback.record?.frameAddress === 0 ||
+            dbiFrameRecordDuringCallback.record?.stackAddress === 0 ||
             testDataDuringCallback.readResult !== 0 ||
             testDataDuringCallback.testData?.magic !== 0x43445744 ||
             testDataDuringCallback.testData?.int32Value !== 123456789 ||

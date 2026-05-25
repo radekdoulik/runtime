@@ -18,7 +18,13 @@
 
 #if defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
 extern "C" void CoreClrWasmDebugMaybePatchInterpreterMethod(MethodDesc* methodDesc, uint32_t ilOffset, int32_t* ip);
-extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, int32_t* originalOpcode);
+extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
+    MethodDesc* methodDesc,
+    uint32_t ilOffset,
+    const int32_t* ip,
+    uintptr_t frameAddress,
+    uintptr_t stackAddress,
+    int32_t* originalOpcode);
 #endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
 
 struct InterpDispatchCacheEntry
@@ -1429,7 +1435,13 @@ SWITCH_OPCODE:
 #if defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
                     int32_t originalOpcode = 0;
                     if ((pThreadContext->m_bypassAddress == NULL) &&
-                        CoreClrWasmDebugHandleInterpreterBreakpoint(pFrame->startIp->Method->methodHnd, 0, ip, &originalOpcode))
+                        CoreClrWasmDebugHandleInterpreterBreakpoint(
+                            pFrame->startIp->Method->methodHnd,
+                            0,
+                            ip,
+                            reinterpret_cast<uintptr_t>(pFrame),
+                            reinterpret_cast<uintptr_t>(stack),
+                            &originalOpcode))
                     {
                         pThreadContext->SetBypass(ip, originalOpcode);
                     }

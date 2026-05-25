@@ -60,8 +60,20 @@ struct WasmDebugEventRecord
     char Message[256];
 };
 
+struct WasmDebugFrameRecord
+{
+    uint32_t MethodToken;
+    uint32_t ILOffset;
+    uint32_t InterpreterIP;
+    uint32_t FrameAddress;
+    uint32_t StackAddress;
+    int32_t FirstStackSlotI32;
+    char MethodName[64];
+};
+
 static_assert(sizeof(WasmDebugCommandRecord) == 80);
 static_assert(sizeof(WasmDebugEventRecord) == 340);
+static_assert(sizeof(WasmDebugFrameRecord) == 88);
 
 WasmDbiDacTestData g_wasmDbiDacTestData =
 {
@@ -77,6 +89,7 @@ uint32_t g_wasmDebugLastCommandLength;
 uint8_t g_wasmDebugLastEvent[WasmDebugMessageBufferSize];
 uint32_t g_wasmDebugLastEventLength;
 WasmDebugEventRecord g_wasmDebugLastEventRecord;
+WasmDebugFrameRecord g_wasmDebugLastFrameRecord;
 char g_wasmDebugBreakpointMethodName[64];
 uint32_t g_wasmDebugBreakpointMethodToken;
 bool g_wasmDebugBreakpointArmed;
@@ -125,6 +138,21 @@ void SetWasmDebugBreakpointEventRecord(MethodDesc* methodDesc, uint32_t ilOffset
     CopyWasmDebugString(g_wasmDebugLastEventRecord.Message, sizeof(g_wasmDebugLastEventRecord.Message), reinterpret_cast<const char*>(g_wasmDebugLastEvent));
 }
 
+void SetWasmDebugBreakpointFrameRecord(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, uintptr_t frameAddress, uintptr_t stackAddress)
+{
+    memset(&g_wasmDebugLastFrameRecord, 0, sizeof(g_wasmDebugLastFrameRecord));
+    g_wasmDebugLastFrameRecord.MethodToken = methodDesc->GetMemberDef();
+    g_wasmDebugLastFrameRecord.ILOffset = ilOffset;
+    g_wasmDebugLastFrameRecord.InterpreterIP = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(ip));
+    g_wasmDebugLastFrameRecord.FrameAddress = static_cast<uint32_t>(frameAddress);
+    g_wasmDebugLastFrameRecord.StackAddress = static_cast<uint32_t>(stackAddress);
+    if (stackAddress != 0)
+    {
+        g_wasmDebugLastFrameRecord.FirstStackSlotI32 = *reinterpret_cast<int32_t*>(stackAddress);
+    }
+    CopyWasmDebugString(g_wasmDebugLastFrameRecord.MethodName, sizeof(g_wasmDebugLastFrameRecord.MethodName), methodDesc->GetName());
+}
+
 void RestoreWasmDebugBreakpointPatch()
 {
     if (g_wasmDebugBreakpointPatchActive && g_wasmDebugBreakpointAddress != nullptr)
@@ -158,6 +186,7 @@ void ArmWasmDebugBreakpoint(uint32_t methodToken, const char* methodName)
     g_wasmDebugBreakpointHitCount = 0;
     g_wasmDebugLastEventLength = 0;
     memset(&g_wasmDebugLastEventRecord, 0, sizeof(g_wasmDebugLastEventRecord));
+    memset(&g_wasmDebugLastFrameRecord, 0, sizeof(g_wasmDebugLastFrameRecord));
     g_wasmDebugBreakpointStopped = false;
     g_wasmDebugContinueRequested = false;
     g_wasmDebugContinueCount = 0;
@@ -382,6 +411,22 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugCopyLastEventRecord(uint
     return 0;
 }
 
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetLastFrameRecordSize()
+{
+    return sizeof(WasmDebugFrameRecord);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugCopyLastFrameRecord(uint8_t* buffer, uint32_t bufferLength)
+{
+    if (buffer == nullptr || bufferLength < sizeof(WasmDebugFrameRecord))
+    {
+        return -1;
+    }
+
+    memcpy(buffer, &g_wasmDebugLastFrameRecord, sizeof(g_wasmDebugLastFrameRecord));
+    return 0;
+}
+
 extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetBreakpointHitCount()
 {
     return g_wasmDebugBreakpointHitCount;
@@ -406,7 +451,13 @@ extern "C" void CoreClrWasmDebugMaybePatchInterpreterMethod(MethodDesc* methodDe
     *ip = INTOP_BREAKPOINT;
 }
 
-extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, int32_t* originalOpcode)
+extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
+    MethodDesc* methodDesc,
+    uint32_t ilOffset,
+    const int32_t* ip,
+    uintptr_t frameAddress,
+    uintptr_t stackAddress,
+    int32_t* originalOpcode)
 {
     if (!g_wasmDebugBreakpointPatchActive ||
         ip == nullptr ||
@@ -436,6 +487,7 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(MethodDesc* methodDe
         ilOffset);
     SetWasmDebugEvent(event);
     SetWasmDebugBreakpointEventRecord(methodDesc, ilOffset);
+    SetWasmDebugBreakpointFrameRecord(methodDesc, ilOffset, ip, frameAddress, stackAddress);
 
     EM_ASM_INT({
         if (typeof globalThis.CoreClrWasmDebugOnBreakpointHit === "function") {
