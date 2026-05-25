@@ -96,6 +96,7 @@ static_assert(sizeof(void*) == sizeof(uint32_t));
 
 ICorDebug* g_cordb = nullptr;
 bool g_connectedToRuntime = false;
+uint32_t g_connectedRuntimeBase = 0;
 uint8_t g_lastRuntimeEvent[MaxTransportMessageBytes];
 uint32_t g_lastRuntimeEventLength = 0;
 WasmDebugEventRecord g_lastRuntimeEventRecord{};
@@ -421,6 +422,7 @@ extern "C" HRESULT DacDbiInterfaceInstance(
     void** dacDbi);
 
 extern "C" int32_t coreclr_wasm_dbi_dac_transport_get_last_event(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress);
+extern "C" int32_t coreclr_wasm_dbi_dac_probe_test_data(uint32_t runtimeBase, uint32_t probeOutAddress);
 
 namespace
 {
@@ -832,9 +834,9 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_session_create_process()
     return result;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_dbi_connect_runtime()
+extern "C" int32_t coreclr_wasm_dbi_dac_dbi_connect_runtime(uint32_t runtimeBase)
 {
-    if (g_cordb == nullptr)
+    if (g_cordb == nullptr || runtimeBase == 0)
     {
         return E_FAIL;
     }
@@ -845,6 +847,7 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_connect_runtime()
     }
 
     g_connectedToRuntime = true;
+    g_connectedRuntimeBase = runtimeBase;
     g_lastRuntimeEventLength = 0;
     memset(&g_lastRuntimeEventRecord, 0, sizeof(g_lastRuntimeEventRecord));
     return S_OK;
@@ -853,9 +856,20 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_connect_runtime()
 extern "C" int32_t coreclr_wasm_dbi_dac_dbi_disconnect_runtime()
 {
     g_connectedToRuntime = false;
+    g_connectedRuntimeBase = 0;
     g_lastRuntimeEventLength = 0;
     memset(&g_lastRuntimeEventRecord, 0, sizeof(g_lastRuntimeEventRecord));
     return S_OK;
+}
+
+extern "C" int32_t coreclr_wasm_dbi_dac_dbi_read_test_data(uint32_t probeOutAddress)
+{
+    if (g_cordb == nullptr || !g_connectedToRuntime)
+    {
+        return E_FAIL;
+    }
+
+    return coreclr_wasm_dbi_dac_probe_test_data(g_connectedRuntimeBase, probeOutAddress);
 }
 
 extern "C" int32_t coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_name(uint32_t nameAddress, uint32_t nameLength)
@@ -954,6 +968,7 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_session_destroy()
     ICorDebug* cordb = g_cordb;
     g_cordb = nullptr;
     g_connectedToRuntime = false;
+    g_connectedRuntimeBase = 0;
     g_lastRuntimeEventLength = 0;
     memset(&g_lastRuntimeEventRecord, 0, sizeof(g_lastRuntimeEventRecord));
 

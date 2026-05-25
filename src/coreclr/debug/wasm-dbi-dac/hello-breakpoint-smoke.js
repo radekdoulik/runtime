@@ -25,6 +25,10 @@ function writeBytes(memory, address, bytes) {
     memory.set(bytes, address);
 }
 
+function writeUint64(memory, address, value) {
+    new DataView(memory.buffer).setBigUint64(address, BigInt(value), true);
+}
+
 function readAscii(memory, address, byteCount) {
     let result = "";
     for (let index = 0; index < byteCount; index++) {
@@ -81,9 +85,34 @@ async function loadDebugger(debuggerJsPath, sendToRuntime) {
 
         moduleConfig.instantiateWasm = (imports, receiveInstance) => {
             const hostImports = {
-                read_target_memory() { return -1; },
-                get_symbol_address() { return -1; },
-                get_target_module_base() { return -1; },
+                read_target_memory(targetAddress, debuggerAddress, byteCount) {
+                    if (typeof globalThis.CoreClrWasmDebugReadTargetMemory !== "function") {
+                        return -1;
+                    }
+
+                    return globalThis.CoreClrWasmDebugReadTargetMemory(targetAddress >>> 0, debuggerAddress >>> 0, byteCount >>> 0);
+                },
+                get_symbol_address(baseAddress, symbolNameAddress, symbolNameLength, addressOutAddress) {
+                    if (typeof globalThis.CoreClrWasmDebugGetSymbolAddress !== "function") {
+                        return -1;
+                    }
+
+                    return globalThis.CoreClrWasmDebugGetSymbolAddress(
+                        baseAddress >>> 0,
+                        symbolNameAddress >>> 0,
+                        symbolNameLength >>> 0,
+                        addressOutAddress >>> 0);
+                },
+                get_target_module_base(imageNameAddress, imageNameCharCount, addressOutAddress) {
+                    if (typeof globalThis.CoreClrWasmDebugGetTargetModuleBase !== "function") {
+                        return -1;
+                    }
+
+                    return globalThis.CoreClrWasmDebugGetTargetModuleBase(
+                        imageNameAddress >>> 0,
+                        imageNameCharCount >>> 0,
+                        addressOutAddress >>> 0);
+                },
                 send_ipc_to_runtime(messageAddress, messageLength) {
                     return sendToRuntime(messageAddress >>> 0, messageLength >>> 0);
                 }
@@ -268,6 +297,32 @@ function pollDbiEventRecord(debuggerInstance) {
     return { pollResult, bytesWritten, record };
 }
 
+function readTestData(memory, address) {
+    const view = new DataView(memory.buffer, address, 48);
+    return {
+        magic: view.getUint32(0, true),
+        int32Value: view.getInt32(4, true),
+        doubleValue: view.getFloat64(8, true),
+        vectorLanes: [
+            view.getUint32(16, true),
+            view.getUint32(20, true),
+            view.getUint32(24, true),
+            view.getUint32(28, true)
+        ],
+        message: readNullTerminatedAscii(memory, address + 32, 16)
+    };
+}
+
+function readDbiTestData(debuggerInstance) {
+    const stack = debuggerInstance.exports.stackSave();
+    const testDataAddress = debuggerInstance.exports.stackAlloc(48);
+    const readResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_read_test_data(testDataAddress);
+    const testData = readResult === 0 ? readTestData(debuggerInstance.module.HEAPU8, testDataAddress) : null;
+    debuggerInstance.exports.stackRestore(stack);
+
+    return { readResult, testData };
+}
+
 async function main() {
     const coreclrObjDirectory = path.resolve(process.cwd(), process.argv[2] ?? "artifacts/obj/coreclr/browser.wasm.Debug");
     const repoRoot = path.resolve(__dirname, "../../../..");
@@ -288,6 +343,7 @@ async function main() {
     let callbackEvent = "";
     let dbiEventDuringCallback = { pollResult: -1, event: "", bytesWritten: 0 };
     let dbiEventRecordDuringCallback = { pollResult: -1, bytesWritten: 0, record: null };
+    let testDataDuringCallback = { readResult: -1, testData: null };
     let continueDuringCallbackResult = -1;
 
     debuggerInstance = await loadDebugger(debuggerJsPath, (messageAddress, messageLength) => {
@@ -304,6 +360,38 @@ async function main() {
         await loadAndRunRuntime(runtimeJsPath, appPath, sharedFrameworkPath, instance => {
             runtimeExports = instance.exports;
             runtimeMemory = new Uint8Array(runtimeExports.memory.buffer);
+            globalThis.CoreClrWasmDebugReadTargetMemory = (targetAddress, debuggerAddress, byteCount) => {
+                const currentRuntimeMemory = new Uint8Array(runtimeExports.memory.buffer);
+                if (targetAddress + byteCount > currentRuntimeMemory.length ||
+                    debuggerAddress + byteCount > debuggerInstance.module.HEAPU8.length) {
+                    return -1;
+                }
+
+                debuggerInstance.module.HEAPU8.set(currentRuntimeMemory.subarray(targetAddress, targetAddress + byteCount), debuggerAddress);
+                return 0;
+            };
+            globalThis.CoreClrWasmDebugGetSymbolAddress = (baseAddress, symbolNameAddress, symbolNameLength, addressOutAddress) => {
+                const symbolName = readAscii(debuggerInstance.module.HEAPU8, symbolNameAddress, symbolNameLength);
+                const symbolAddress =
+                    symbolName === "DotNetRuntimeContractDescriptor" ? runtimeExports.GetDotNetRuntimeContractDescriptor() >>> 0 :
+                    symbolName === "g_dacTable" ? runtimeExports.Getg_dacTable() >>> 0 :
+                    symbolName === "WasmDbiDacTestData" ? runtimeExports.GetWasmDbiDacTestData() >>> 0 :
+                    0;
+                if (symbolAddress === 0 || addressOutAddress + 8 > debuggerInstance.module.HEAPU8.length) {
+                    return -1;
+                }
+
+                writeUint64(debuggerInstance.module.HEAPU8, addressOutAddress, symbolAddress);
+                return 0;
+            };
+            globalThis.CoreClrWasmDebugGetTargetModuleBase = (imageNameAddress, imageNameCharCount, addressOutAddress) => {
+                if (addressOutAddress + 8 > debuggerInstance.module.HEAPU8.length) {
+                    return -1;
+                }
+
+                writeUint64(debuggerInstance.module.HEAPU8, addressOutAddress, 1);
+                return 0;
+            };
             globalThis.CoreClrWasmDebugOnBreakpointHit = (eventAddress, eventLength) => {
                 const currentRuntimeMemory = new Uint8Array(runtimeExports.memory.buffer);
                 const event = readAscii(currentRuntimeMemory, eventAddress >>> 0, eventLength >>> 0);
@@ -337,6 +425,7 @@ async function main() {
 
                     dbiEventDuringCallback = pollDbiEvent(debuggerInstance);
                     dbiEventRecordDuringCallback = pollDbiEventRecord(debuggerInstance);
+                    testDataDuringCallback = readDbiTestData(debuggerInstance);
                     continueDuringCallbackResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_continue();
                     sawBreakpointBeforeContinue = true;
                 }
@@ -349,7 +438,7 @@ async function main() {
                 fail(`failed to create DBI session: ${sessionCreateResult}`);
             }
 
-            const connectResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_connect_runtime();
+            const connectResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_connect_runtime(1);
             if (connectResult !== 0) {
                 fail(`failed to connect DBI session to runtime: ${connectResult}`);
             }
@@ -372,6 +461,7 @@ async function main() {
         result.callbackEvent = callbackEvent;
         result.dbiEvent = dbiEventDuringCallback;
         result.dbiEventRecord = dbiEventRecordDuringCallback;
+        result.testDataAtBreakpoint = testDataDuringCallback;
         result.continueDuringCallbackResult = continueDuringCallbackResult;
         result.continueCount = continueCount;
         result.disconnectResult = disconnectResult;
@@ -389,6 +479,11 @@ async function main() {
             dbiEventRecordDuringCallback.record?.kind !== 1 ||
             dbiEventRecordDuringCallback.record?.methodName !== "BreakHere" ||
             dbiEventRecordDuringCallback.record?.message !== result.event ||
+            testDataDuringCallback.readResult !== 0 ||
+            testDataDuringCallback.testData?.magic !== 0x43445744 ||
+            testDataDuringCallback.testData?.int32Value !== 123456789 ||
+            testDataDuringCallback.testData?.doubleValue !== 1234.5 ||
+            testDataDuringCallback.testData?.message !== "wasm-dbi-dac" ||
             continueDuringCallbackResult !== 0 ||
             continueCount !== 1 ||
             disconnectResult !== 0 ||
@@ -398,10 +493,13 @@ async function main() {
         }
     } finally {
         delete globalThis.CoreClrWasmDebugOnBreakpointHit;
+        delete globalThis.CoreClrWasmDebugGetTargetModuleBase;
+        delete globalThis.CoreClrWasmDebugGetSymbolAddress;
+        delete globalThis.CoreClrWasmDebugReadTargetMemory;
     }
 }
 
 main().catch(error => {
     console.error(error.stack || error);
-    process.exitCode = 1;
+    process.exit(1);
 });
