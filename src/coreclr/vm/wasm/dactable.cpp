@@ -12,6 +12,8 @@
 
 DLLEXPORT DacGlobals g_dacTable;
 
+extern "C" int32_t CoreClrWasmDebugOnBreakpointHit(uint32_t eventAddress, uint32_t eventLength);
+
 struct WasmDbiDacTestData
 {
     uint32_t Magic;
@@ -489,12 +491,9 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     SetWasmDebugBreakpointEventRecord(methodDesc, ilOffset);
     SetWasmDebugBreakpointFrameRecord(methodDesc, ilOffset, ip, frameAddress, stackAddress);
 
-    EM_ASM_INT({
-        if (typeof globalThis.CoreClrWasmDebugOnBreakpointHit === "function") {
-            return globalThis.CoreClrWasmDebugOnBreakpointHit($0, $1) | 0;
-        }
-        return 0;
-    }, g_wasmDebugLastEvent, g_wasmDebugLastEventLength);
+    CoreClrWasmDebugOnBreakpointHit(
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(g_wasmDebugLastEvent)),
+        g_wasmDebugLastEventLength);
 
     g_wasmDebugBreakpointStopped = false;
     return true;

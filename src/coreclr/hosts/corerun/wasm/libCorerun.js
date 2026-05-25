@@ -34,6 +34,13 @@ function libCoreRunFactory() {
         },
         $CORERUN__postset: "CORERUN.selfInitialize()",
         $CORERUN__deps: commonDeps,
+        CoreClrWasmDebugOnBreakpointHit: (eventAddress, eventLength) => {
+            if (typeof globalThis.CoreClrWasmDebugOnBreakpointHit === "function") {
+                return globalThis.CoreClrWasmDebugOnBreakpointHit(eventAddress >>> 0, eventLength >>> 0) | 0;
+            }
+
+            return 0;
+        },
         BrowserHost_ShutdownDotnet: (exitCode) => _corerun_shutdown(exitCode),
         BrowserHost_ExternalAssemblyProbe: (pathPtr, outDataStartPtr, outSize) => {
             function asUint8Array(bufferSource) {
