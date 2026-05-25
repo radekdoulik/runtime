@@ -324,6 +324,30 @@ function pollDbiFrameRecord(debuggerInstance) {
     return { pollResult, bytesWritten, record };
 }
 
+function pollDbiProcessState(debuggerInstance) {
+    const stack = debuggerInstance.exports.stackSave();
+    const stateAddress = debuggerInstance.exports.stackAlloc(40);
+    const bytesWrittenAddress = debuggerInstance.exports.stackAlloc(4);
+    const pollResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_poll_process_state(stateAddress, 40, bytesWrittenAddress);
+    const bytesWritten = new DataView(debuggerInstance.module.HEAPU8.buffer, bytesWrittenAddress, 4).getUint32(0, true);
+    const view = new DataView(debuggerInstance.module.HEAPU8.buffer, stateAddress, 40);
+    const state = pollResult === 0 ? {
+        sessionCreated: view.getUint32(0, true),
+        connected: view.getUint32(4, true),
+        runtimeBase: view.getUint32(8, true),
+        syntheticProcessId: view.getUint32(12, true),
+        hasRealCordbProcess: view.getUint32(16, true),
+        lastEventKind: view.getUint32(20, true),
+        lastMethodToken: view.getUint32(24, true),
+        lastILOffset: view.getUint32(28, true),
+        breakpointHitCount: view.getUint32(32, true),
+        continueCount: view.getUint32(36, true)
+    } : null;
+    debuggerInstance.exports.stackRestore(stack);
+
+    return { pollResult, bytesWritten, state };
+}
+
 function readTestData(memory, address) {
     const view = new DataView(memory.buffer, address, 48);
     return {
@@ -371,6 +395,7 @@ async function main() {
     let dbiEventDuringCallback = { pollResult: -1, event: "", bytesWritten: 0 };
     let dbiEventRecordDuringCallback = { pollResult: -1, bytesWritten: 0, record: null };
     let dbiFrameRecordDuringCallback = { pollResult: -1, bytesWritten: 0, record: null };
+    let dbiProcessStateDuringCallback = { pollResult: -1, bytesWritten: 0, state: null };
     let testDataDuringCallback = { readResult: -1, testData: null };
     let continueDuringCallbackResult = -1;
 
@@ -477,6 +502,7 @@ async function main() {
                     dbiEventDuringCallback = pollDbiEvent(debuggerInstance);
                     dbiEventRecordDuringCallback = pollDbiEventRecord(debuggerInstance);
                     dbiFrameRecordDuringCallback = pollDbiFrameRecord(debuggerInstance);
+                    dbiProcessStateDuringCallback = pollDbiProcessState(debuggerInstance);
                     testDataDuringCallback = readDbiTestData(debuggerInstance);
                     continueDuringCallbackResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_continue();
                     sawBreakpointBeforeContinue = true;
@@ -514,6 +540,7 @@ async function main() {
         result.dbiEvent = dbiEventDuringCallback;
         result.dbiEventRecord = dbiEventRecordDuringCallback;
         result.dbiFrameRecord = dbiFrameRecordDuringCallback;
+        result.dbiProcessState = dbiProcessStateDuringCallback;
         result.testDataAtBreakpoint = testDataDuringCallback;
         result.continueDuringCallbackResult = continueDuringCallbackResult;
         result.continueCount = continueCount;
@@ -540,6 +567,15 @@ async function main() {
             dbiFrameRecordDuringCallback.record?.interpreterIP === 0 ||
             dbiFrameRecordDuringCallback.record?.frameAddress === 0 ||
             dbiFrameRecordDuringCallback.record?.stackAddress === 0 ||
+            dbiProcessStateDuringCallback.pollResult !== 0 ||
+            dbiProcessStateDuringCallback.bytesWritten !== 40 ||
+            dbiProcessStateDuringCallback.state?.sessionCreated !== 1 ||
+            dbiProcessStateDuringCallback.state?.connected !== 1 ||
+            dbiProcessStateDuringCallback.state?.runtimeBase !== 1 ||
+            dbiProcessStateDuringCallback.state?.syntheticProcessId !== 1 ||
+            dbiProcessStateDuringCallback.state?.hasRealCordbProcess !== 0 ||
+            dbiProcessStateDuringCallback.state?.lastEventKind !== 1 ||
+            dbiProcessStateDuringCallback.state?.lastMethodToken !== dbiEventRecordDuringCallback.record?.methodToken ||
             testDataDuringCallback.readResult !== 0 ||
             testDataDuringCallback.testData?.magic !== 0x43445744 ||
             testDataDuringCallback.testData?.int32Value !== 123456789 ||

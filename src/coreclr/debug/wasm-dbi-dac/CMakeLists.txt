@@ -48,6 +48,7 @@ set(WASM_DBI_DAC_EXPORTED_FUNCTIONS
   _coreclr_wasm_dbi_dac_dbi_poll_event
   _coreclr_wasm_dbi_dac_dbi_poll_event_record
   _coreclr_wasm_dbi_dac_dbi_poll_frame_record
+  _coreclr_wasm_dbi_dac_dbi_poll_process_state
   _coreclr_wasm_dbi_dac_dbi_read_test_data
   _coreclr_wasm_dbi_dac_dbi_session_create
   _coreclr_wasm_dbi_dac_dbi_session_create_process

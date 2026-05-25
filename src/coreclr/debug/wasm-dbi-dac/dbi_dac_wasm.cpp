@@ -116,6 +116,20 @@ struct WasmDebugFrameRecord
     char MethodName[64];
 };
 
+struct WasmDbiProcessState
+{
+    uint32_t SessionCreated;
+    uint32_t Connected;
+    uint32_t RuntimeBase;
+    uint32_t SyntheticProcessId;
+    uint32_t HasRealCordbProcess;
+    uint32_t LastEventKind;
+    uint32_t LastMethodToken;
+    uint32_t LastILOffset;
+    uint32_t BreakpointHitCount;
+    uint32_t ContinueCount;
+};
+
 static_assert(sizeof(ContractDescriptorLayout) == 32);
 static_assert(sizeof(ContractPointerDataProbe) == 8);
 static_assert(sizeof(TestDataProbe) == 48);
@@ -123,11 +137,13 @@ static_assert(sizeof(DbiControlProbe) == 16);
 static_assert(sizeof(WasmDebugCommandRecord) == 80);
 static_assert(sizeof(WasmDebugEventRecord) == 340);
 static_assert(sizeof(WasmDebugFrameRecord) == 88);
+static_assert(sizeof(WasmDbiProcessState) == 40);
 static_assert(sizeof(void*) == sizeof(uint32_t));
 
 ICorDebug* g_cordb = nullptr;
 bool g_connectedToRuntime = false;
 uint32_t g_connectedRuntimeBase = 0;
+uint32_t g_syntheticProcessId = 1;
 uint8_t g_lastRuntimeEvent[MaxTransportMessageBytes];
 uint32_t g_lastRuntimeEventLength = 0;
 WasmDebugEventRecord g_lastRuntimeEventRecord{};
@@ -1019,6 +1035,36 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_poll_frame_record(uint32_t bufferAdd
     }
 
     memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bufferAddress)), &g_lastRuntimeFrameRecord, recordSize);
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &recordSize, sizeof(recordSize));
+    return S_OK;
+}
+
+extern "C" int32_t coreclr_wasm_dbi_dac_dbi_poll_process_state(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
+{
+    if (bytesWrittenAddress == 0 || bufferAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    uint32_t recordSize = sizeof(WasmDbiProcessState);
+    if (bufferLength < recordSize)
+    {
+        return BufferTooSmall;
+    }
+
+    WasmDbiProcessState state{};
+    state.SessionCreated = g_cordb != nullptr ? 1 : 0;
+    state.Connected = g_connectedToRuntime ? 1 : 0;
+    state.RuntimeBase = g_connectedRuntimeBase;
+    state.SyntheticProcessId = g_connectedToRuntime ? g_syntheticProcessId : 0;
+    state.HasRealCordbProcess = 0;
+    state.LastEventKind = g_lastRuntimeEventRecord.Kind;
+    state.LastMethodToken = g_lastRuntimeEventRecord.MethodToken;
+    state.LastILOffset = g_lastRuntimeEventRecord.ILOffset;
+    state.BreakpointHitCount = g_lastRuntimeEventRecord.HitCount;
+    state.ContinueCount = g_lastRuntimeEventRecord.ContinueCount;
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bufferAddress)), &state, sizeof(state));
     memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &recordSize, sizeof(recordSize));
     return S_OK;
 }
