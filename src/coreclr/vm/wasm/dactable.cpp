@@ -25,6 +25,25 @@ static_assert(sizeof(WasmDbiDacTestData) == 48);
 
 constexpr uint32_t WasmDebugMessageBufferSize = 256;
 
+enum class WasmDebugEventKind : uint32_t
+{
+    None = 0,
+    Breakpoint = 1,
+};
+
+struct WasmDebugEventRecord
+{
+    uint32_t Kind;
+    uint32_t MethodToken;
+    uint32_t ILOffset;
+    uint32_t HitCount;
+    uint32_t ContinueCount;
+    char MethodName[64];
+    char Message[256];
+};
+
+static_assert(sizeof(WasmDebugEventRecord) == 340);
+
 WasmDbiDacTestData g_wasmDbiDacTestData =
 {
     0x43445744,
@@ -38,6 +57,7 @@ uint8_t g_wasmDebugLastCommand[WasmDebugMessageBufferSize];
 uint32_t g_wasmDebugLastCommandLength;
 uint8_t g_wasmDebugLastEvent[WasmDebugMessageBufferSize];
 uint32_t g_wasmDebugLastEventLength;
+WasmDebugEventRecord g_wasmDebugLastEventRecord;
 char g_wasmDebugBreakpointMethodName[64];
 uint32_t g_wasmDebugBreakpointMethodToken;
 bool g_wasmDebugBreakpointArmed;
@@ -60,6 +80,30 @@ void SetWasmDebugEvent(const char* event)
     memcpy(g_wasmDebugLastEvent, event, eventLength);
     g_wasmDebugLastEvent[eventLength] = 0;
     g_wasmDebugLastEventLength = static_cast<uint32_t>(eventLength);
+}
+
+void CopyWasmDebugString(char* destination, size_t destinationLength, const char* source)
+{
+    size_t sourceLength = strlen(source);
+    if (sourceLength >= destinationLength)
+    {
+        sourceLength = destinationLength - 1;
+    }
+
+    memcpy(destination, source, sourceLength);
+    destination[sourceLength] = 0;
+}
+
+void SetWasmDebugBreakpointEventRecord(MethodDesc* methodDesc, uint32_t ilOffset)
+{
+    memset(&g_wasmDebugLastEventRecord, 0, sizeof(g_wasmDebugLastEventRecord));
+    g_wasmDebugLastEventRecord.Kind = static_cast<uint32_t>(WasmDebugEventKind::Breakpoint);
+    g_wasmDebugLastEventRecord.MethodToken = methodDesc->GetMemberDef();
+    g_wasmDebugLastEventRecord.ILOffset = ilOffset;
+    g_wasmDebugLastEventRecord.HitCount = g_wasmDebugBreakpointHitCount;
+    g_wasmDebugLastEventRecord.ContinueCount = g_wasmDebugContinueCount;
+    CopyWasmDebugString(g_wasmDebugLastEventRecord.MethodName, sizeof(g_wasmDebugLastEventRecord.MethodName), methodDesc->GetName());
+    CopyWasmDebugString(g_wasmDebugLastEventRecord.Message, sizeof(g_wasmDebugLastEventRecord.Message), reinterpret_cast<const char*>(g_wasmDebugLastEvent));
 }
 
 void RestoreWasmDebugBreakpointPatch()
@@ -118,6 +162,7 @@ void ArmWasmDebugBreakpointFromCommand(const char* command)
     }
     g_wasmDebugBreakpointHitCount = 0;
     g_wasmDebugLastEventLength = 0;
+    memset(&g_wasmDebugLastEventRecord, 0, sizeof(g_wasmDebugLastEventRecord));
     g_wasmDebugBreakpointStopped = false;
     g_wasmDebugContinueRequested = false;
     g_wasmDebugContinueCount = 0;
@@ -252,6 +297,22 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugCopyLastEvent(uint8_t* b
     return 0;
 }
 
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetLastEventRecordSize()
+{
+    return sizeof(WasmDebugEventRecord);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugCopyLastEventRecord(uint8_t* buffer, uint32_t bufferLength)
+{
+    if (buffer == nullptr || bufferLength < sizeof(WasmDebugEventRecord))
+    {
+        return -1;
+    }
+
+    memcpy(buffer, &g_wasmDebugLastEventRecord, sizeof(g_wasmDebugLastEventRecord));
+    return 0;
+}
+
 extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetBreakpointHitCount()
 {
     return g_wasmDebugBreakpointHitCount;
@@ -305,6 +366,7 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(MethodDesc* methodDe
         methodToken,
         ilOffset);
     SetWasmDebugEvent(event);
+    SetWasmDebugBreakpointEventRecord(methodDesc, ilOffset);
 
     EM_ASM_INT({
         if (typeof globalThis.CoreClrWasmDebugOnBreakpointHit === "function") {

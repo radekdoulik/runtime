@@ -34,6 +34,15 @@ function readAscii(memory, address, byteCount) {
     return result;
 }
 
+function readNullTerminatedAscii(memory, address, byteCount) {
+    let result = "";
+    for (let index = 0; index < byteCount && memory[address + index] !== 0; index++) {
+        result += String.fromCharCode(memory[address + index]);
+    }
+
+    return result;
+}
+
 async function loadDebugger(debuggerJsPath, sendToRuntime) {
     const debuggerDirectory = path.dirname(debuggerJsPath);
     const source = fs.readFileSync(debuggerJsPath, "utf8");
@@ -234,6 +243,31 @@ function pollDbiEvent(debuggerInstance) {
     return { pollResult, event, bytesWritten };
 }
 
+function readEventRecord(memory, address) {
+    const view = new DataView(memory.buffer, address, 340);
+    return {
+        kind: view.getUint32(0, true),
+        methodToken: view.getUint32(4, true),
+        ilOffset: view.getUint32(8, true),
+        hitCount: view.getUint32(12, true),
+        continueCount: view.getUint32(16, true),
+        methodName: readNullTerminatedAscii(memory, address + 20, 64),
+        message: readNullTerminatedAscii(memory, address + 84, 256)
+    };
+}
+
+function pollDbiEventRecord(debuggerInstance) {
+    const stack = debuggerInstance.exports.stackSave();
+    const recordAddress = debuggerInstance.exports.stackAlloc(340);
+    const bytesWrittenAddress = debuggerInstance.exports.stackAlloc(4);
+    const pollResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_poll_event_record(recordAddress, 340, bytesWrittenAddress);
+    const bytesWritten = new DataView(debuggerInstance.module.HEAPU8.buffer, bytesWrittenAddress, 4).getUint32(0, true);
+    const record = pollResult === 0 ? readEventRecord(debuggerInstance.module.HEAPU8, recordAddress) : null;
+    debuggerInstance.exports.stackRestore(stack);
+
+    return { pollResult, bytesWritten, record };
+}
+
 async function main() {
     const coreclrObjDirectory = path.resolve(process.cwd(), process.argv[2] ?? "artifacts/obj/coreclr/browser.wasm.Debug");
     const repoRoot = path.resolve(__dirname, "../../../..");
@@ -253,6 +287,7 @@ async function main() {
     let sawBreakpointBeforeContinue = false;
     let callbackEvent = "";
     let dbiEventDuringCallback = { pollResult: -1, event: "", bytesWritten: 0 };
+    let dbiEventRecordDuringCallback = { pollResult: -1, bytesWritten: 0, record: null };
     let continueDuringCallbackResult = -1;
 
     debuggerInstance = await loadDebugger(debuggerJsPath, (messageAddress, messageLength) => {
@@ -281,7 +316,27 @@ async function main() {
                 debuggerInstance.exports.stackRestore(stack);
 
                 if (event.includes("breakpoint-hit:name=BreakHere")) {
+                    const recordSize = runtimeExports.CoreClrWasmDebugGetLastEventRecordSize();
+                    const runtimeStack = runtimeExports.stackSave();
+                    const runtimeRecordAddress = runtimeExports.stackAlloc(recordSize);
+                    const copyRecordResult = runtimeExports.CoreClrWasmDebugCopyLastEventRecord(runtimeRecordAddress, recordSize);
+                    const recordBytes = new Uint8Array(runtimeExports.memory.buffer).slice(runtimeRecordAddress, runtimeRecordAddress + recordSize);
+                    runtimeExports.stackRestore(runtimeStack);
+                    if (copyRecordResult !== 0) {
+                        return copyRecordResult;
+                    }
+
+                    const debuggerStack = debuggerInstance.exports.stackSave();
+                    const debuggerRecordAddress = debuggerInstance.exports.stackAlloc(recordBytes.length);
+                    writeBytes(debuggerInstance.module.HEAPU8, debuggerRecordAddress, recordBytes);
+                    const receiveRecordResult = debuggerInstance.module._coreclr_wasm_dbi_dac_receive_runtime_event_record(debuggerRecordAddress, recordBytes.length);
+                    debuggerInstance.exports.stackRestore(debuggerStack);
+                    if (receiveRecordResult !== 0) {
+                        return receiveRecordResult;
+                    }
+
                     dbiEventDuringCallback = pollDbiEvent(debuggerInstance);
+                    dbiEventRecordDuringCallback = pollDbiEventRecord(debuggerInstance);
                     continueDuringCallbackResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_continue();
                     sawBreakpointBeforeContinue = true;
                 }
@@ -316,6 +371,7 @@ async function main() {
         const sessionDestroyResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_session_destroy();
         result.callbackEvent = callbackEvent;
         result.dbiEvent = dbiEventDuringCallback;
+        result.dbiEventRecord = dbiEventRecordDuringCallback;
         result.continueDuringCallbackResult = continueDuringCallbackResult;
         result.continueCount = continueCount;
         result.disconnectResult = disconnectResult;
@@ -328,6 +384,11 @@ async function main() {
             !result.event.includes("breakpoint-hit:name=BreakHere") ||
             dbiEventDuringCallback.pollResult !== 0 ||
             !dbiEventDuringCallback.event.includes("breakpoint-hit:name=BreakHere") ||
+            dbiEventRecordDuringCallback.pollResult !== 0 ||
+            dbiEventRecordDuringCallback.bytesWritten !== 340 ||
+            dbiEventRecordDuringCallback.record?.kind !== 1 ||
+            dbiEventRecordDuringCallback.record?.methodName !== "BreakHere" ||
+            dbiEventRecordDuringCallback.record?.message !== result.event ||
             continueDuringCallbackResult !== 0 ||
             continueCount !== 1 ||
             disconnectResult !== 0 ||

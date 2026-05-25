@@ -46,6 +46,7 @@ set(WASM_DBI_DAC_EXPORTED_FUNCTIONS
   _coreclr_wasm_dbi_dac_dbi_continue
   _coreclr_wasm_dbi_dac_dbi_disconnect_runtime
   _coreclr_wasm_dbi_dac_dbi_poll_event
+  _coreclr_wasm_dbi_dac_dbi_poll_event_record
   _coreclr_wasm_dbi_dac_dbi_session_create
   _coreclr_wasm_dbi_dac_dbi_session_create_process
   _coreclr_wasm_dbi_dac_dbi_session_destroy
@@ -58,6 +59,7 @@ set(WASM_DBI_DAC_EXPORTED_FUNCTIONS
   _coreclr_wasm_dbi_dac_probe_runtime_contract_descriptor
   _coreclr_wasm_dbi_dac_probe_test_data
   _coreclr_wasm_dbi_dac_receive_runtime_event
+  _coreclr_wasm_dbi_dac_receive_runtime_event_record
   _coreclr_wasm_dbi_dac_transport_get_last_event
   _coreclr_wasm_dbi_dac_transport_send_test_message
   _coreclr_wasm_dbi_dac_try_get_symbol

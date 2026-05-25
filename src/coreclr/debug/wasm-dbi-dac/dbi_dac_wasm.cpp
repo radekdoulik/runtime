@@ -76,16 +76,29 @@ struct DbiControlProbe
     int32_t BreakpointResult;
 };
 
+struct WasmDebugEventRecord
+{
+    uint32_t Kind;
+    uint32_t MethodToken;
+    uint32_t ILOffset;
+    uint32_t HitCount;
+    uint32_t ContinueCount;
+    char MethodName[64];
+    char Message[256];
+};
+
 static_assert(sizeof(ContractDescriptorLayout) == 32);
 static_assert(sizeof(ContractPointerDataProbe) == 8);
 static_assert(sizeof(TestDataProbe) == 48);
 static_assert(sizeof(DbiControlProbe) == 16);
+static_assert(sizeof(WasmDebugEventRecord) == 340);
 static_assert(sizeof(void*) == sizeof(uint32_t));
 
 ICorDebug* g_cordb = nullptr;
 bool g_connectedToRuntime = false;
 uint8_t g_lastRuntimeEvent[MaxTransportMessageBytes];
 uint32_t g_lastRuntimeEventLength = 0;
+WasmDebugEventRecord g_lastRuntimeEventRecord{};
 
 class WasmDacDataTarget;
 
@@ -833,6 +846,7 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_connect_runtime()
 
     g_connectedToRuntime = true;
     g_lastRuntimeEventLength = 0;
+    memset(&g_lastRuntimeEventRecord, 0, sizeof(g_lastRuntimeEventRecord));
     return S_OK;
 }
 
@@ -840,6 +854,7 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_disconnect_runtime()
 {
     g_connectedToRuntime = false;
     g_lastRuntimeEventLength = 0;
+    memset(&g_lastRuntimeEventRecord, 0, sizeof(g_lastRuntimeEventRecord));
     return S_OK;
 }
 
@@ -906,6 +921,29 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_poll_event(uint32_t bufferAddress, u
     return coreclr_wasm_dbi_dac_transport_get_last_event(bufferAddress, bufferLength, bytesWrittenAddress);
 }
 
+extern "C" int32_t coreclr_wasm_dbi_dac_dbi_poll_event_record(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
+{
+    if (g_cordb == nullptr || !g_connectedToRuntime)
+    {
+        return E_FAIL;
+    }
+
+    if (bytesWrittenAddress == 0 || bufferAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    uint32_t recordSize = sizeof(WasmDebugEventRecord);
+    if (bufferLength < recordSize)
+    {
+        return BufferTooSmall;
+    }
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bufferAddress)), &g_lastRuntimeEventRecord, recordSize);
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &recordSize, sizeof(recordSize));
+    return S_OK;
+}
+
 extern "C" int32_t coreclr_wasm_dbi_dac_dbi_session_destroy()
 {
     if (g_cordb == nullptr)
@@ -917,6 +955,7 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_session_destroy()
     g_cordb = nullptr;
     g_connectedToRuntime = false;
     g_lastRuntimeEventLength = 0;
+    memset(&g_lastRuntimeEventRecord, 0, sizeof(g_lastRuntimeEventRecord));
 
     HRESULT result = cordb->Terminate();
     cordb->Release();
@@ -952,6 +991,22 @@ extern "C" int32_t coreclr_wasm_dbi_dac_receive_runtime_event(uint32_t eventAddr
         memcpy(g_lastRuntimeEvent, reinterpret_cast<void*>(static_cast<uintptr_t>(eventAddress)), eventLength);
     }
 
+    return Success;
+}
+
+extern "C" int32_t coreclr_wasm_dbi_dac_receive_runtime_event_record(uint32_t eventRecordAddress, uint32_t eventRecordLength)
+{
+    if (g_cordb == nullptr || !g_connectedToRuntime)
+    {
+        return E_FAIL;
+    }
+
+    if (eventRecordAddress == 0 || eventRecordLength != sizeof(WasmDebugEventRecord))
+    {
+        return InvalidArgument;
+    }
+
+    memcpy(&g_lastRuntimeEventRecord, reinterpret_cast<void*>(static_cast<uintptr_t>(eventRecordAddress)), sizeof(g_lastRuntimeEventRecord));
     return Success;
 }
 
