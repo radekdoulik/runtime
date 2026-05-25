@@ -1567,14 +1567,18 @@ void LoaderAllocator::EnumMemoryRegions(CLRDataEnumMemoryFlags flags)
     }
 #endif // FEATURE_STUBPRECODE_DYNAMIC_HELPERS
 #endif
+#ifdef HAS_FIXUP_PRECODE
     if (m_pFixupPrecodeHeap.IsValid())
     {
         m_pFixupPrecodeHeap->EnumMemoryRegions(flags);
     }
+#endif // HAS_FIXUP_PRECODE
+#ifndef FEATURE_PORTABLE_ENTRYPOINTS
     if (m_pNewStubPrecodeHeap.IsValid())
     {
         m_pNewStubPrecodeHeap->EnumMemoryRegions(flags);
     }
+#endif // !FEATURE_PORTABLE_ENTRYPOINTS
     if (m_pVirtualCallStubManager.IsValid())
     {
         m_pVirtualCallStubManager->EnumMemoryRegions(flags);

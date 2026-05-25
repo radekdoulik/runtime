@@ -3918,10 +3918,12 @@ MethodDesc::EnumMemoryRegions(CLRDataEnumMemoryFlags flags)
     // automatically picks up any prestubs and such.
     GetMethodDescChunk()->EnumMemoryRegions(flags);
 
+#ifndef FEATURE_PORTABLE_ENTRYPOINTS
     if (HasPrecode())
     {
         GetPrecode()->EnumMemoryRegions(flags);
     }
+#endif // !FEATURE_PORTABLE_ENTRYPOINTS
 
     // Need to save the Debug-Info for this method so that we can see it in a debugger later.
 #ifdef FEATURE_CODE_VERSIONING

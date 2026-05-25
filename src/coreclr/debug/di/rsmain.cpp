@@ -37,6 +37,9 @@ RSDebuggingInfo g_RSDebuggingInfo_OutOfProc = {0 }; // set to NULL
 RSDebuggingInfo * g_pRSDebuggingInfo = &g_RSDebuggingInfo_OutOfProc;
 
 // The following instances are used for invoking overloaded new/delete
+#if defined(TARGET_WASM)
+inline
+#endif // TARGET_WASM
 forDbiWorker forDbi;
 
 #ifdef _DEBUG
@@ -955,6 +958,7 @@ Cordb::Cordb(CorDebugInterfaceVersion iDebuggerVersion)
 
 Cordb::Cordb(CorDebugInterfaceVersion iDebuggerVersion, const ProcessDescriptor& pd, LPCWSTR dacModulePath)
   : CordbBase(NULL, 0, enumCordb),
+    m_rcEventThread(NULL),
     m_processes(11),
     m_initialized(false),
     m_debuggerSpecifiedVersion(iDebuggerVersion),
@@ -1067,7 +1071,7 @@ HRESULT Cordb::Terminate()
     // Caller is supposed to be out of all callbacks when they call this.
     // This also avoids a deadlock because we'll shutdown the RCET, which would block if we're
     // in the RCET.
-    if (m_rcEventThread->IsRCEventThread())
+    if (m_rcEventThread != NULL && m_rcEventThread->IsRCEventThread())
     {
         STRESS_LOG0(LF_CORDB, LL_INFO10, "C::T: failed on RCET\n");
         _ASSERTE(!"Gross API Misuse: Debugger shouldn't call ICorDebug::Terminate from within a managed callback.");
@@ -1224,6 +1228,12 @@ HRESULT Cordb::Initialize(void)
         m_processes.DebugSetRSLock(&m_processListMutex);
 #endif
 
+#if defined(TARGET_WASM)
+        // The wasm prototype has not wired the runtime-controller event thread
+        // to a host transport yet. Creation/termination still needs to work so
+        // the standalone module can prove the DBI object is linked.
+        m_initialized = TRUE;
+#else
         //
         // Create the runtime controller event listening thread
         //
@@ -1251,10 +1261,13 @@ HRESULT Cordb::Initialize(void)
         if (FAILED(hr))
             goto exit;
 
-       m_initialized = TRUE;
+        m_initialized = TRUE;
+#endif // TARGET_WASM
     }
 
+#if !defined(TARGET_WASM)
 exit:
+#endif // !TARGET_WASM
     return hr;
 }
 
@@ -1320,7 +1333,10 @@ void Cordb::AddProcess(CordbProcess* process)
     m_pProcessEnumList.NeuterAndClear(NULL);
 
     GetProcessList()->AddBaseOrThrow(process);
-    m_rcEventThread->ProcessStateChanged();
+    if (m_rcEventThread != NULL)
+    {
+        m_rcEventThread->ProcessStateChanged();
+    }
 }
 
 //
@@ -1335,7 +1351,10 @@ void Cordb::RemoveProcess(CordbProcess* process)
     LockProcessList();
     GetProcessList()->RemoveBase((ULONG_PTR)process->m_id);
 
-    m_rcEventThread->ProcessStateChanged();
+    if (m_rcEventThread != NULL)
+    {
+        m_rcEventThread->ProcessStateChanged();
+    }
 
     UnlockProcessList();
 }
@@ -1382,6 +1401,11 @@ HRESULT Cordb::SendIPCEvent(CordbProcess * pProcess,
     HRESULT hr = S_OK;
 
     LOG((LF_CORDB, LL_EVERYTHING, "SendIPCEvent in Cordb called\n"));
+    if (m_rcEventThread == NULL)
+    {
+        return E_NOTIMPL;
+    }
+
     EX_TRY
     {
         hr = m_rcEventThread->SendIPCEvent(pProcess, pEvent, eventSize);
@@ -1393,7 +1417,10 @@ HRESULT Cordb::SendIPCEvent(CordbProcess * pProcess,
 
 void Cordb::ProcessStateChanged(void)
 {
-    m_rcEventThread->ProcessStateChanged();
+    if (m_rcEventThread != NULL)
+    {
+        m_rcEventThread->ProcessStateChanged();
+    }
 }
 
 
@@ -1401,6 +1428,11 @@ HRESULT Cordb::WaitForIPCEventFromProcess(CordbProcess* process,
                                           CordbAppDomain *pAppDomain,
                                           DebuggerIPCEvent* event)
 {
+    if (m_rcEventThread == NULL)
+    {
+        return E_NOTIMPL;
+    }
+
     return m_rcEventThread->WaitForIPCEventFromProcess(process,
                                                        pAppDomain,
                                                        event);
@@ -2547,4 +2579,3 @@ HRESULT CopyOutString(LPCWSTR pInputString, ULONG32 cchName, ULONG32 * pcchName,
         return S_OK;
     }
 }
-

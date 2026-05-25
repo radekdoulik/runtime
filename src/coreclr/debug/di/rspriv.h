@@ -209,6 +209,7 @@ private:
 extern forDbiWorker forDbi;
 
 // for dbi we just default to new, but we need to have these defined for both dac and dbi
+#if !defined(TARGET_WASM)
 inline void * operator new(size_t lenBytes, const forDbiWorker &)
 {
     void * result = new (nothrow) BYTE[lenBytes];
@@ -228,6 +229,7 @@ inline void * operator new[](size_t lenBytes, const forDbiWorker &)
     }
     return result;
 }
+#endif // !TARGET_WASM
 
 // Helper to delete memory used with the IDacDbiInterface::IAllocator  interface.
 template<class T> inline

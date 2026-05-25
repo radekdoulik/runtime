@@ -7,19 +7,26 @@
 //
 //*****************************************************************************
 
+// DBI and DAC are separate binaries on desktop, but the experimental wasm
+// debugger module links both static libraries into one image.
+#if defined(TARGET_WASM)
+#define READONLYDATATARGETFACADE_INLINE inline
+#else
+#define READONLYDATATARGETFACADE_INLINE
+#endif
 
 //---------------------------------------------------------------------------------------
 //
 // Ctor for ReadOnlyDataTargetFacade. Just initializes ref count to 0.
 //
 //---------------------------------------------------------------------------------------
-ReadOnlyDataTargetFacade::ReadOnlyDataTargetFacade()
+READONLYDATATARGETFACADE_INLINE ReadOnlyDataTargetFacade::ReadOnlyDataTargetFacade()
     : m_ref(0)
 {
 }
 
 // Standard impl of IUnknown::QueryInterface
-HRESULT STDMETHODCALLTYPE
+READONLYDATATARGETFACADE_INLINE HRESULT STDMETHODCALLTYPE
 ReadOnlyDataTargetFacade::QueryInterface(
     REFIID InterfaceId,
     PVOID* pInterface
@@ -48,7 +55,7 @@ ReadOnlyDataTargetFacade::QueryInterface(
 }
 
 // Standard impl of IUnknown::AddRef
-ULONG STDMETHODCALLTYPE
+READONLYDATATARGETFACADE_INLINE ULONG STDMETHODCALLTYPE
 ReadOnlyDataTargetFacade::AddRef()
 {
     SUPPORTS_DAC;
@@ -57,7 +64,7 @@ ReadOnlyDataTargetFacade::AddRef()
 }
 
 // Standard impl of IUnknown::Release
-ULONG STDMETHODCALLTYPE
+READONLYDATATARGETFACADE_INLINE ULONG STDMETHODCALLTYPE
 ReadOnlyDataTargetFacade::Release()
 {
     SUPPORTS_DAC;
@@ -70,7 +77,7 @@ ReadOnlyDataTargetFacade::Release()
 }
 
 // impl of interface method ICorDebugDataTarget::GetPlatform
-HRESULT STDMETHODCALLTYPE
+READONLYDATATARGETFACADE_INLINE HRESULT STDMETHODCALLTYPE
 ReadOnlyDataTargetFacade::GetPlatform(
         CorDebugPlatform *pPlatform)
 {
@@ -80,7 +87,7 @@ ReadOnlyDataTargetFacade::GetPlatform(
 }
 
 // impl of interface method ICorDebugDataTarget::ReadVirtual
-HRESULT STDMETHODCALLTYPE
+READONLYDATATARGETFACADE_INLINE HRESULT STDMETHODCALLTYPE
 ReadOnlyDataTargetFacade::ReadVirtual(
     CORDB_ADDRESS address,
     PBYTE pBuffer,
@@ -93,7 +100,7 @@ ReadOnlyDataTargetFacade::ReadVirtual(
 }
 
 // impl of interface method ICorDebugDataTarget::GetThreadContext
-HRESULT STDMETHODCALLTYPE
+READONLYDATATARGETFACADE_INLINE HRESULT STDMETHODCALLTYPE
 ReadOnlyDataTargetFacade::GetThreadContext(
     DWORD dwThreadID,
     ULONG32 contextFlags,
@@ -106,7 +113,7 @@ ReadOnlyDataTargetFacade::GetThreadContext(
 }
 
 // impl of interface method ICorDebugMutableDataTarget::WriteVirtual
-HRESULT STDMETHODCALLTYPE
+READONLYDATATARGETFACADE_INLINE HRESULT STDMETHODCALLTYPE
 ReadOnlyDataTargetFacade::WriteVirtual(
     CORDB_ADDRESS pAddress,
     const BYTE * pBuffer,
@@ -117,7 +124,7 @@ ReadOnlyDataTargetFacade::WriteVirtual(
 }
 
 // impl of interface method ICorDebugMutableDataTarget::SetThreadContext
-HRESULT STDMETHODCALLTYPE
+READONLYDATATARGETFACADE_INLINE HRESULT STDMETHODCALLTYPE
 ReadOnlyDataTargetFacade::SetThreadContext(
     DWORD dwThreadID,
     ULONG32 contextSize,
@@ -128,7 +135,7 @@ ReadOnlyDataTargetFacade::SetThreadContext(
 }
 
 // Public implementation of ICorDebugMutableDataTarget::ContinueStatusChanged
-HRESULT STDMETHODCALLTYPE
+READONLYDATATARGETFACADE_INLINE HRESULT STDMETHODCALLTYPE
 ReadOnlyDataTargetFacade::ContinueStatusChanged(
     DWORD dwThreadId,
     CORDB_CONTINUE_STATUS dwContinueStatus)
@@ -136,3 +143,5 @@ ReadOnlyDataTargetFacade::ContinueStatusChanged(
     SUPPORTS_DAC;
     return CORDBG_E_TARGET_READONLY;
 }
+
+#undef READONLYDATATARGETFACADE_INLINE

@@ -22,7 +22,6 @@ set(DACCESS_SOURCES
   dacfn.cpp
   enummem.cpp
   fntableaccess.cpp
-  gcdump_dac.cpp
   inspect.cpp
   reimpl.cpp
   request.cpp
@@ -32,6 +31,12 @@ set(DACCESS_SOURCES
   nidump.cpp
   datatargetadapter.cpp
 )
+
+if(NOT CLR_CMAKE_TARGET_ARCH_WASM)
+  list(APPEND DACCESS_SOURCES
+    gcdump_dac.cpp
+  )
+endif()
 
 include_directories(${ARCH_SOURCES_DIR})
   list(APPEND DACCESS_SOURCES

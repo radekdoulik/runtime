@@ -4361,6 +4361,9 @@ int CordbNativeCode::GetCallInstructionLength(BYTE *ip, ULONG32 count)
     return MAX_INSTRUCTION_LENGTH;
 #elif defined(TARGET_LOONGARCH64)
     return MAX_INSTRUCTION_LENGTH;
+#elif defined(TARGET_WASM)
+    PORTABILITY_ASSERT("WASM call instruction length is not implemented");
+    return -1;
 #elif defined(TARGET_X86)
     if (count < 2)
         return -1;

@@ -1873,10 +1873,12 @@ public:
     {
         return (VolatileLoad(&m_bFlags4) & enum_flag4_PendingThunkResolution) != 0;
     }
+#ifndef DACCESS_COMPILE
     void SetPendingThunkResolution(bool isPending)
     {
         InterlockedUpdateFlags4(enum_flag4_PendingThunkResolution, isPending ? TRUE : FALSE);
     }
+#endif // !DACCESS_COMPILE
 #endif
 private:
     void PrepareForUseAsADependencyOfANativeImageWorker();
@@ -3453,7 +3455,11 @@ public:
 #ifdef HAS_PINVOKE_IMPORT_PRECODE
         return m_pImportThunkGlue;
 #else
+#ifdef DACCESS_COMPILE
+        return PTR_PInvokeImportThunkGlue(&m_ImportThunkGlue);
+#else
         return &m_ImportThunkGlue;
+#endif // DACCESS_COMPILE
 #endif // HAS_PINVOKE_IMPORT_PRECODE
     }
 

@@ -692,6 +692,11 @@ ClrDataAccess::GetRegisterName(int regNum, unsigned int count, _Inout_updates_z_
         W("S8"), W("S9"), W("S10"), W("S11"),
         W("T3"), W("T4"), W("T5"), W("T6")
     };
+#elif defined(TARGET_WASM)
+    static const WCHAR *regs[] =
+    {
+        W("IP"), W("SP"), W("FP")
+    };
 #endif
 
     // Caller frame registers are encoded as "-(reg+1)".
@@ -3683,8 +3688,12 @@ static const char *LoaderAllocatorLoaderHeapNames[] =
     "StaticsHeap",
     "StubHeap",
     "ExecutableHeap",
+#ifdef HAS_FIXUP_PRECODE
     "FixupPrecodeHeap",
+#endif // HAS_FIXUP_PRECODE
+#ifndef FEATURE_PORTABLE_ENTRYPOINTS
     "NewStubPrecodeHeap",
+#endif // !FEATURE_PORTABLE_ENTRYPOINTS
 #if defined(FEATURE_READYTORUN) && defined(FEATURE_STUBPRECODE_DYNAMIC_HELPERS)
     "DynamicHelpersStubHeap",
 #endif // defined(FEATURE_READYTORUN) && defined(FEATURE_STUBPRECODE_DYNAMIC_HELPERS)
@@ -3723,8 +3732,12 @@ HRESULT ClrDataAccess::GetLoaderAllocatorHeaps(CLRDATA_ADDRESS loaderAllocatorAd
             pLoaderHeaps[i++] = HOST_CDADDR(pLoaderAllocator->GetStaticsHeap());
             pLoaderHeaps[i++] = HOST_CDADDR(pLoaderAllocator->GetStubHeap());
             pLoaderHeaps[i++] = HOST_CDADDR(pLoaderAllocator->GetExecutableHeap());
+#ifdef HAS_FIXUP_PRECODE
             pLoaderHeaps[i++] = HOST_CDADDR(pLoaderAllocator->GetFixupPrecodeHeap());
+#endif // HAS_FIXUP_PRECODE
+#ifndef FEATURE_PORTABLE_ENTRYPOINTS
             pLoaderHeaps[i++] = HOST_CDADDR(pLoaderAllocator->GetNewStubPrecodeHeap());
+#endif // !FEATURE_PORTABLE_ENTRYPOINTS
 #if defined(FEATURE_READYTORUN) && defined(FEATURE_STUBPRECODE_DYNAMIC_HELPERS)
             pLoaderHeaps[i++] = HOST_CDADDR(pLoaderAllocator->GetDynamicHelpersStubHeap());
 #endif // defined(FEATURE_READYTORUN) && defined(FEATURE_STUBPRECODE_DYNAMIC_HELPERS)
@@ -3741,6 +3754,8 @@ HRESULT ClrDataAccess::GetLoaderAllocatorHeaps(CLRDATA_ADDRESS loaderAllocatorAd
                 pLoaderHeaps[i++] = HOST_CDADDR(pVcsMgr->cache_entry_heap);
 #endif // FEATURE_VIRTUAL_STUB_DISPATCH
             }
+
+            _ASSERTE(i == loaderHeapCount);
 
             // All of the above are "LoaderHeap" and not the ExplicitControl version.
             for (int j = 0; j < i; j++)

@@ -1906,6 +1906,12 @@ HRESULT CordbProcess::QueueManagedAttach()
         return E_OUTOFMEMORY;
     }
 
+    if (this->m_cordb->m_rcEventThread == NULL)
+    {
+        delete pItem;
+        return E_NOTIMPL;
+    }
+
     this->m_cordb->m_rcEventThread->QueueAsyncWorkItem(pItem);
 
     return S_OK;
@@ -14380,7 +14386,14 @@ void CordbWin32EventThread::ExitProcess(bool fDetach)
         ExitProcessWorkItem * pItem = new (nothrow) ExitProcessWorkItem(m_pProcess);
         if (pItem != NULL)
         {
-            m_cordb->m_rcEventThread->QueueAsyncWorkItem(pItem);
+            if (m_cordb->m_rcEventThread != NULL)
+            {
+                m_cordb->m_rcEventThread->QueueAsyncWorkItem(pItem);
+            }
+            else
+            {
+                delete pItem;
+            }
         }
     }
 

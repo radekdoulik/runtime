@@ -70,4 +70,6 @@ endif (CLR_CMAKE_TARGET_WIN32)
 set(CORDBEE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_subdirectory(dac)
-add_subdirectory(wks)
+if (NOT CLR_CMAKE_TARGET_ARCH_WASM)
+  add_subdirectory(wks)
+endif()

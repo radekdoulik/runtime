@@ -25,7 +25,9 @@ VPTR_CLASS(EditAndContinueModule)
 VPTR_CLASS(Module)
 VPTR_CLASS(ReflectionModule)
 
+#ifndef FEATURE_PORTABLE_ENTRYPOINTS
 VPTR_CLASS(PrecodeStubManager)
+#endif // !FEATURE_PORTABLE_ENTRYPOINTS
 VPTR_CLASS(StubLinkStubManager)
 VPTR_CLASS(ThePreStubManager)
 VPTR_CLASS(VirtualCallStubManager)

@@ -246,7 +246,9 @@ HRESULT STDMETHODCALLTYPE
 ShimRemoteDataTarget::GetPlatform(
         CorDebugPlatform *pPlatform)
 {
-#ifdef TARGET_UNIX
+#if defined(TARGET_WASM)
+     *pPlatform = static_cast<CorDebugPlatform>(0);
+#elif defined(TARGET_UNIX)
      #if defined(TARGET_X86)
          *pPlatform = CORDB_PLATFORM_POSIX_X86;
      #elif defined(TARGET_AMD64)

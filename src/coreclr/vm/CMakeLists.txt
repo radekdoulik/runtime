@@ -946,6 +946,11 @@ elseif(CLR_CMAKE_TARGET_ARCH_WASM)
         exceptionhandling.cpp
         gcinfodecoder.cpp
     )
+    if(CLR_CMAKE_ENABLE_WASM_DBI_DAC)
+        list(APPEND VM_SOURCES_WKS_ARCH
+            ${ARCH_SOURCES_DIR}/dactable.cpp
+        )
+    endif()
     set(VM_SOURCES_WKS_GEN
         ${ARCH_SOURCES_DIR}/callhelpers-interp-to-managed.cpp
         ${ARCH_SOURCES_DIR}/callhelpers-reverse.cpp
@@ -1039,7 +1044,7 @@ convert_to_absolute_path(VM_SOURCES_WKS_ARCH_ASM ${VM_SOURCES_WKS_ARCH_ASM})
 convert_to_absolute_path(VM_SOURCES_DAC ${VM_SOURCES_DAC})
 convert_to_absolute_path(VM_SOURCES_WKS_SPECIAL ${VM_SOURCES_WKS_SPECIAL})
 
-if (NOT CLR_CMAKE_TARGET_ARCH_WASM)
+if (NOT CLR_CMAKE_TARGET_ARCH_WASM OR CLR_CMAKE_ENABLE_WASM_DBI_DAC)
     add_library_clr(cee_dac ${VM_SOURCES_DAC})
     add_dependencies(cee_dac eventing_headers)
     set_target_properties(cee_dac PROPERTIES DAC_COMPONENT TRUE)

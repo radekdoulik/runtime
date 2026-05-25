@@ -324,6 +324,11 @@ inline BOOL IsInCalleesFrames(REGDISPLAY *display, LPVOID stackPointer) {
     return stackPointer < (LPVOID)(display->SP);
 }
 
+inline TADDR GetRegdisplayStackMark(REGDISPLAY *display) {
+    LIMITED_METHOD_CONTRACT;
+    return display->SP;
+}
+
 #else // none of the above processors
 #error "RegDisplay functions are not implemented on this platform."
 #endif
@@ -605,5 +610,4 @@ inline void UpdateContextFromRegDisp(PREGDISPLAY pRegDisp, PT_CONTEXT pContext)
 
 
 #endif  // __REGDISP_H
-
 

@@ -1925,7 +1925,7 @@ int ArgIteratorTemplate<ARGITERATOR_BASE>::GetNextOffset()
     unsigned align;
     if (argType == ELEMENT_TYPE_VALUETYPE)
     {
-        align = std::clamp(CEEInfo::getClassAlignmentRequirementStatic(thValueType.GetMethodTable()), INTERP_STACK_SLOT_SIZE, INTERP_STACK_ALIGNMENT);
+        align = std::clamp(CEEInfo::getClassAlignmentRequirementStatic(thValueType), INTERP_STACK_SLOT_SIZE, INTERP_STACK_ALIGNMENT);
     }
     else
     {

@@ -16,6 +16,10 @@
 #include <limits>
 #include <functional>
 
+#if defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
+extern "C" void CoreClrWasmDebugMaybeHitInterpreterMethod(MethodDesc* methodDesc, uint32_t ilOffset);
+#endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
+
 struct InterpDispatchCacheEntry
 {
     // MethodTable of the calling object
@@ -1362,6 +1366,12 @@ void InterpExecMethod(InterpreterFrame *pInterpreterFrame, InterpMethodContextFr
     }
 
     pThreadContext->pStackPointer = pFrame->pStack + pMethod->allocaSize;
+#if defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
+    if (pExceptionClauseArgs == NULL)
+    {
+        CoreClrWasmDebugMaybeHitInterpreterMethod(pMethod->methodHnd, 0);
+    }
+#endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
     stack = pFrame->pStack;
 
     if ((pExceptionClauseArgs != NULL) && pExceptionClauseArgs->isFilter)
@@ -3464,6 +3474,9 @@ CALL_INTERP_METHOD:
                         UNREACHABLE();
                     }
                     pThreadContext->pStackPointer = stack + pMethod->allocaSize;
+#if defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
+                    CoreClrWasmDebugMaybeHitInterpreterMethod(pMethod->methodHnd, 0);
+#endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
                     break;
                 }
                 case INTOP_NEWOBJ_GENERIC:

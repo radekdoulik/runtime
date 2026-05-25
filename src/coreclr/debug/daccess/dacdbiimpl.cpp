@@ -99,12 +99,19 @@ IDacDbiInterface::IAllocator * g_pAllocator = NULL;
 //
 
 // Need a class to serve as a tag that we can use to overload New/Delete.
+#if defined(TARGET_WASM)
+inline
+#endif // TARGET_WASM
 forDbiWorker forDbi;
 
 void * operator new(size_t lenBytes, const forDbiWorker &)
 {
+#if defined(TARGET_WASM)
+    void *result = ::operator new(lenBytes, std::nothrow);
+#else
     _ASSERTE(g_pAllocator != NULL);
     void *result = g_pAllocator->Alloc(lenBytes);
+#endif // TARGET_WASM
     if (result == NULL)
     {
         ThrowOutOfMemory();
@@ -114,8 +121,12 @@ void * operator new(size_t lenBytes, const forDbiWorker &)
 
 void * operator new[](size_t lenBytes, const forDbiWorker &)
 {
+#if defined(TARGET_WASM)
+    void *result = ::operator new[](lenBytes, std::nothrow);
+#else
     _ASSERTE(g_pAllocator != NULL);
     void *result = g_pAllocator->Alloc(lenBytes);
+#endif // TARGET_WASM
     if (result == NULL)
     {
         ThrowOutOfMemory();
@@ -132,8 +143,12 @@ void operator delete(void *p, const forDbiWorker &)
         return;
     }
 
+#if defined(TARGET_WASM)
+    ::operator delete(p);
+#else
     _ASSERTE(g_pAllocator != NULL);
     g_pAllocator->Free((BYTE*) p);
+#endif // TARGET_WASM
 
 }
 
@@ -146,8 +161,12 @@ void operator delete[](void *p, const forDbiWorker &)
         return;
     }
 
+#if defined(TARGET_WASM)
+    ::operator delete[](p);
+#else
     _ASSERTE(g_pAllocator != NULL);
     g_pAllocator->Free((BYTE*) p);
+#endif // TARGET_WASM
 }
 
 // @dbgtodo  dac support: determine how to handle an array of class instances to ensure the dtors get
@@ -159,14 +178,20 @@ template<class T> void DeleteDbiMemory(T *p)
     {
         return;
     }
+#if defined(TARGET_WASM)
+    delete p;
+#else
     p->~T();
-
     _ASSERTE(g_pAllocator != NULL);
     g_pAllocator->Free((BYTE*) p);
+#endif // TARGET_WASM
 }
 
 void* AllocDbiMemory(size_t size)
 {
+#if defined(TARGET_WASM)
+    void *result = ::operator new(size, std::nothrow);
+#else
     void *result;
     if (g_pAllocator != nullptr)
     {
@@ -176,6 +201,7 @@ void* AllocDbiMemory(size_t size)
     {
         result = new (nothrow) BYTE[size];
     }
+#endif // TARGET_WASM
     if (result == NULL)
     {
         ThrowOutOfMemory();
@@ -189,6 +215,9 @@ void DeleteDbiMemory(void* p)
     {
         return;
     }
+#if defined(TARGET_WASM)
+    ::operator delete(p);
+#else
     if (g_pAllocator != nullptr)
     {
         g_pAllocator->Free((BYTE*)p);
@@ -197,6 +226,7 @@ void DeleteDbiMemory(void* p)
     {
         ::delete [] (BYTE*)p;
     }
+#endif // TARGET_WASM
 }
 
 // Delete memory and invoke dtor for memory allocated with 'operator (forDbi) new[]'
@@ -210,6 +240,9 @@ template<class T> void DeleteDbiArrayMemory(T *p, int count)
         return;
     }
 
+#if defined(TARGET_WASM)
+    delete[] p;
+#else
     for (T *cur = p; cur < p + count; cur++)
     {
         cur->~T();
@@ -217,6 +250,7 @@ template<class T> void DeleteDbiArrayMemory(T *p, int count)
 
     _ASSERTE(g_pAllocator != NULL);
     g_pAllocator->Free((BYTE*) p);
+#endif // TARGET_WASM
 }
 
 //---------------------------------------------------------------------------------------
@@ -286,7 +320,7 @@ DacDbiInterfaceInstance(
         return hrStatus;
     }
 
-#ifdef CAN_USE_CDAC
+#if defined(CAN_USE_CDAC) && !defined(TARGET_WASM)
     CLRConfigNoCache enable = CLRConfigNoCache::Get("ENABLE_CDAC");
     if (enable.IsSet())
     {
@@ -331,7 +365,7 @@ DacDbiInterfaceInstance(
             return E_FAIL;
         }
     }
-#endif
+#endif // defined(CAN_USE_CDAC) && !defined(TARGET_WASM)
 
     *ppInterface = pDac;
     return hrStatus;

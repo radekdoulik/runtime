@@ -39,6 +39,8 @@
 #elif TARGET_RISCV64
 #include "riscv64/cordbregisterset.cpp"
 #include "riscv64/primitives.cpp"
+#elif TARGET_WASM
+#include "wasm/cordbregisterset.cpp"
 #else
 #error Unsupported platform
 #endif

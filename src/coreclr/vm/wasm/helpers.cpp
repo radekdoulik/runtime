@@ -724,10 +724,12 @@ EXTERN_C Thread * JIT_InitPInvokeFrame(InlinedCallFrame *pFrame)
     return nullptr;
 }
 
+#ifndef FEATURE_WASM_DBI_DAC
 void _DacGlobals::Initialize()
 {
     /* no-op on wasm */
 }
+#endif // !FEATURE_WASM_DBI_DAC
 
 // Incorrectly typed temporary symbol to satisfy the linker.
 int g_pDebugger;

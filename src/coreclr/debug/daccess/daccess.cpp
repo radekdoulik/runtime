@@ -5111,7 +5111,9 @@ ClrDataAccess::Initialize(void)
     // being attempted.
     //
 
-    // Determine our platform based on the pre-processor macros set when we were built
+    // Determine our platform based on the pre-processor macros set when we were built.
+    // The legacy CorDebugPlatform enum does not have a wasm value yet.
+#ifndef TARGET_WASM
 
 #ifdef TARGET_UNIX
     #if defined(TARGET_X86)
@@ -5152,6 +5154,7 @@ ClrDataAccess::Initialize(void)
         // is not what this version of mscordacwks.dll was built for.
         return CORDBG_E_INCOMPATIBLE_PLATFORMS;
     }
+#endif // !TARGET_WASM
 
     //
     // Get the current DLL base for mscorwks globals.
@@ -5183,7 +5186,9 @@ ClrDataAccess::Initialize(void)
     // copy the same data into the globals and so
     // cannot interfere with each other.
     IfFailRet(GetDacGlobalValues());
+#ifndef TARGET_WASM
     IfFailRet(DacGetHostVtPtrs());
+#endif // !TARGET_WASM
 
     //
     // DAC is now setup and ready to use
@@ -5347,6 +5352,7 @@ ClrDataAccess::RawGetMethodName(
     pStubManager = StubManager::FindStubManager(TO_TADDR(address));
     if (pStubManager != NULL)
     {
+#ifndef FEATURE_PORTABLE_ENTRYPOINTS
         if (pStubManager == PrecodeStubManager::g_pManager)
         {
             StubCodeBlockKind stubKind = RangeSectionStubManager::GetStubKind(TO_TADDR(address));
@@ -5402,6 +5408,7 @@ ClrDataAccess::RawGetMethodName(
                 EX_END_CATCH
             }
         }
+#endif // !FEATURE_PORTABLE_ENTRYPOINTS
         LPCWSTR wszStubManagerName = pStubManager->GetStubManagerName(TO_TADDR(address));
         _ASSERTE(wszStubManagerName != NULL);
         if (u16_strcmp(wszStubManagerName, W("ThePreStub")) != 0 && u16_strcmp(wszStubManagerName, W("InteropDispatchStub")) != 0 && u16_strcmp(wszStubManagerName, W("TailCallStub")) != 0)
@@ -6534,13 +6541,13 @@ CLRDataCreateInstance(REFIID iid,
     {
         return hr;
     }
-#ifdef LOGGING
+#if defined(LOGGING) && !defined(TARGET_WASM)
     InitializeLogging();
-#endif
+#endif // defined(LOGGING) && !defined(TARGET_WASM)
 
     // TODO: [cdac] Remove when cDAC deploys with SOS - https://github.com/dotnet/runtime/issues/108720
     ReleaseHolder<IUnknown> cdacInterface = nullptr;
-#ifdef CAN_USE_CDAC
+#if defined(CAN_USE_CDAC) && !defined(TARGET_WASM)
     CLRConfigNoCache enable = CLRConfigNoCache::Get("ENABLE_CDAC");
     if (enable.IsSet())
     {
@@ -6579,7 +6586,7 @@ CLRDataCreateInstance(REFIID iid,
             }
         }
     }
-#endif
+#endif // defined(CAN_USE_CDAC) && !defined(TARGET_WASM)
     if (cdacInterface != nullptr)
     {
         hr = cdacInterface->QueryInterface(iid, iface);
@@ -7371,14 +7378,19 @@ void DacStackReferenceWalker::WalkStack()
 
         ~ProfilerFilterContextHolder()
         {
+#if defined(PROFILING_SUPPORTED) || defined(PROFILING_SUPPORTED_DATA)
             if (m_pThread != NULL)
+            {
                 m_pThread->SetProfilerFilterContext(NULL);
+            }
+#endif // PROFILING_SUPPORTED || PROFILING_SUPPORTED_DATA
         }
     };
 
     ProfilerFilterContextHolder contextHolder;
     T_CONTEXT ctx;
 
+#if defined(PROFILING_SUPPORTED) || defined(PROFILING_SUPPORTED_DATA)
     // Get the current thread's context and set that as the filter context
     if (mThread->GetFilterContext() == NULL && mThread->GetProfilerFilterContext() == NULL)
     {
@@ -7386,6 +7398,7 @@ void DacStackReferenceWalker::WalkStack()
         mThread->SetProfilerFilterContext(&ctx);
         contextHolder.Activate(mThread);
     }
+#endif // PROFILING_SUPPORTED || PROFILING_SUPPORTED_DATA
 
     // Setup GCCONTEXT structs for the stackwalk.
     GCCONTEXT gcctx = {0};
