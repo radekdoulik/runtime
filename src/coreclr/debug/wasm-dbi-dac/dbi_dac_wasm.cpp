@@ -83,6 +83,7 @@ static_assert(sizeof(DbiControlProbe) == 16);
 static_assert(sizeof(void*) == sizeof(uint32_t));
 
 ICorDebug* g_cordb = nullptr;
+bool g_connectedToRuntime = false;
 uint8_t g_lastRuntimeEvent[MaxTransportMessageBytes];
 uint32_t g_lastRuntimeEventLength = 0;
 
@@ -818,9 +819,33 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_session_create_process()
     return result;
 }
 
+extern "C" int32_t coreclr_wasm_dbi_dac_dbi_connect_runtime()
+{
+    if (g_cordb == nullptr)
+    {
+        return E_FAIL;
+    }
+
+    if (g_connectedToRuntime)
+    {
+        return S_OK;
+    }
+
+    g_connectedToRuntime = true;
+    g_lastRuntimeEventLength = 0;
+    return S_OK;
+}
+
+extern "C" int32_t coreclr_wasm_dbi_dac_dbi_disconnect_runtime()
+{
+    g_connectedToRuntime = false;
+    g_lastRuntimeEventLength = 0;
+    return S_OK;
+}
+
 extern "C" int32_t coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_name(uint32_t nameAddress, uint32_t nameLength)
 {
-    if (g_cordb == nullptr || (nameAddress == 0 && nameLength != 0))
+    if (g_cordb == nullptr || !g_connectedToRuntime || (nameAddress == 0 && nameLength != 0))
     {
         return E_FAIL;
     }
@@ -840,7 +865,7 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_name(uint32_t name
 
 extern "C" int32_t coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_token(uint32_t methodToken, uint32_t ilOffset)
 {
-    if (g_cordb == nullptr)
+    if (g_cordb == nullptr || !g_connectedToRuntime)
     {
         return E_FAIL;
     }
@@ -862,7 +887,7 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_token(uint32_t met
 
 extern "C" int32_t coreclr_wasm_dbi_dac_dbi_continue()
 {
-    if (g_cordb == nullptr)
+    if (g_cordb == nullptr || !g_connectedToRuntime)
     {
         return E_FAIL;
     }
@@ -873,6 +898,11 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_continue()
 
 extern "C" int32_t coreclr_wasm_dbi_dac_dbi_poll_event(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
 {
+    if (g_cordb == nullptr || !g_connectedToRuntime)
+    {
+        return E_FAIL;
+    }
+
     return coreclr_wasm_dbi_dac_transport_get_last_event(bufferAddress, bufferLength, bytesWrittenAddress);
 }
 
@@ -885,6 +915,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_session_destroy()
 
     ICorDebug* cordb = g_cordb;
     g_cordb = nullptr;
+    g_connectedToRuntime = false;
+    g_lastRuntimeEventLength = 0;
 
     HRESULT result = cordb->Terminate();
     cordb->Release();
@@ -904,6 +936,11 @@ extern "C" int32_t coreclr_wasm_dbi_dac_transport_send_test_message(uint32_t mes
 
 extern "C" int32_t coreclr_wasm_dbi_dac_receive_runtime_event(uint32_t eventAddress, uint32_t eventLength)
 {
+    if (g_cordb == nullptr || !g_connectedToRuntime)
+    {
+        return E_FAIL;
+    }
+
     if ((eventAddress == 0 && eventLength != 0) || eventLength > MaxTransportMessageBytes)
     {
         return InvalidArgument;

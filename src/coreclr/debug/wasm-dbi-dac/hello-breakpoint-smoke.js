@@ -294,6 +294,11 @@ async function main() {
                 fail(`failed to create DBI session: ${sessionCreateResult}`);
             }
 
+            const connectResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_connect_runtime();
+            if (connectResult !== 0) {
+                fail(`failed to connect DBI session to runtime: ${connectResult}`);
+            }
+
             const methodName = new TextEncoder().encode(BreakpointMethodName);
             const stack = debuggerInstance.exports.stackSave();
             const methodNameAddress = debuggerInstance.exports.stackAlloc(methodName.length);
@@ -307,11 +312,13 @@ async function main() {
 
         const result = await waitForBreakpointHit(runtimeExports);
         const continueCount = runtimeExports.CoreClrWasmDebugGetContinueCount();
+        const disconnectResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_disconnect_runtime();
         const sessionDestroyResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_session_destroy();
         result.callbackEvent = callbackEvent;
         result.dbiEvent = dbiEventDuringCallback;
         result.continueDuringCallbackResult = continueDuringCallbackResult;
         result.continueCount = continueCount;
+        result.disconnectResult = disconnectResult;
         result.sessionDestroyResult = sessionDestroyResult;
         result.sawBreakpointBeforeContinue = sawBreakpointBeforeContinue;
         console.log(JSON.stringify(result, null, 2));
@@ -323,6 +330,7 @@ async function main() {
             !dbiEventDuringCallback.event.includes("breakpoint-hit:name=BreakHere") ||
             continueDuringCallbackResult !== 0 ||
             continueCount !== 1 ||
+            disconnectResult !== 0 ||
             sessionDestroyResult !== 0 ||
             !sawBreakpointBeforeContinue) {
             fail("HelloWorld breakpoint was not reached");

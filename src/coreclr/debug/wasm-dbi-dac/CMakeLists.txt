@@ -42,7 +42,9 @@ set(WASM_DBI_DAC_EXPORTED_FUNCTIONS
   _coreclr_wasm_dbi_dac_create_clr_data_instance
   _coreclr_wasm_dbi_dac_create_cordb_object
   _coreclr_wasm_dbi_dac_create_dac_dbi_interface
+  _coreclr_wasm_dbi_dac_dbi_connect_runtime
   _coreclr_wasm_dbi_dac_dbi_continue
+  _coreclr_wasm_dbi_dac_dbi_disconnect_runtime
   _coreclr_wasm_dbi_dac_dbi_poll_event
   _coreclr_wasm_dbi_dac_dbi_session_create
   _coreclr_wasm_dbi_dac_dbi_session_create_process

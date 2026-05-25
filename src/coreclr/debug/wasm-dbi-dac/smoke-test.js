@@ -321,8 +321,10 @@ async function main() {
     const copyResult = debuggerModule._coreclr_wasm_dbi_dac_copy_from_target(runtimeDescriptorAddress, copyAddress, 8);
     const sessionCreateResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_session_create();
     const sessionCreateProcessResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_session_create_process();
+    const sessionConnectResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_connect_runtime();
     const transportSendResult = debuggerModule._coreclr_wasm_dbi_dac_transport_send_test_message(transportMessageAddress, transportMessageBytes.length);
     const transportGetResult = debuggerModule._coreclr_wasm_dbi_dac_transport_get_last_event(sessionEventAddress, 64, sessionEventBytesWrittenAddress);
+    const sessionDisconnectResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_disconnect_runtime();
     const sessionDestroyResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_session_destroy();
 
     const descriptor = readDescriptor(debuggerModule.HEAPU8, descriptorAddress);
@@ -388,9 +390,11 @@ async function main() {
         session: {
             createResult: sessionCreateResult,
             createProcessResult: sessionCreateProcessResult,
+            connectResult: sessionConnectResult,
             transportSendResult,
             transportGetResult,
             event: sessionEvent,
+            disconnectResult: sessionDisconnectResult,
             destroyResult: sessionDestroyResult
         },
         symbolResult,
@@ -432,9 +436,11 @@ async function main() {
         controlProbe.breakpointResult !== E_NOTIMPL ||
         sessionCreateResult !== 0 ||
         sessionCreateProcessResult !== E_NOTIMPL ||
+        sessionConnectResult !== 0 ||
         transportSendResult !== 0 ||
         transportGetResult !== 0 ||
         sessionEvent !== `runtime-event:${TransportMessage}` ||
+        sessionDisconnectResult !== 0 ||
         sessionDestroyResult !== 0 ||
         symbolResult !== 0 ||
         symbolAddress !== runtimeDescriptorAddress ||
