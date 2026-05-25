@@ -24,11 +24,29 @@ struct WasmDbiDacTestData
 static_assert(sizeof(WasmDbiDacTestData) == 48);
 
 constexpr uint32_t WasmDebugMessageBufferSize = 256;
+constexpr uint32_t WasmDebugCommandRecordMagic = 0x434d4457;
+
+enum class WasmDebugCommandKind : uint32_t
+{
+    None = 0,
+    SetBreakpointByName = 1,
+    SetBreakpointByToken = 2,
+    Continue = 3,
+};
 
 enum class WasmDebugEventKind : uint32_t
 {
     None = 0,
     Breakpoint = 1,
+};
+
+struct WasmDebugCommandRecord
+{
+    uint32_t Magic;
+    uint32_t Kind;
+    uint32_t MethodToken;
+    uint32_t ILOffset;
+    char MethodName[64];
 };
 
 struct WasmDebugEventRecord
@@ -42,6 +60,7 @@ struct WasmDebugEventRecord
     char Message[256];
 };
 
+static_assert(sizeof(WasmDebugCommandRecord) == 80);
 static_assert(sizeof(WasmDebugEventRecord) == 340);
 
 WasmDbiDacTestData g_wasmDbiDacTestData =
@@ -118,35 +137,11 @@ void RestoreWasmDebugBreakpointPatch()
     g_wasmDebugBreakpointPatchActive = false;
 }
 
-void ArmWasmDebugBreakpointFromCommand(const char* command)
+void ArmWasmDebugBreakpoint(uint32_t methodToken, const char* methodName)
 {
-    static constexpr char Prefix[] = "dbi-command:set-breakpoint";
-    static constexpr char NamePrefix[] = ":name=";
-    static constexpr char TokenPrefix[] = ":token=0x";
-
-    if (strncmp(command, Prefix, sizeof(Prefix) - 1) != 0)
-    {
-        return;
-    }
-
     RestoreWasmDebugBreakpointPatch();
-
-    const char* name = command + sizeof(Prefix) - 1;
-    if (strncmp(name, NamePrefix, sizeof(NamePrefix) - 1) == 0)
-    {
-        name += sizeof(NamePrefix) - 1;
-    }
-    else if (strncmp(name, TokenPrefix, sizeof(TokenPrefix) - 1) == 0)
-    {
-        name += sizeof(TokenPrefix) - 1;
-        g_wasmDebugBreakpointMethodToken = static_cast<uint32_t>(strtoul(name, nullptr, 16));
-        name = "";
-    }
-    else
-    {
-        g_wasmDebugBreakpointMethodToken = 0;
-        name = "";
-    }
+    g_wasmDebugBreakpointMethodToken = methodToken;
+    const char* name = methodName != nullptr ? methodName : "";
 
     size_t nameLength = strlen(name);
     if (nameLength >= sizeof(g_wasmDebugBreakpointMethodName))
@@ -167,6 +162,37 @@ void ArmWasmDebugBreakpointFromCommand(const char* command)
     g_wasmDebugContinueRequested = false;
     g_wasmDebugContinueCount = 0;
     g_wasmDebugBreakpointArmed = true;
+}
+
+void ArmWasmDebugBreakpointFromCommand(const char* command)
+{
+    static constexpr char Prefix[] = "dbi-command:set-breakpoint";
+    static constexpr char NamePrefix[] = ":name=";
+    static constexpr char TokenPrefix[] = ":token=0x";
+
+    if (strncmp(command, Prefix, sizeof(Prefix) - 1) != 0)
+    {
+        return;
+    }
+
+    const char* name = command + sizeof(Prefix) - 1;
+    uint32_t methodToken = 0;
+    if (strncmp(name, NamePrefix, sizeof(NamePrefix) - 1) == 0)
+    {
+        name += sizeof(NamePrefix) - 1;
+    }
+    else if (strncmp(name, TokenPrefix, sizeof(TokenPrefix) - 1) == 0)
+    {
+        name += sizeof(TokenPrefix) - 1;
+        methodToken = static_cast<uint32_t>(strtoul(name, nullptr, 16));
+        name = "";
+    }
+    else
+    {
+        name = "";
+    }
+
+    ArmWasmDebugBreakpoint(methodToken, name);
 }
 
 bool WasmDebugBreakpointMatches(MethodDesc* methodDesc, uint32_t ilOffset)
@@ -255,6 +281,49 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReceiveCommand(const uin
     ArmWasmDebugBreakpointFromCommand(reinterpret_cast<const char*>(g_wasmDebugLastCommand));
 
     return 0;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReceiveCommandRecord(const uint8_t* commandRecord, uint32_t commandRecordLength)
+{
+    if (commandRecord == nullptr || commandRecordLength != sizeof(WasmDebugCommandRecord))
+    {
+        return -1;
+    }
+
+    WasmDebugCommandRecord record;
+    memcpy(&record, commandRecord, sizeof(record));
+    if (record.Magic != WasmDebugCommandRecordMagic)
+    {
+        return -1;
+    }
+
+    switch (static_cast<WasmDebugCommandKind>(record.Kind))
+    {
+        case WasmDebugCommandKind::SetBreakpointByName:
+            record.MethodName[sizeof(record.MethodName) - 1] = 0;
+            ArmWasmDebugBreakpoint(0, record.MethodName);
+            return 0;
+
+        case WasmDebugCommandKind::SetBreakpointByToken:
+            if (record.ILOffset != 0)
+            {
+                return -1;
+            }
+
+            ArmWasmDebugBreakpoint(record.MethodToken, "");
+            return 0;
+
+        case WasmDebugCommandKind::Continue:
+            if (g_wasmDebugBreakpointStopped)
+            {
+                g_wasmDebugContinueRequested = true;
+                g_wasmDebugContinueCount++;
+            }
+            return 0;
+
+        default:
+            return -1;
+    }
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetLastCommandLength()

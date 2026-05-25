@@ -21,6 +21,7 @@ constexpr uint32_t WasmDbiDacAbiVersion = 1;
 constexpr uint64_t ContractDescriptorMagic = 0x0043414443434e44;
 constexpr uint32_t TestDataMagic = 0x43445744;
 constexpr uint32_t MaxTransportMessageBytes = 256;
+constexpr uint32_t WasmDebugCommandRecordMagic = 0x434d4457;
 
 enum ComponentMask : uint32_t
 {
@@ -28,6 +29,14 @@ enum ComponentMask : uint32_t
     ComponentCeeDac = 0x2,
     ComponentDaccess = 0x4,
     ComponentCordbdi = 0x8,
+};
+
+enum class WasmDebugCommandKind : uint32_t
+{
+    None = 0,
+    SetBreakpointByName = 1,
+    SetBreakpointByToken = 2,
+    Continue = 3,
 };
 
 enum Result : int32_t
@@ -76,6 +85,15 @@ struct DbiControlProbe
     int32_t BreakpointResult;
 };
 
+struct WasmDebugCommandRecord
+{
+    uint32_t Magic;
+    uint32_t Kind;
+    uint32_t MethodToken;
+    uint32_t ILOffset;
+    char MethodName[64];
+};
+
 struct WasmDebugEventRecord
 {
     uint32_t Kind;
@@ -91,6 +109,7 @@ static_assert(sizeof(ContractDescriptorLayout) == 32);
 static_assert(sizeof(ContractPointerDataProbe) == 8);
 static_assert(sizeof(TestDataProbe) == 48);
 static_assert(sizeof(DbiControlProbe) == 16);
+static_assert(sizeof(WasmDebugCommandRecord) == 80);
 static_assert(sizeof(WasmDebugEventRecord) == 340);
 static_assert(sizeof(void*) == sizeof(uint32_t));
 
@@ -109,6 +128,7 @@ int32_t ReadRuntimeContractDescriptor(
     ContractDescriptorLayout* descriptor);
 
 int32_t SendRuntimeCommand(const char* command, uint32_t commandLength);
+int32_t SendRuntimeCommandRecord(const WasmDebugCommandRecord& command);
 
 class WasmDacDataTarget final :
     public ICLRDataTarget,
@@ -539,6 +559,14 @@ int32_t SendRuntimeCommand(const char* command, uint32_t commandLength)
         commandLength);
     return result == Success ? Success : result;
 }
+
+int32_t SendRuntimeCommandRecord(const WasmDebugCommandRecord& command)
+{
+    int32_t result = coreclr_wasm_dbi_dac_send_ipc_to_runtime(
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&command)),
+        sizeof(command));
+    return result == Success ? Success : result;
+}
 }
 
 extern "C" bool
@@ -879,17 +907,16 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_name(uint32_t name
         return E_FAIL;
     }
 
-    static constexpr char Prefix[] = "dbi-command:set-breakpoint:name=";
-    constexpr uint32_t PrefixLength = sizeof(Prefix) - 1;
-    if (nameLength == 0 || nameLength >= MaxTransportMessageBytes - PrefixLength)
+    if (nameLength == 0 || nameLength >= sizeof(WasmDebugCommandRecord::MethodName))
     {
         return InvalidArgument;
     }
 
-    char command[MaxTransportMessageBytes];
-    memcpy(command, Prefix, PrefixLength);
-    memcpy(command + PrefixLength, reinterpret_cast<void*>(static_cast<uintptr_t>(nameAddress)), nameLength);
-    return SendRuntimeCommand(command, PrefixLength + nameLength);
+    WasmDebugCommandRecord command{};
+    command.Magic = WasmDebugCommandRecordMagic;
+    command.Kind = static_cast<uint32_t>(WasmDebugCommandKind::SetBreakpointByName);
+    memcpy(command.MethodName, reinterpret_cast<void*>(static_cast<uintptr_t>(nameAddress)), nameLength);
+    return SendRuntimeCommandRecord(command);
 }
 
 extern "C" int32_t coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_token(uint32_t methodToken, uint32_t ilOffset)
@@ -904,14 +931,12 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_token(uint32_t met
         return E_NOTIMPL;
     }
 
-    char command[MaxTransportMessageBytes];
-    int written = snprintf(command, sizeof(command), "dbi-command:set-breakpoint:token=0x%08x", methodToken);
-    if (written < 0 || static_cast<uint32_t>(written) >= MaxTransportMessageBytes)
-    {
-        return InvalidArgument;
-    }
-
-    return SendRuntimeCommand(command, static_cast<uint32_t>(written));
+    WasmDebugCommandRecord command{};
+    command.Magic = WasmDebugCommandRecordMagic;
+    command.Kind = static_cast<uint32_t>(WasmDebugCommandKind::SetBreakpointByToken);
+    command.MethodToken = methodToken;
+    command.ILOffset = ilOffset;
+    return SendRuntimeCommandRecord(command);
 }
 
 extern "C" int32_t coreclr_wasm_dbi_dac_dbi_continue()
@@ -921,8 +946,10 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_continue()
         return E_FAIL;
     }
 
-    static constexpr char ContinueCommand[] = "dbi-command:continue";
-    return SendRuntimeCommand(ContinueCommand, sizeof(ContinueCommand) - 1);
+    WasmDebugCommandRecord command{};
+    command.Magic = WasmDebugCommandRecordMagic;
+    command.Kind = static_cast<uint32_t>(WasmDebugCommandKind::Continue);
+    return SendRuntimeCommandRecord(command);
 }
 
 extern "C" int32_t coreclr_wasm_dbi_dac_dbi_poll_event(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)

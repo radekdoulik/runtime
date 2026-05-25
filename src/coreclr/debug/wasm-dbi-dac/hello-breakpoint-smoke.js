@@ -10,6 +10,8 @@ const { pathToFileURL } = require("url");
 const { spawnSync } = require("child_process");
 
 const BreakpointMethodName = "BreakHere";
+const CommandRecordMagic = 0x434d4457;
+const CommandRecordSize = 80;
 
 function fail(message) {
     throw new Error(message);
@@ -351,7 +353,11 @@ async function main() {
         const stack = runtimeExports.stackSave();
         const runtimeMessageAddress = runtimeExports.stackAlloc(messageLength);
         runtimeMemory.set(message, runtimeMessageAddress);
-        const result = runtimeExports.CoreClrWasmDebugReceiveCommand(runtimeMessageAddress, messageLength);
+        const result =
+            messageLength === CommandRecordSize &&
+            new DataView(message.buffer, message.byteOffset, message.byteLength).getUint32(0, true) === CommandRecordMagic
+                ? runtimeExports.CoreClrWasmDebugReceiveCommandRecord(runtimeMessageAddress, messageLength)
+                : runtimeExports.CoreClrWasmDebugReceiveCommand(runtimeMessageAddress, messageLength);
         runtimeExports.stackRestore(stack);
         return result;
     });
