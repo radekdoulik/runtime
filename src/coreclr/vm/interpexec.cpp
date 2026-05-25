@@ -17,7 +17,8 @@
 #include <functional>
 
 #if defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
-extern "C" void CoreClrWasmDebugMaybeHitInterpreterMethod(MethodDesc* methodDesc, uint32_t ilOffset);
+extern "C" void CoreClrWasmDebugMaybePatchInterpreterMethod(MethodDesc* methodDesc, uint32_t ilOffset, int32_t* ip);
+extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, int32_t* originalOpcode);
 #endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
 
 struct InterpDispatchCacheEntry
@@ -1369,7 +1370,7 @@ void InterpExecMethod(InterpreterFrame *pInterpreterFrame, InterpMethodContextFr
 #if defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
     if (pExceptionClauseArgs == NULL)
     {
-        CoreClrWasmDebugMaybeHitInterpreterMethod(pMethod->methodHnd, 0);
+        CoreClrWasmDebugMaybePatchInterpreterMethod(pMethod->methodHnd, 0, const_cast<int32_t*>(ip));
     }
 #endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
     stack = pFrame->pStack;
@@ -1424,6 +1425,15 @@ SWITCH_OPCODE:
                 {
                     LOG((LF_CORDB, LL_INFO10000, "InterpExecMethod: Hit breakpoint at IP %p\n", ip));
                     InterpBreakpoint(ip, pFrame, stack, pInterpreterFrame);
+
+#if defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
+                    int32_t originalOpcode = 0;
+                    if ((pThreadContext->m_bypassAddress == NULL) &&
+                        CoreClrWasmDebugHandleInterpreterBreakpoint(pFrame->startIp->Method->methodHnd, 0, ip, &originalOpcode))
+                    {
+                        pThreadContext->SetBypass(ip, originalOpcode);
+                    }
+#endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
 
                     int32_t bypassOpcode = 0;
 
@@ -3475,7 +3485,7 @@ CALL_INTERP_METHOD:
                     }
                     pThreadContext->pStackPointer = stack + pMethod->allocaSize;
 #if defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
-                    CoreClrWasmDebugMaybeHitInterpreterMethod(pMethod->methodHnd, 0);
+                    CoreClrWasmDebugMaybePatchInterpreterMethod(pMethod->methodHnd, 0, const_cast<int32_t*>(ip));
 #endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
                     break;
                 }

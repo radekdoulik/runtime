@@ -3,6 +3,7 @@
 
 #include "common.h"
 #include "threads.h"
+#include "../../interpreter/intops.h"
 
 #include <emscripten.h>
 #include <stdio.h>
@@ -44,6 +45,9 @@ bool g_wasmDebugBreakpointStopped;
 bool g_wasmDebugContinueRequested;
 uint32_t g_wasmDebugBreakpointHitCount;
 uint32_t g_wasmDebugContinueCount;
+int32_t* g_wasmDebugBreakpointAddress;
+int32_t g_wasmDebugBreakpointOriginalOpcode;
+bool g_wasmDebugBreakpointPatchActive;
 
 void SetWasmDebugEvent(const char* event)
 {
@@ -58,6 +62,18 @@ void SetWasmDebugEvent(const char* event)
     g_wasmDebugLastEventLength = static_cast<uint32_t>(eventLength);
 }
 
+void RestoreWasmDebugBreakpointPatch()
+{
+    if (g_wasmDebugBreakpointPatchActive && g_wasmDebugBreakpointAddress != nullptr)
+    {
+        *g_wasmDebugBreakpointAddress = g_wasmDebugBreakpointOriginalOpcode;
+    }
+
+    g_wasmDebugBreakpointAddress = nullptr;
+    g_wasmDebugBreakpointOriginalOpcode = 0;
+    g_wasmDebugBreakpointPatchActive = false;
+}
+
 void ArmWasmDebugBreakpointFromCommand(const char* command)
 {
     static constexpr char Prefix[] = "dbi-command:set-breakpoint";
@@ -68,6 +84,8 @@ void ArmWasmDebugBreakpointFromCommand(const char* command)
     {
         return;
     }
+
+    RestoreWasmDebugBreakpointPatch();
 
     const char* name = command + sizeof(Prefix) - 1;
     if (strncmp(name, NamePrefix, sizeof(NamePrefix) - 1) == 0)
@@ -104,6 +122,31 @@ void ArmWasmDebugBreakpointFromCommand(const char* command)
     g_wasmDebugContinueRequested = false;
     g_wasmDebugContinueCount = 0;
     g_wasmDebugBreakpointArmed = true;
+}
+
+bool WasmDebugBreakpointMatches(MethodDesc* methodDesc, uint32_t ilOffset)
+{
+    if (methodDesc == nullptr || ilOffset != 0)
+    {
+        return false;
+    }
+
+    LPCUTF8 methodName = methodDesc->GetName();
+    mdMethodDef methodToken = methodDesc->GetMemberDef();
+    if (g_wasmDebugBreakpointMethodToken != 0 &&
+        g_wasmDebugBreakpointMethodToken != methodToken)
+    {
+        return false;
+    }
+
+    if (g_wasmDebugBreakpointMethodToken == 0 &&
+        g_wasmDebugBreakpointMethodName[0] != 0 &&
+        strstr(methodName, g_wasmDebugBreakpointMethodName) == nullptr)
+    {
+        return false;
+    }
+
+    return true;
 }
 
 void ContinueWasmDebugBreakpointFromCommand(const char* command)
@@ -219,33 +262,40 @@ extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetContinueCount()
     return g_wasmDebugContinueCount;
 }
 
-extern "C" void CoreClrWasmDebugMaybeHitInterpreterMethod(MethodDesc* methodDesc, uint32_t ilOffset)
+extern "C" void CoreClrWasmDebugMaybePatchInterpreterMethod(MethodDesc* methodDesc, uint32_t ilOffset, int32_t* ip)
 {
-    if (!g_wasmDebugBreakpointArmed || methodDesc == nullptr || ilOffset != 0)
+    if (!g_wasmDebugBreakpointArmed || ip == nullptr || !WasmDebugBreakpointMatches(methodDesc, ilOffset))
     {
         return;
     }
 
-    LPCUTF8 methodName = methodDesc->GetName();
-    mdMethodDef methodToken = methodDesc->GetMemberDef();
-    if (g_wasmDebugBreakpointMethodToken != 0 &&
-        g_wasmDebugBreakpointMethodToken != methodToken)
-    {
-        return;
-    }
-
-    if (g_wasmDebugBreakpointMethodToken == 0 &&
-        g_wasmDebugBreakpointMethodName[0] != 0 &&
-        strstr(methodName, g_wasmDebugBreakpointMethodName) == nullptr)
-    {
-        return;
-    }
-
+    g_wasmDebugBreakpointAddress = ip;
+    g_wasmDebugBreakpointOriginalOpcode = *ip;
+    g_wasmDebugBreakpointPatchActive = true;
     g_wasmDebugBreakpointArmed = false;
+    *ip = INTOP_BREAKPOINT;
+}
+
+extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, int32_t* originalOpcode)
+{
+    if (!g_wasmDebugBreakpointPatchActive ||
+        ip == nullptr ||
+        originalOpcode == nullptr ||
+        ip != g_wasmDebugBreakpointAddress ||
+        !WasmDebugBreakpointMatches(methodDesc, ilOffset))
+    {
+        return false;
+    }
+
+    *originalOpcode = g_wasmDebugBreakpointOriginalOpcode;
+    RestoreWasmDebugBreakpointPatch();
+
     g_wasmDebugBreakpointStopped = true;
     g_wasmDebugContinueRequested = false;
     g_wasmDebugBreakpointHitCount++;
 
+    LPCUTF8 methodName = methodDesc->GetName();
+    mdMethodDef methodToken = methodDesc->GetMemberDef();
     char event[WasmDebugMessageBufferSize];
     snprintf(
         event,
@@ -264,4 +314,5 @@ extern "C" void CoreClrWasmDebugMaybeHitInterpreterMethod(MethodDesc* methodDesc
     }, g_wasmDebugLastEvent, g_wasmDebugLastEventLength);
 
     g_wasmDebugBreakpointStopped = false;
+    return true;
 }
