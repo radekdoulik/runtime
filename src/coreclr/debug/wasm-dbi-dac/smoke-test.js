@@ -9,6 +9,10 @@ const { pathToFileURL } = require("url");
 
 const ExpectedAbiVersion = 1;
 const ExpectedComponentMask = 0xf;
+const ExpectedVersionBlobMagic = 0x42564457;
+const ExpectedVersionBlobSize = 32;
+const ExpectedProtocolBreakingChangeCounter = 1;
+const HrIncompatibleProtocol = 0x8013134b | 0;
 const ContractDescriptorMagic = 0x0043414443434e44n;
 const TestDataMagic = 0x43445744;
 const E_NOTIMPL = -2147467263;
@@ -302,6 +306,8 @@ async function main() {
     const copyAddress = debuggerExports.stackAlloc(8);
     const sessionEventAddress = debuggerExports.stackAlloc(64);
     const sessionEventBytesWrittenAddress = debuggerExports.stackAlloc(4);
+    const versionBlobAddress = debuggerExports.stackAlloc(ExpectedVersionBlobSize);
+    const versionBlobBytesWrittenAddress = debuggerExports.stackAlloc(4);
     const transportMessageBytes = new TextEncoder().encode(TransportMessage);
     const transportMessageAddress = debuggerExports.stackAlloc(transportMessageBytes.length);
     const symbolName = "DotNetRuntimeContractDescriptor";
@@ -310,6 +316,29 @@ async function main() {
 
     writeAscii(debuggerModule.HEAPU8, symbolNameAddress, symbolName);
     writeBytes(debuggerModule.HEAPU8, transportMessageAddress, transportMessageBytes);
+
+    const versionBlobResult = debuggerModule._coreclr_wasm_dbi_dac_get_version_blob(versionBlobAddress, ExpectedVersionBlobSize, versionBlobBytesWrittenAddress);
+    const versionBlobBytesWritten = new DataView(debuggerModule.HEAPU8.buffer, versionBlobBytesWrittenAddress, 4).getUint32(0, true);
+    const versionBlobView = new DataView(debuggerModule.HEAPU8.buffer, versionBlobAddress, ExpectedVersionBlobSize);
+    const versionBlob = {
+        magic: versionBlobView.getUint32(0, true),
+        blobSize: versionBlobView.getUint32(4, true),
+        abiVersion: versionBlobView.getUint32(8, true),
+        protocolBreakingChangeCounter: versionBlobView.getUint32(12, true),
+        componentMask: versionBlobView.getUint32(16, true),
+        sidecarBuildVersionMS: versionBlobView.getUint32(20, true),
+        sidecarBuildVersionLS: versionBlobView.getUint32(24, true),
+        reserved: versionBlobView.getUint32(28, true)
+    };
+
+    const checkProtocolMatchResult = debuggerModule._coreclr_wasm_dbi_dac_check_protocol(
+        ExpectedVersionBlobMagic, ExpectedAbiVersion, ExpectedProtocolBreakingChangeCounter);
+    const checkProtocolBadMagicResult = debuggerModule._coreclr_wasm_dbi_dac_check_protocol(
+        ExpectedVersionBlobMagic ^ 1, ExpectedAbiVersion, ExpectedProtocolBreakingChangeCounter) | 0;
+    const checkProtocolBadAbiResult = debuggerModule._coreclr_wasm_dbi_dac_check_protocol(
+        ExpectedVersionBlobMagic, ExpectedAbiVersion + 1, ExpectedProtocolBreakingChangeCounter) | 0;
+    const checkProtocolBadCounterResult = debuggerModule._coreclr_wasm_dbi_dac_check_protocol(
+        ExpectedVersionBlobMagic, ExpectedAbiVersion, ExpectedProtocolBreakingChangeCounter + 1) | 0;
 
     const descriptorResult = debuggerModule._coreclr_wasm_dbi_dac_probe_runtime_contract_descriptor(1, descriptorAddress);
     const pointerDataResult = debuggerModule._coreclr_wasm_dbi_dac_probe_contract_pointer_data(1, 2, pointerDataAddress);
@@ -367,6 +396,24 @@ async function main() {
         componentMask,
         separateMemories: true,
         cordbFirstResult,
+        versionBlobResult,
+        versionBlobBytesWritten,
+        versionBlob: {
+            magic: `0x${versionBlob.magic.toString(16)}`,
+            blobSize: versionBlob.blobSize,
+            abiVersion: versionBlob.abiVersion,
+            protocolBreakingChangeCounter: versionBlob.protocolBreakingChangeCounter,
+            componentMask: `0x${versionBlob.componentMask.toString(16)}`,
+            sidecarBuildVersionMS: versionBlob.sidecarBuildVersionMS,
+            sidecarBuildVersionLS: versionBlob.sidecarBuildVersionLS,
+            reserved: versionBlob.reserved
+        },
+        checkProtocol: {
+            match: checkProtocolMatchResult,
+            badMagic: `0x${(checkProtocolBadMagicResult >>> 0).toString(16)}`,
+            badAbi: `0x${(checkProtocolBadAbiResult >>> 0).toString(16)}`,
+            badCounter: `0x${(checkProtocolBadCounterResult >>> 0).toString(16)}`
+        },
         descriptorResult,
         magic: `0x${descriptor.magic.toString(16)}`,
         flags: descriptor.flags,
@@ -412,6 +459,20 @@ async function main() {
     if (abiVersion !== ExpectedAbiVersion ||
         componentMask !== ExpectedComponentMask ||
         cordbFirstResult !== 0 ||
+        versionBlobResult !== 0 ||
+        versionBlobBytesWritten !== ExpectedVersionBlobSize ||
+        versionBlob.magic !== ExpectedVersionBlobMagic ||
+        versionBlob.blobSize !== ExpectedVersionBlobSize ||
+        versionBlob.abiVersion !== ExpectedAbiVersion ||
+        versionBlob.protocolBreakingChangeCounter !== ExpectedProtocolBreakingChangeCounter ||
+        versionBlob.componentMask !== ExpectedComponentMask ||
+        versionBlob.sidecarBuildVersionMS !== 0 ||
+        versionBlob.sidecarBuildVersionLS !== 0 ||
+        versionBlob.reserved !== 0 ||
+        checkProtocolMatchResult !== 0 ||
+        checkProtocolBadMagicResult !== HrIncompatibleProtocol ||
+        checkProtocolBadAbiResult !== HrIncompatibleProtocol ||
+        checkProtocolBadCounterResult !== HrIncompatibleProtocol ||
         descriptorResult !== 0 ||
         descriptor.magic !== ContractDescriptorMagic ||
         descriptor.descriptorSize === 0 ||

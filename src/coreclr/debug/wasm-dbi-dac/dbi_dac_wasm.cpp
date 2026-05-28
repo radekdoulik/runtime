@@ -25,6 +25,32 @@ constexpr uint32_t TestDataMagic = 0x43445744;
 constexpr uint32_t MaxTransportMessageBytes = 256;
 constexpr uint32_t WasmDebugCommandRecordMagic = 0x434d4457;
 
+// 'WDVB' (Wasm DAC/DBI Version Blob) - stored little-endian so the bytes
+// 'W','D','V','B' appear in that order on every wasm host.
+constexpr uint32_t WasmDbiDacVersionBlobMagic = 0x42564457;
+
+// Monotonic counter bumped whenever the sidecar protocol breaks wire
+// compatibility with previous hosts. Mirrors the desktop pattern at
+// src/coreclr/debug/inc/dacdbistructures.h
+// (kCurrentDacDbiProtocolBreakingChangeCounter), where a mismatch causes
+// CheckDbiVersion to return CORDBG_E_INCOMPATIBLE_PROTOCOL.
+//
+// Bumping log:
+//   1 - initial value; matches the export set captured at this commit.
+constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 1;
+
+// Sidecar build version - encoded VS_FIXEDFILEINFO-style as two 32-bit
+// words. Reserved for future use; today's PoC sidecar reports 0/0 so
+// version-aware hosts can detect "pre-versioned" builds.
+constexpr uint32_t WasmDbiDacSidecarBuildVersionMS = 0;
+constexpr uint32_t WasmDbiDacSidecarBuildVersionLS = 0;
+
+// CORDBG_E_INCOMPATIBLE_PROTOCOL = MAKE_HRESULT(SEVERITY_ERROR=1,
+// FACILITY_URT=0x13, 0x134b) = 0x8013134B. Defined locally so the
+// exports header stays self-contained; the value is fixed by the
+// public corerror.h contract.
+constexpr int32_t HrIncompatibleProtocol = static_cast<int32_t>(0x8013134bu);
+
 enum ComponentMask : uint32_t
 {
     ComponentScaffold = 0x1,
@@ -77,6 +103,23 @@ struct TestDataProbe
     double DoubleValue;
     uint32_t VectorLanes[4];
     char Message[16];
+};
+
+// Self-describing version blob - hosts read this once to learn what
+// version of the sidecar protocol this binary speaks. Layout is fixed
+// once published; new fields can only be appended, and old fields can
+// only be deprecated by repurposing them through the breaking-change
+// counter (see WasmDbiDacProtocolBreakingChangeCounter).
+struct WasmDbiDacVersionBlob
+{
+    uint32_t Magic;                        // WasmDbiDacVersionBlobMagic ('WDVB')
+    uint32_t BlobSize;                     // sizeof(WasmDbiDacVersionBlob)
+    uint32_t AbiVersion;                   // monotonic; WasmDbiDacAbiVersion
+    uint32_t ProtocolBreakingChangeCounter;// WasmDbiDacProtocolBreakingChangeCounter
+    uint32_t ComponentMask;                // mirror of get_component_mask()
+    uint32_t SidecarBuildVersionMS;        // reserved; 0 today
+    uint32_t SidecarBuildVersionLS;        // reserved; 0 today
+    uint32_t Reserved;                     // must be 0
 };
 
 struct DbiControlProbe
@@ -640,6 +683,75 @@ WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_get_component_mask)
 uint32_t coreclr_wasm_dbi_dac_get_component_mask()
 {
     return ComponentScaffold | ComponentCeeDac | ComponentDaccess | ComponentCordbdi;
+}
+
+// Write the self-describing version blob into target-memory at
+// `blobOutAddress`. The blob is binary-stable: hosts read the first
+// uint32 (Magic) to validate the format, the next uint32 (BlobSize) to
+// learn how many bytes to consume, and may treat any trailing bytes as
+// reserved-for-future-use. `bytesWrittenAddress` always receives the
+// number of bytes needed even when `blobOutLength` is too small, so
+// hosts can size-and-retry in a single round trip.
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_get_version_blob)
+int32_t coreclr_wasm_dbi_dac_get_version_blob(uint32_t blobOutAddress, uint32_t blobOutLength, uint32_t bytesWrittenAddress)
+{
+    if (bytesWrittenAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    const uint32_t needed = static_cast<uint32_t>(sizeof(WasmDbiDacVersionBlob));
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &needed, sizeof(needed));
+
+    if (blobOutAddress == 0 && needed != 0)
+    {
+        return InvalidArgument;
+    }
+
+    if (blobOutLength < needed)
+    {
+        return BufferTooSmall;
+    }
+
+    WasmDbiDacVersionBlob blob{};
+    blob.Magic = WasmDbiDacVersionBlobMagic;
+    blob.BlobSize = needed;
+    blob.AbiVersion = WasmDbiDacAbiVersion;
+    blob.ProtocolBreakingChangeCounter = WasmDbiDacProtocolBreakingChangeCounter;
+    blob.ComponentMask = coreclr_wasm_dbi_dac_get_component_mask();
+    blob.SidecarBuildVersionMS = WasmDbiDacSidecarBuildVersionMS;
+    blob.SidecarBuildVersionLS = WasmDbiDacSidecarBuildVersionLS;
+    blob.Reserved = 0;
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(blobOutAddress)), &blob, sizeof(blob));
+    return Success;
+}
+
+// Compare a host-supplied (magic, abiVersion, protocolBreakingChangeCounter)
+// triple against this sidecar's contract. Returns S_OK (0) when the host
+// speaks the same protocol, and CORDBG_E_INCOMPATIBLE_PROTOCOL (0x8013134B)
+// otherwise. This mirrors the desktop CheckDbiVersion contract at
+// src/coreclr/debug/daccess/dacdbiimpl.cpp so the JS host can route the
+// same HRESULT back to mscordbi callers when wiring up real DBI flow.
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_check_protocol)
+int32_t coreclr_wasm_dbi_dac_check_protocol(uint32_t hostMagic, uint32_t hostAbiVersion, uint32_t hostProtocolBreakingChangeCounter)
+{
+    if (hostMagic != WasmDbiDacVersionBlobMagic)
+    {
+        return HrIncompatibleProtocol;
+    }
+
+    if (hostAbiVersion != WasmDbiDacAbiVersion)
+    {
+        return HrIncompatibleProtocol;
+    }
+
+    if (hostProtocolBreakingChangeCounter != WasmDbiDacProtocolBreakingChangeCounter)
+    {
+        return HrIncompatibleProtocol;
+    }
+
+    return Success;
 }
 
 WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_copy_from_target)
