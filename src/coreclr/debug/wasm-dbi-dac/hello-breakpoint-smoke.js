@@ -123,7 +123,7 @@ async function loadDebugger(debuggerJsPath, sendToRuntime) {
             Object.assign(imports.env, hostImports);
             imports.coreclr_dbi_dac = hostImports;
 
-            const wasmPath = path.join(debuggerDirectory, "coreclr-dbi-dac.wasm");
+            const wasmPath = path.join(debuggerDirectory, "coreclr-dbi-dac-tests.wasm");
             WebAssembly.instantiate(fs.readFileSync(wasmPath), imports).then(({ instance: wasmInstance, module }) => {
                 instance = wasmInstance;
                 receiveInstance(wasmInstance, module);
@@ -378,7 +378,7 @@ async function main() {
     const coreclrObjDirectory = path.resolve(process.cwd(), process.argv[2] ?? "artifacts/obj/coreclr/browser.wasm.Debug");
     const repoRoot = path.resolve(__dirname, "../../../..");
     const runtimeJsPath = path.join(coreclrObjDirectory, "hosts/corerun/corerun.js");
-    const debuggerJsPath = path.join(coreclrObjDirectory, "debug/wasm-dbi-dac/coreclr-dbi-dac.js");
+    const debuggerJsPath = path.join(coreclrObjDirectory, "debug/wasm-dbi-dac/coreclr-dbi-dac-tests.js");
     const sharedFrameworkPath = path.join(repoRoot, "artifacts/bin/testhost/net11.0-browser-Debug-wasm/shared/Microsoft.NETCore.App/11.0.0");
 
     requireFile(runtimeJsPath, "runtime JS wrapper");

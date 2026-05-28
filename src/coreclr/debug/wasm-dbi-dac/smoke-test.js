@@ -165,7 +165,7 @@ function readNullTerminatedAscii(memory, address, byteCount) {
 async function main() {
     const coreclrObjDirectory = resolvePath(process.argv[2] ?? "artifacts/obj/coreclr/browser.wasm.Debug");
     const runtimeJsPath = resolvePath(process.argv[3] ?? path.join(coreclrObjDirectory, "hosts/corerun/corerun.js"));
-    const debuggerJsPath = resolvePath(process.argv[4] ?? path.join(coreclrObjDirectory, "debug/wasm-dbi-dac/coreclr-dbi-dac.js"));
+    const debuggerJsPath = resolvePath(process.argv[4] ?? path.join(coreclrObjDirectory, "debug/wasm-dbi-dac/coreclr-dbi-dac-tests.js"));
 
     requireFile(runtimeJsPath, "runtime JS wrapper");
     requireFile(`${runtimeJsPath.slice(0, -3)}.wasm`, "runtime WASM module");
