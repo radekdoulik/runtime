@@ -79,6 +79,254 @@ topology into a single binary.
 | `src/coreclr/debug/inc/readonlydatatargetfacade.inl` | 1 | 1 | 0 | 0 |
 | **Total** | **26** | **14** | **0** | **12** |
 
+## `HOST_*` audit
+
+This section discharges plan §1 step 2: "audit `HOST_*` defines for the
+wasm sidecar build (browser-wasm, host = target = wasm32-emscripten)."
+The previous bullet under *Cross-file observations* — "Phase 1 work to
+confirm host vs. target defines for the DAC/DBI compile units […]
+needs to add the `HOST_*` story; today it does not exist in the debug
+tree" — is settled by what follows.
+
+### Scope of the audit
+
+The audit covers the compile units that participate in the wasm
+sidecar link as listed in `src/coreclr/debug/wasm-dbi-dac/CMakeLists.txt`
+(line list reproduced in *Inventory snapshot* above): `daccess`,
+`cordbdi`, `cordbee_dac`, `cee_dac`, `debug-pal`, `dbgutil`, the
+metadata DBI/DAC libraries, `utilcode_dac`, `coreclrpal`,
+`coreclrpal_dac`, `coreclrminipal`, `minipal`, `corguids`, `mscorrc`.
+The check is: for every `#if defined(HOST_*)` / `#ifdef HOST_*` site
+reachable in these objects, does the active arm produce code that
+makes sense on wasm32-emscripten?
+
+### Which `HOST_*` defines actually reach the sidecar TUs
+
+Authoritative evidence: `compile_commands.json` from
+`artifacts/obj/coreclr/browser.wasm.Debug/` (the sidecar build dir).
+Every sidecar TU sampled (`daccess/cdac.cpp`, `daccess/daccess.cpp`,
+`di/cordb.cpp`, `di/module.cpp`, `ee/dac/cordebug.cpp`,
+`shared/dbgtransportsession.cpp`, `dbgutil/elfreader.cpp`,
+`md/compiler/disp.cpp`, `utilcode/debug.cpp`, `pal/src/*`) carries
+**exactly** the same `HOST_*` set:
+
+| `HOST_*` macro | Defined on sidecar? | Source |
+|---|---|---|
+| `HOST_BROWSER` | Yes | `eng/native/configurecompiler.cmake:514` (under `CLR_CMAKE_HOST_BROWSER`) |
+| `HOST_UNIX` | Yes | `eng/native/configurecompiler.cmake:455` (emscripten ⇒ `CLR_CMAKE_HOST_UNIX`, set at `configureplatform.cmake:218`) |
+| `HOST_WASM` | Yes | `eng/native/configurecompiler.cmake:417` (under `CLR_CMAKE_HOST_ARCH_WASM`) |
+| `HOST_32BIT` | Yes (=1) | Same line as `HOST_WASM` |
+| `HOST_LINUX` | **No** | Never emitted as `-D` for any platform; only the cmake variable `CLR_CMAKE_HOST_LINUX` exists. |
+| `HOST_OSX`, `HOST_APPLE`, `HOST_IOS`, `HOST_TVOS`, `HOST_MACCATALYST`, `HOST_ANDROID`, `HOST_WASI`, `HOST_WINDOWS` | **No** | Not the host. |
+| `HOST_AMD64`, `HOST_X86`, `HOST_ARM`, `HOST_ARM64`, `HOST_LOONGARCH64`, `HOST_RISCV64`, `HOST_S390X`, `HOST_MIPS64`, `HOST_POWERPC64`, `HOST_64BIT` | **No** | Not the host architecture. |
+| `BIGENDIAN` | **No** | wasm is little-endian. |
+
+The four `HOST_*` macros that *are* defined match what the rest of
+the runtime configures for browser-wasm targets and are the values
+the existing wasm Mono build relies on, so the sidecar inherits a
+known-good HOST configuration; nothing is bespoke to the DAC/DBI
+sidecar.
+
+### `HOST_*` usage sites in the DAC/DBI compile units
+
+A `grep -rnE '#\s*(if|ifdef|ifndef|elif)\b.*HOST_[A-Z0-9_]+'
+src/coreclr/debug/` returns **0 hits for `HOST_WASM` and
+`HOST_BROWSER`** (confirming the prior bullet at line 601). The
+HOST sites that *are* reached in the sidecar break down as follows;
+all evaluate correctly for wasm32-emscripten without any
+wasm-specific arm being needed.
+
+- **`HOST_UNIX` active arms** (compile and run as expected on wasm).
+  Examples: `daccess/cdac.cpp:22` calls `PAL_GetPalHostModule`;
+  `daccess/daccess.cpp:55,65` and `di/cordb.cpp:205` call
+  `PAL_InitializeDLL`. Both helpers are present in
+  `libcoreclrpal.a` (`llvm-nm` confirms `PAL_InitializeDLL` and
+  `PAL_GetPalHostModule` exported).
+- **`HOST_WINDOWS` arms** are skipped (correct — wasm is not
+  Windows). No Win32-only API ends up referenced from the sidecar.
+- **`HOST_64BIT` arms** (`inc/dacimpl.h:48,65,82,593`,
+  `daccess/dacdbiimpl.cpp:5007`, `di/shimprocess.cpp:674`,
+  `di/process.cpp:11091`, `inc/dbgipcevents.h:181`) all fall through
+  to their 32-bit complement on wasm. The 32-bit arm emits the
+  range-check / size-cast paths that are valid for 4-byte
+  pointers — see *Cross-bitness assertions verified* below.
+- **`HOST_ARM` / `HOST_ARM64` arms** (`di/cordb.cpp:440,479`,
+  `inc/arm64/primitives.h:150`) are skipped (host is wasm, not
+  ARM). The two interesting sites in `debug/ee/controller.cpp` and
+  `debug/ee/debugger.h` that test `HOST_OSX && HOST_ARM64` are
+  additionally gated by `!DACCESS_COMPILE`, so they don't fire in
+  the sidecar build at all.
+- **`HOST_OSX` / `HOST_APPLE` arms** are skipped (host is wasm,
+  not Darwin).
+- **`HOST_UNIX` site that returns `E_FAIL` honestly**:
+  `di/module.cpp:772` (in-memory module loader) returns `E_FAIL` on
+  any non-Windows host. That is correct for wasm; the caller is
+  exercised only by Win32-specific ICorDebug paths that the sidecar
+  does not surface.
+- **`dbgutil/elfreader.{cpp,h}` and `dbgutil/dbgutil.cpp`** compile
+  with `HOST_UNIX` (their ELF / generic PE `TryGetSymbol`
+  implementations), but on wasm they are dead code: the only entry
+  is from cDAC bootstrap, which is cut for `TARGET_WASM`
+  (`dacdbiimpl.cpp:323-368` and `daccess.cpp:6550-6589`, both
+  tracked stubs above).
+
+### Gaps found
+
+Zero **Phase-1-blocking** `HOST_*` gaps. The audit did not find a
+single `#if defined(HOST_*)` site in the sidecar TUs that produces
+wrong code or that needs a new `HOST_WASM` / `HOST_BROWSER` arm
+added. The four `HOST_*` defines listed above suffice. Two adjacent
+observations are worth recording even though they are not Phase 1
+blockers:
+
+- `dbgutil/elfreader.*` compiles into `libdbgutil.a` and is
+  link-reachable from the sidecar, but currently never executed on
+  wasm (cDAC bootstrap is cut). If a future phase wires up cDAC on
+  wasm via a different code path, the ELF reader path will need to
+  be replaced by a wasm-appropriate symbol-lookup mechanism. This
+  is a Phase 8 concern (cDAC enablement), not a HOST_* issue.
+- `debug/inc/twowaypipe.h` and `debug/shared/dbgtransportsession.cpp`
+  compile their `HOST_UNIX` arms (fd-based pipes, `kill`, `waitpid`)
+  for wasm. Emscripten provides the libc symbols so the objects
+  link, but the pipe transport itself is not wired into the sidecar
+  IPC today and will need a wasm-specific JS-host bridge when
+  `FEATURE_DBGIPC_TRANSPORT_DI` is actually exercised. This is a
+  Phase 6 concern (DBI transport), not a HOST_* issue.
+
+### Cross-bitness assertions verified
+
+The sidecar is `HOST_32BIT && TARGET_32BIT` (wasm32). Every
+cross-bitness assumption that matters for DAC correctness was
+spot-checked:
+
+- **`TADDR` is `uintptr_t`** (`src/coreclr/inc/daccess.h:605,2129`),
+  i.e. 4 bytes on wasm32. The DAC's
+  `host pointer → target address` casts in `dacimpl.h:48-90,593`
+  use the `!HOST_64BIT` arms, which include the
+  `(TADDR)(uintptr_t)` range-check; correct for wasm32.
+- **cDAC PlatformFlags emit the 32-bit flag.** For sidecar builds
+  the descriptor used at runtime is
+  `src/coreclr/debug/datadescriptor-shared/datadescriptor.cpp:345`,
+  which sets
+  `PlatformFlags = (sizeof(void*) == 4 ? 0x02 : 0) | 0x01`; on
+  wasm32 this advertises both the
+  `IsLittleEndian` (`0x01`) and `Is32Bit` (`0x02`) bits, matching
+  what the runtime is. The sanity static-asserts at
+  `datadescriptor.cpp:313`
+  (`sizeof(BinaryBlobDataDescriptor) >= sizeof(MagicCookieType)`)
+  and `datadescriptor.cpp:316`
+  (`offsetof(…, Cookie) == 0`) hold trivially. Note: the sibling
+  `contractdescriptorstub.c:25` has a pre-existing typo
+  (`0x1u & (sizeof(void*) == 4 ? 0x02u : 0x00u)` — bitwise `&`
+  always produces `0`); per
+  `src/coreclr/clrdatadescriptors.cmake:27-31` the stub is only
+  used when no SDK/msbuild is available, so it does **not** reach
+  the wasm sidecar build, but it should be fixed upstream
+  separately.
+- **Endianness.** No `-DBIGENDIAN` is emitted anywhere in the
+  wasm build (greps for `BIGENDIAN` in `compile_commands.json`
+  return 0 hits); wasm is little-endian, which is the
+  unconditional default in the DAC descriptor code. Correct.
+
+### Undefined symbols currently masked by `ERROR_ON_UNDEFINED_SYMBOLS=0`
+
+`src/coreclr/debug/wasm-dbi-dac/CMakeLists.txt:77-78` sets
+`-sERROR_ON_UNDEFINED_SYMBOLS=0 -sWARN_ON_UNDEFINED_SYMBOLS=0`,
+which lets `wasm-ld` produce a `.wasm` even when symbols are
+unresolved. To get a complete picture of what is being masked, we
+re-linked the sidecar using the existing object files but with both
+flags flipped to `1`. The reproduction is:
+
+1. From `artifacts/obj/coreclr/browser.wasm.Debug/`, take the
+   `em++` link command emitted on `build.ninja:17403-17406` (rule
+   `CXX_EXECUTABLE_LINKER__coreclr-dbi-dac.wasm_…`).
+2. Replace `-sERROR_ON_UNDEFINED_SYMBOLS=0 -sWARN_ON_UNDEFINED_SYMBOLS=0`
+   with `-sERROR_ON_UNDEFINED_SYMBOLS=1 -sWARN_ON_UNDEFINED_SYMBOLS=1`
+   (both flags require integer `0`/`1`, not boolean).
+3. Run the resulting command. `wasm-ld` emits one error per
+   unresolved reference.
+
+The strict link reports **2,740 undefined-symbol errors collapsing
+to 13 distinct symbols**:
+
+| Symbol | Refs | Source archive | Classification |
+|---|---:|---|---|
+| `DebBreakHr` (C linkage) | 2,722 | `libmdcompiler-dbi.a`, `libcordbdi.a` (and most other md/ and di/ archives) | Pre-existing C-linkage mismatch — see root cause below |
+| `TransitionFrame::UpdateRegDisplay_Impl(REGDISPLAY*, bool)` | 7 | `libcee_dac.a` (vm/frames.cpp) | wasm32 TARGET-side gap |
+| `InlinedCallFrame::UpdateRegDisplay_Impl` | 1 | `libcee_dac.a` (vm/frames.cpp) | wasm32 TARGET-side gap |
+| `FaultingExceptionFrame::UpdateRegDisplay_Impl` | 1 | `libcee_dac.a` (vm/frames.cpp) | wasm32 TARGET-side gap |
+| `CHashTable::NewInit` / `Add` / `Delete` | 3 | `libcordbdi.a` (hash.cpp) | wasm32 TARGET-side gap |
+| `CEEInfo::getClassAlignmentRequirementStatic(TypeHandle)` | 1 | `libcee_dac.a` (vm/method.cpp) | wasm32 TARGET-side gap |
+| `GetCONTEXTFromRedirectedStubStackFrame(_CONTEXT*)` | 1 | `libdaccess.a` (`dacdbiimplstackwalk.cpp`) | wasm32 TARGET-side gap |
+| `TGcInfoDecoder<Wasm32GcInfoEncoding>::ctor` | 1 | `libdaccess.a` (enummem.cpp) | wasm32 TARGET-side gap |
+| `TGcInfoDecoder<Wasm32GcInfoEncoding>::GetNumBytesRead()` | 1 | `libdaccess.a` (enummem.cpp) | wasm32 TARGET-side gap |
+| `DBG_PrintInterpreterStack()` | 1 | interpreter debug helper | wasm32 TARGET-side gap |
+| `SystemJS_RandomBytes` | 1 | host JS bridge | By design — JS-side import |
+| `get_symbol_address`, `get_target_module_base`, `read_target_memory`, `send_ipc_to_runtime` | (subsumed in 2,740 above; ≤1 each) | host JS bridge | By design — JS-side imports |
+
+**Important:** none of these 13 are a `HOST_*` audit failure. They
+split into three groups, all of them out-of-scope for Phase 1:
+
+1. **`DebBreakHr` (2,722 refs)** is a pre-existing linkage-name
+   mismatch that the wasm sidecar is the first build configuration
+   to expose: `src/coreclr/inc/debugmacros.h:109` declares
+   `extern VOID DebBreakHr(HRESULT hr);` inside an
+   `extern "C" { … }` block (lines 21-175), but only inside an
+   `#ifdef _DEBUG_IMPL` arm (line 93). `_DEBUG_IMPL` is defined by
+   `utilcode.h:64` / `daccess.h:2482` / et al. **only when
+   `!DACCESS_COMPILE`**. Consequently, callers compiled without
+   `DACCESS_COMPILE` (e.g. `mdcompiler-dbi`'s `disp.cpp`) see the
+   `extern "C"` declaration and emit a reference to **`DebBreakHr`**
+   (C linkage, unmangled). The definition lives in
+   `src/coreclr/utilcode/debug.cpp:335` and is pulled into the
+   sidecar from `libutilcode_dac.a`, which **is** compiled with
+   `-DDACCESS_COMPILE`; there the declaration is invisible and the
+   definition emits with C++ mangling **`_Z10DebBreakHri`**.
+   `llvm-nm` on the two archives confirms this:
+   `libmdcompiler-dbi.a` shows `U DebBreakHr` (unmangled);
+   `libutilcode_dac.a` shows `T _Z10DebBreakHri`. The sidecar is
+   the first link configuration that puts these two archives in
+   the same `wasm-ld` invocation. Native DAC builds escape the
+   mismatch because `libcoreclrdaccore.so` / `.dylib` doesn't link
+   against `mdcompiler-dbi`. A one-line fix is to move the
+   `extern "C" VOID DebBreakHr(HRESULT);` declaration out of the
+   `#ifdef _DEBUG_IMPL` block in `debugmacros.h`. This belongs to
+   Phase 5 (cordbdi / mdcompiler-dbi wasm32 completeness), not
+   Phase 1.
+2. **8 wasm32-specific TARGET completeness gaps** (the
+   `UpdateRegDisplay_Impl` family, `CHashTable` members,
+   `getClassAlignmentRequirementStatic`,
+   `GetCONTEXTFromRedirectedStubStackFrame`,
+   `TGcInfoDecoder<Wasm32GcInfoEncoding>`,
+   `DBG_PrintInterpreterStack`). These are missing wasm32
+   specializations in `vm/cee_dac`, `cordbdi`, and the
+   `Wasm32GcInfoEncoding` GcInfo decoder. They are owned by
+   Phase 5 (DBI/DAC body completeness) and Phase 8 (wasm32 GcInfo).
+3. **4-5 JS-host bridge imports** (`get_symbol_address`,
+   `get_target_module_base`, `read_target_memory`,
+   `send_ipc_to_runtime`, `SystemJS_RandomBytes`) are by design
+   — the sidecar is meant to call into the JS data-target /
+   transport implementation at runtime, so they are resolved by
+   the embedder rather than by `wasm-ld`. They should be declared
+   in an emscripten import list (`--js-library` / `EM_JS`) once
+   the JS-side glue is wired up; Phase 7 (transport).
+
+### Conclusion
+
+For Phase 1 step 2, the wasm sidecar's `HOST_*` story is clean:
+four defines (`HOST_BROWSER`, `HOST_UNIX`, `HOST_WASM`,
+`HOST_32BIT=1`), no debug-tree `HOST_*` cuts, every spot-checked
+`HOST_*` arm in the DAC/DBI compile units evaluates to a
+wasm-correct branch, every cross-bitness assumption used by the
+sidecar build holds (the `contractdescriptorstub.c:25` typo
+called out above is in a stub the sidecar does not reach), and
+every undefined-symbol residue is either intentional JS-bridge
+import or TARGET-side completeness work owned by later phases.
+**Go for Phase 1 step 3** (drop the
+`CLR_CMAKE_ENABLE_WASM_DBI_DAC` opt-in gate at
+`src/coreclr/CMakeLists.txt:363-375`); there is no HOST-level
+risk in making the sidecar build unconditional for browser-wasm.
+
 ## `src/coreclr/debug/daccess/dacdbiimpl.cpp` (10 cuts)
 
 The first nine cuts in this file all exist for the same reason: in
@@ -600,10 +848,10 @@ commitment.
   context layout changes.
 - **No stray `HOST_WASM` cuts.** A `grep -n 'HOST_WASM\|HOST_BROWSER'
   src/coreclr/debug/` returns nothing, so the sidecar build is
-  driven entirely by `TARGET_WASM`. Phase 1 work to confirm host
-  vs. target defines for the DAC/DBI compile units (plan §1, audit
-  `HOST_*` defines) needs to add the `HOST_*` story; today it does
-  not exist in the debug tree.
+  driven entirely by `TARGET_WASM`. See the
+  [HOST_* audit](#host_-audit) section above for the full
+  host-define inventory and a confirmation that no `HOST_*` cuts
+  are needed in the debug tree.
 - **Asymmetric `wasm/primitives.cpp`.** `daccess/wasm/primitives.cpp`
   exists and is included via `daccess/CMakeLists.txt`'s
   `${ARCH_SOURCES_DIR}/primitives.cpp`; the DBI side has no
