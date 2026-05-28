@@ -20,7 +20,7 @@ if (TARGET cee_wks_gen)
     target_precompile_headers(cee_wks_gen PRIVATE [["common.h"]])
 endif()
 
-if (CLR_CMAKE_TARGET_ARCH_WASM AND CLR_CMAKE_ENABLE_WASM_DBI_DAC)
+if (CLR_CMAKE_TARGET_ARCH_WASM)
     target_compile_definitions(cee_wks_core PRIVATE FEATURE_WASM_DBI_DAC)
 endif()
 

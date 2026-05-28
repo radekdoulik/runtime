@@ -1,7 +1,6 @@
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
 add_executable_clr(coreclr_dbi_dac_wasm
-  EXCLUDE_FROM_ALL
   dbi_dac_wasm.cpp
 )
 
