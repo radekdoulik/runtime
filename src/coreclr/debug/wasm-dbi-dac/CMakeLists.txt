@@ -35,58 +35,18 @@ set(WASM_DBI_DAC_BASE_LINK_OPTIONS
   -sWARN_ON_UNDEFINED_SYMBOLS=0
 )
 
-# Product exports: the real DBI/DAC ABI that an IDE / browser host would
-# call. This is what would be shipped in a productized sidecar build.
-set(WASM_DBI_DAC_EXPORTED_FUNCTIONS_PRODUCT
-  _coreclr_wasm_dbi_dac_dbi_connect_runtime
-  _coreclr_wasm_dbi_dac_dbi_continue
-  _coreclr_wasm_dbi_dac_dbi_disconnect_runtime
-  _coreclr_wasm_dbi_dac_dbi_poll_event
-  _coreclr_wasm_dbi_dac_dbi_poll_event_record
-  _coreclr_wasm_dbi_dac_dbi_poll_frame_record
-  _coreclr_wasm_dbi_dac_dbi_poll_process_state
-  _coreclr_wasm_dbi_dac_dbi_session_create
-  _coreclr_wasm_dbi_dac_dbi_session_create_process
-  _coreclr_wasm_dbi_dac_dbi_session_destroy
-  _coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_name
-  _coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_token
-  _coreclr_wasm_dbi_dac_get_abi_version
-  _coreclr_wasm_dbi_dac_get_component_mask
-  _coreclr_wasm_dbi_dac_receive_runtime_event
-  _coreclr_wasm_dbi_dac_receive_runtime_event_record
-  _coreclr_wasm_dbi_dac_receive_runtime_frame_record
-)
-
-# Test-only exports: probes, smoke helpers, and pre-facade transport
-# helpers that are useful for the in-tree smoke harness but are not part
-# of the product ABI. Kept out of the product build so the shipping
-# binary does not advertise them.
-set(WASM_DBI_DAC_EXPORTED_FUNCTIONS_TESTS_ONLY
-  _coreclr_wasm_dbi_dac_copy_from_target
-  _coreclr_wasm_dbi_dac_create_clr_data_instance
-  _coreclr_wasm_dbi_dac_create_cordb_object
-  _coreclr_wasm_dbi_dac_create_dac_dbi_interface
-  _coreclr_wasm_dbi_dac_dbi_read_test_data
-  _coreclr_wasm_dbi_dac_probe_breakpoint_control
-  _coreclr_wasm_dbi_dac_probe_contract_pointer_data
-  _coreclr_wasm_dbi_dac_probe_runtime_contract_descriptor
-  _coreclr_wasm_dbi_dac_probe_test_data
-  _coreclr_wasm_dbi_dac_transport_get_last_event
-  _coreclr_wasm_dbi_dac_transport_send_test_message
-  _coreclr_wasm_dbi_dac_try_get_symbol
-)
-
-set(WASM_DBI_DAC_EXPORTED_FUNCTIONS_TESTS
-  ${WASM_DBI_DAC_EXPORTED_FUNCTIONS_PRODUCT}
-  ${WASM_DBI_DAC_EXPORTED_FUNCTIONS_TESTS_ONLY}
-)
-
-list(JOIN WASM_DBI_DAC_EXPORTED_FUNCTIONS_PRODUCT "," WASM_DBI_DAC_EXPORTED_FUNCTIONS_PRODUCT_ARG)
-list(JOIN WASM_DBI_DAC_EXPORTED_FUNCTIONS_TESTS "," WASM_DBI_DAC_EXPORTED_FUNCTIONS_TESTS_ARG)
-
 # Define a sidecar target. Both variants share the same translation units
-# and link graph; they differ only in which symbols are exported to JS.
-function(_wasm_dbi_dac_define_target target output_name exported_arg)
+# and link graph. Per-export visibility is tagged in `dbi_dac_wasm.cpp`
+# via the macros declared in `dbi_dac_wasm_exports.h`:
+#
+#   WASM_DBI_DAC_EXPORT             - product-tier; exported in both variants.
+#   WASM_DBI_DAC_EXPORT_TESTS_ONLY  - probe / smoke helper; exported only
+#                                     when WASM_DBI_DAC_BUILD_TESTS is defined.
+#
+# wasm-ld honours `export_name` directly, so the linker preserves and
+# exports each tagged function automatically; no parallel
+# EXPORTED_FUNCTIONS list is maintained here.
+function(_wasm_dbi_dac_define_target target output_name)
   add_executable_clr(${target} ${WASM_DBI_DAC_SOURCES})
   set_target_properties(${target} PROPERTIES
     OUTPUT_NAME "${output_name}"
@@ -96,23 +56,15 @@ function(_wasm_dbi_dac_define_target target output_name exported_arg)
     FEATURE_NO_HOST
   )
   target_link_libraries(${target} PRIVATE ${WASM_DBI_DAC_LINK_LIBS})
-  target_link_options(${target} PRIVATE
-    ${WASM_DBI_DAC_BASE_LINK_OPTIONS}
-    "-sEXPORTED_FUNCTIONS=${exported_arg}"
-  )
+  target_link_options(${target} PRIVATE ${WASM_DBI_DAC_BASE_LINK_OPTIONS})
 endfunction()
 
 # Product sidecar: ships only the real DBI/DAC ABI.
-_wasm_dbi_dac_define_target(coreclr_dbi_dac_wasm
-  "coreclr-dbi-dac"
-  "${WASM_DBI_DAC_EXPORTED_FUNCTIONS_PRODUCT_ARG}"
-)
+_wasm_dbi_dac_define_target(coreclr_dbi_dac_wasm "coreclr-dbi-dac")
 
 # Test sidecar: ships the product ABI plus probe / smoke-test helpers.
-_wasm_dbi_dac_define_target(coreclr_dbi_dac_wasm_tests
-  "coreclr-dbi-dac-tests"
-  "${WASM_DBI_DAC_EXPORTED_FUNCTIONS_TESTS_ARG}"
-)
+_wasm_dbi_dac_define_target(coreclr_dbi_dac_wasm_tests "coreclr-dbi-dac-tests")
+target_compile_definitions(coreclr_dbi_dac_wasm_tests PRIVATE WASM_DBI_DAC_BUILD_TESTS=1)
 
 find_program(WASM_DBI_DAC_NODE node)
 if(WASM_DBI_DAC_NODE)

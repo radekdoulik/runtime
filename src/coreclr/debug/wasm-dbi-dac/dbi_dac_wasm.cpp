@@ -11,6 +11,8 @@
 #include "cordebug.h"
 #include "xclrdata.h"
 
+#include "dbi_dac_wasm_exports.h"
+
 EXTERN_C const IID IID_IDacDbiAllocator;
 EXTERN_C const IID IID_IDacDbiMetaDataLookup;
 EXTERN_C bool TryGetSymbol(ICorDebugDataTarget* dataTarget, uint64_t baseAddress, const char* symbolName, uint64_t* symbolAddress);
@@ -628,17 +630,20 @@ TryGetSymbol(ICorDebugDataTarget* dataTarget, uint64_t baseAddress, const char* 
     return true;
 }
 
-extern "C" uint32_t coreclr_wasm_dbi_dac_get_abi_version()
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_get_abi_version)
+uint32_t coreclr_wasm_dbi_dac_get_abi_version()
 {
     return WasmDbiDacAbiVersion;
 }
 
-extern "C" uint32_t coreclr_wasm_dbi_dac_get_component_mask()
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_get_component_mask)
+uint32_t coreclr_wasm_dbi_dac_get_component_mask()
 {
     return ComponentScaffold | ComponentCeeDac | ComponentDaccess | ComponentCordbdi;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_copy_from_target(uint32_t targetAddress, uint32_t debuggerAddress, uint32_t byteCount)
+WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_copy_from_target)
+int32_t coreclr_wasm_dbi_dac_copy_from_target(uint32_t targetAddress, uint32_t debuggerAddress, uint32_t byteCount)
 {
     if (debuggerAddress == 0 && byteCount != 0)
     {
@@ -653,7 +658,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_copy_from_target(uint32_t targetAddress,
     return result == Success ? Success : HostReadFailed;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_try_get_symbol(uint32_t symbolNameAddress, uint32_t symbolNameLength, uint32_t addressOutAddress)
+WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_try_get_symbol)
+int32_t coreclr_wasm_dbi_dac_try_get_symbol(uint32_t symbolNameAddress, uint32_t symbolNameLength, uint32_t addressOutAddress)
 {
     if (symbolNameAddress == 0 || addressOutAddress == 0)
     {
@@ -675,7 +681,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_try_get_symbol(uint32_t symbolNameAddres
     return Success;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_probe_runtime_contract_descriptor(uint32_t runtimeBase, uint32_t probeOutAddress)
+WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_probe_runtime_contract_descriptor)
+int32_t coreclr_wasm_dbi_dac_probe_runtime_contract_descriptor(uint32_t runtimeBase, uint32_t probeOutAddress)
 {
     if (probeOutAddress == 0)
     {
@@ -694,7 +701,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_probe_runtime_contract_descriptor(uint32
     return Success;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_probe_contract_pointer_data(uint32_t runtimeBase, uint32_t pointerDataIndex, uint32_t probeOutAddress)
+WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_probe_contract_pointer_data)
+int32_t coreclr_wasm_dbi_dac_probe_contract_pointer_data(uint32_t runtimeBase, uint32_t pointerDataIndex, uint32_t probeOutAddress)
 {
     if (probeOutAddress == 0)
     {
@@ -750,7 +758,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_probe_contract_pointer_data(uint32_t run
     return Success;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_probe_test_data(uint32_t runtimeBase, uint32_t probeOutAddress)
+WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_probe_test_data)
+int32_t coreclr_wasm_dbi_dac_probe_test_data(uint32_t runtimeBase, uint32_t probeOutAddress)
 {
     if (probeOutAddress == 0)
     {
@@ -790,7 +799,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_probe_test_data(uint32_t runtimeBase, ui
     return Success;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_create_clr_data_instance(uint32_t runtimeBase)
+WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_create_clr_data_instance)
+int32_t coreclr_wasm_dbi_dac_create_clr_data_instance(uint32_t runtimeBase)
 {
     WasmDacDataTarget* dataTarget = new (std::nothrow) WasmDacDataTarget(runtimeBase);
     if (dataTarget == nullptr)
@@ -810,7 +820,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_create_clr_data_instance(uint32_t runtim
     return result;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_create_dac_dbi_interface(uint32_t runtimeBase)
+WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_create_dac_dbi_interface)
+int32_t coreclr_wasm_dbi_dac_create_dac_dbi_interface(uint32_t runtimeBase)
 {
     if (runtimeBase == 0)
     {
@@ -837,7 +848,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_create_dac_dbi_interface(uint32_t runtim
     return result;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_dbi_session_create()
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_session_create)
+int32_t coreclr_wasm_dbi_dac_dbi_session_create()
 {
     if (g_cordb != nullptr)
     {
@@ -862,7 +874,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_session_create()
     return S_OK;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_dbi_session_create_process()
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_session_create_process)
+int32_t coreclr_wasm_dbi_dac_dbi_session_create_process()
 {
     if (g_cordb == nullptr)
     {
@@ -891,7 +904,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_session_create_process()
     return result;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_dbi_connect_runtime(uint32_t runtimeBase)
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_connect_runtime)
+int32_t coreclr_wasm_dbi_dac_dbi_connect_runtime(uint32_t runtimeBase)
 {
     if (g_cordb == nullptr || runtimeBase == 0)
     {
@@ -911,7 +925,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_connect_runtime(uint32_t runtimeBase
     return S_OK;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_dbi_disconnect_runtime()
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_disconnect_runtime)
+int32_t coreclr_wasm_dbi_dac_dbi_disconnect_runtime()
 {
     g_connectedToRuntime = false;
     g_connectedRuntimeBase = 0;
@@ -921,7 +936,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_disconnect_runtime()
     return S_OK;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_dbi_read_test_data(uint32_t probeOutAddress)
+WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_dbi_read_test_data)
+int32_t coreclr_wasm_dbi_dac_dbi_read_test_data(uint32_t probeOutAddress)
 {
     if (g_cordb == nullptr || !g_connectedToRuntime)
     {
@@ -931,7 +947,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_read_test_data(uint32_t probeOutAddr
     return coreclr_wasm_dbi_dac_probe_test_data(g_connectedRuntimeBase, probeOutAddress);
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_name(uint32_t nameAddress, uint32_t nameLength)
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_name)
+int32_t coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_name(uint32_t nameAddress, uint32_t nameLength)
 {
     if (g_cordb == nullptr || !g_connectedToRuntime || (nameAddress == 0 && nameLength != 0))
     {
@@ -950,7 +967,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_name(uint32_t name
     return SendRuntimeCommandRecord(command);
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_token(uint32_t methodToken, uint32_t ilOffset)
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_token)
+int32_t coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_token(uint32_t methodToken, uint32_t ilOffset)
 {
     if (g_cordb == nullptr || !g_connectedToRuntime)
     {
@@ -970,7 +988,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_token(uint32_t met
     return SendRuntimeCommandRecord(command);
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_dbi_continue()
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_continue)
+int32_t coreclr_wasm_dbi_dac_dbi_continue()
 {
     if (g_cordb == nullptr || !g_connectedToRuntime)
     {
@@ -983,7 +1002,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_continue()
     return SendRuntimeCommandRecord(command);
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_dbi_poll_event(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_poll_event)
+int32_t coreclr_wasm_dbi_dac_dbi_poll_event(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
 {
     if (g_cordb == nullptr || !g_connectedToRuntime)
     {
@@ -993,7 +1013,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_poll_event(uint32_t bufferAddress, u
     return coreclr_wasm_dbi_dac_transport_get_last_event(bufferAddress, bufferLength, bytesWrittenAddress);
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_dbi_poll_event_record(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_poll_event_record)
+int32_t coreclr_wasm_dbi_dac_dbi_poll_event_record(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
 {
     if (g_cordb == nullptr || !g_connectedToRuntime)
     {
@@ -1016,7 +1037,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_poll_event_record(uint32_t bufferAdd
     return S_OK;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_dbi_poll_frame_record(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_poll_frame_record)
+int32_t coreclr_wasm_dbi_dac_dbi_poll_frame_record(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
 {
     if (g_cordb == nullptr || !g_connectedToRuntime)
     {
@@ -1039,7 +1061,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_poll_frame_record(uint32_t bufferAdd
     return S_OK;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_dbi_poll_process_state(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_poll_process_state)
+int32_t coreclr_wasm_dbi_dac_dbi_poll_process_state(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
 {
     if (bytesWrittenAddress == 0 || bufferAddress == 0)
     {
@@ -1069,7 +1092,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_poll_process_state(uint32_t bufferAd
     return S_OK;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_dbi_session_destroy()
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_session_destroy)
+int32_t coreclr_wasm_dbi_dac_dbi_session_destroy()
 {
     if (g_cordb == nullptr)
     {
@@ -1089,7 +1113,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_dbi_session_destroy()
     return result;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_transport_send_test_message(uint32_t messageAddress, uint32_t messageLength)
+WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_transport_send_test_message)
+int32_t coreclr_wasm_dbi_dac_transport_send_test_message(uint32_t messageAddress, uint32_t messageLength)
 {
     if ((messageAddress == 0 && messageLength != 0) || messageLength >= MaxTransportMessageBytes)
     {
@@ -1100,7 +1125,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_transport_send_test_message(uint32_t mes
     return result == Success ? Success : result;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_receive_runtime_event(uint32_t eventAddress, uint32_t eventLength)
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_receive_runtime_event)
+int32_t coreclr_wasm_dbi_dac_receive_runtime_event(uint32_t eventAddress, uint32_t eventLength)
 {
     if (g_cordb == nullptr || !g_connectedToRuntime)
     {
@@ -1121,7 +1147,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_receive_runtime_event(uint32_t eventAddr
     return Success;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_receive_runtime_event_record(uint32_t eventRecordAddress, uint32_t eventRecordLength)
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_receive_runtime_event_record)
+int32_t coreclr_wasm_dbi_dac_receive_runtime_event_record(uint32_t eventRecordAddress, uint32_t eventRecordLength)
 {
     if (g_cordb == nullptr || !g_connectedToRuntime)
     {
@@ -1137,7 +1164,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_receive_runtime_event_record(uint32_t ev
     return Success;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_receive_runtime_frame_record(uint32_t frameRecordAddress, uint32_t frameRecordLength)
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_receive_runtime_frame_record)
+int32_t coreclr_wasm_dbi_dac_receive_runtime_frame_record(uint32_t frameRecordAddress, uint32_t frameRecordLength)
 {
     if (g_cordb == nullptr || !g_connectedToRuntime)
     {
@@ -1153,7 +1181,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_receive_runtime_frame_record(uint32_t fr
     return Success;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_transport_get_last_event(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
+WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_transport_get_last_event)
+int32_t coreclr_wasm_dbi_dac_transport_get_last_event(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
 {
     if (bytesWrittenAddress == 0 || (bufferAddress == 0 && bufferLength != 0))
     {
@@ -1174,7 +1203,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_transport_get_last_event(uint32_t buffer
     return Success;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_probe_breakpoint_control(uint32_t probeOutAddress)
+WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_probe_breakpoint_control)
+int32_t coreclr_wasm_dbi_dac_probe_breakpoint_control(uint32_t probeOutAddress)
 {
     if (probeOutAddress == 0)
     {
@@ -1229,7 +1259,8 @@ extern "C" int32_t coreclr_wasm_dbi_dac_probe_breakpoint_control(uint32_t probeO
     return Success;
 }
 
-extern "C" int32_t coreclr_wasm_dbi_dac_create_cordb_object()
+WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_create_cordb_object)
+int32_t coreclr_wasm_dbi_dac_create_cordb_object()
 {
     ICorDebug* cordb = nullptr;
     HRESULT result = CreateCordbObject(static_cast<int>(CorDebugVersion_4_0), reinterpret_cast<IUnknown**>(&cordb));
