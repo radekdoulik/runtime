@@ -13,6 +13,13 @@ const BreakpointMethodName = "BreakHere";
 const CommandRecordMagic = 0x434d4457;
 const CommandRecordSize = 80;
 
+// Must match VersionBlob in dbi_dac_wasm.cpp / smoke-test.js. The host has
+// to acknowledge the protocol once per session before any gated DBI entry
+// point will run (CORDBG_E_INCOMPATIBLE_PROTOCOL otherwise).
+const ExpectedVersionBlobMagic = 0x42564457; // 'WDVB' little-endian
+const ExpectedAbiVersion = 1;
+const ExpectedProtocolBreakingChangeCounter = 1;
+
 function fail(message) {
     throw new Error(message);
 }
@@ -510,6 +517,12 @@ async function main() {
 
                 return receiveResult;
             };
+
+            const ackResult = debuggerInstance.module._coreclr_wasm_dbi_dac_acknowledge_protocol(
+                ExpectedVersionBlobMagic, ExpectedAbiVersion, ExpectedProtocolBreakingChangeCounter);
+            if (ackResult !== 0) {
+                fail(`failed to acknowledge sidecar protocol: ${ackResult}`);
+            }
 
             const sessionCreateResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_session_create();
             if (sessionCreateResult !== 0) {

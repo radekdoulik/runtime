@@ -194,6 +194,25 @@ uint32_t g_lastRuntimeEventLength = 0;
 WasmDebugEventRecord g_lastRuntimeEventRecord{};
 WasmDebugFrameRecord g_lastRuntimeFrameRecord{};
 
+// Defense-in-depth handshake flag. The host MUST call
+// coreclr_wasm_dbi_dac_acknowledge_protocol with the matching
+// (magic, abi, counter) triple before invoking any product-tier
+// DAC/DBI session, breakpoint, or runtime-event entry point. Even
+// though get_version_blob and check_protocol let the host inspect
+// the contract first, gating the work itself prevents a confused or
+// out-of-date host from driving DBI into undefined states.
+//
+// The flag is cleared on session_destroy so each session re-validates
+// against the current sidecar contract, mirroring the desktop pattern
+// where every Initialize/Terminate cycle re-runs the version check.
+//
+// This is a plain bool, not std::atomic<bool>, because the browser-wasm
+// sidecar is single-threaded today (no SharedArrayBuffer, no pthreads,
+// no JSPI in the pinned emsdk). If/when the sidecar is rebuilt against
+// an emsdk that enables WebAssembly threads, this should become
+// std::atomic<bool> with acquire/release ordering on the gate path.
+bool g_protocolAcknowledged = false;
+
 class WasmDacDataTarget;
 
 int32_t ReadRuntimeContractDescriptor(
@@ -754,6 +773,39 @@ int32_t coreclr_wasm_dbi_dac_check_protocol(uint32_t hostMagic, uint32_t hostAbi
     return Success;
 }
 
+// Acknowledge that the host has read get_version_blob and accepts the
+// sidecar contract. Runs check_protocol on the supplied triple; on
+// success, latches g_protocolAcknowledged so subsequent gated entry
+// points (session_create, connect_runtime, set_breakpoint_*, continue,
+// poll_event, receive_runtime_event, etc.) can proceed. On failure,
+// clears the latch and returns CORDBG_E_INCOMPATIBLE_PROTOCOL so a
+// previously valid handshake cannot survive a subsequent bad call.
+//
+// Calling this with the correct triple is idempotent. Calling with a
+// bad triple is always disqualifying: the host must reissue with the
+// matching values to re-enable DBI traffic.
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_acknowledge_protocol)
+int32_t coreclr_wasm_dbi_dac_acknowledge_protocol(uint32_t hostMagic, uint32_t hostAbiVersion, uint32_t hostProtocolBreakingChangeCounter)
+{
+    int32_t check = coreclr_wasm_dbi_dac_check_protocol(hostMagic, hostAbiVersion, hostProtocolBreakingChangeCounter);
+    if (check != Success)
+    {
+        g_protocolAcknowledged = false;
+        return check;
+    }
+
+    g_protocolAcknowledged = true;
+    return Success;
+}
+
+// Helper for gated entry points; inlined by every call site to keep
+// the read-the-flag-and-fail pattern visible at the top of each
+// export's body.
+int32_t EnsureProtocolAcknowledged()
+{
+    return g_protocolAcknowledged ? Success : HrIncompatibleProtocol;
+}
+
 WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_copy_from_target)
 int32_t coreclr_wasm_dbi_dac_copy_from_target(uint32_t targetAddress, uint32_t debuggerAddress, uint32_t byteCount)
 {
@@ -963,6 +1015,12 @@ int32_t coreclr_wasm_dbi_dac_create_dac_dbi_interface(uint32_t runtimeBase)
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_session_create)
 int32_t coreclr_wasm_dbi_dac_dbi_session_create()
 {
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
     if (g_cordb != nullptr)
     {
         return S_OK;
@@ -989,6 +1047,12 @@ int32_t coreclr_wasm_dbi_dac_dbi_session_create()
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_session_create_process)
 int32_t coreclr_wasm_dbi_dac_dbi_session_create_process()
 {
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
     if (g_cordb == nullptr)
     {
         return E_FAIL;
@@ -1019,6 +1083,12 @@ int32_t coreclr_wasm_dbi_dac_dbi_session_create_process()
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_connect_runtime)
 int32_t coreclr_wasm_dbi_dac_dbi_connect_runtime(uint32_t runtimeBase)
 {
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
     if (g_cordb == nullptr || runtimeBase == 0)
     {
         return E_FAIL;
@@ -1040,6 +1110,12 @@ int32_t coreclr_wasm_dbi_dac_dbi_connect_runtime(uint32_t runtimeBase)
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_disconnect_runtime)
 int32_t coreclr_wasm_dbi_dac_dbi_disconnect_runtime()
 {
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
     g_connectedToRuntime = false;
     g_connectedRuntimeBase = 0;
     g_lastRuntimeEventLength = 0;
@@ -1062,6 +1138,12 @@ int32_t coreclr_wasm_dbi_dac_dbi_read_test_data(uint32_t probeOutAddress)
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_name)
 int32_t coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_name(uint32_t nameAddress, uint32_t nameLength)
 {
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
     if (g_cordb == nullptr || !g_connectedToRuntime || (nameAddress == 0 && nameLength != 0))
     {
         return E_FAIL;
@@ -1082,6 +1164,12 @@ int32_t coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_name(uint32_t nameAddress, ui
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_token)
 int32_t coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_token(uint32_t methodToken, uint32_t ilOffset)
 {
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
     if (g_cordb == nullptr || !g_connectedToRuntime)
     {
         return E_FAIL;
@@ -1103,6 +1191,12 @@ int32_t coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_token(uint32_t methodToken, u
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_continue)
 int32_t coreclr_wasm_dbi_dac_dbi_continue()
 {
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
     if (g_cordb == nullptr || !g_connectedToRuntime)
     {
         return E_FAIL;
@@ -1117,6 +1211,12 @@ int32_t coreclr_wasm_dbi_dac_dbi_continue()
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_poll_event)
 int32_t coreclr_wasm_dbi_dac_dbi_poll_event(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
 {
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
     if (g_cordb == nullptr || !g_connectedToRuntime)
     {
         return E_FAIL;
@@ -1128,6 +1228,12 @@ int32_t coreclr_wasm_dbi_dac_dbi_poll_event(uint32_t bufferAddress, uint32_t buf
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_poll_event_record)
 int32_t coreclr_wasm_dbi_dac_dbi_poll_event_record(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
 {
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
     if (g_cordb == nullptr || !g_connectedToRuntime)
     {
         return E_FAIL;
@@ -1152,6 +1258,12 @@ int32_t coreclr_wasm_dbi_dac_dbi_poll_event_record(uint32_t bufferAddress, uint3
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_poll_frame_record)
 int32_t coreclr_wasm_dbi_dac_dbi_poll_frame_record(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
 {
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
     if (g_cordb == nullptr || !g_connectedToRuntime)
     {
         return E_FAIL;
@@ -1176,6 +1288,12 @@ int32_t coreclr_wasm_dbi_dac_dbi_poll_frame_record(uint32_t bufferAddress, uint3
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_poll_process_state)
 int32_t coreclr_wasm_dbi_dac_dbi_poll_process_state(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
 {
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
     if (bytesWrittenAddress == 0 || bufferAddress == 0)
     {
         return InvalidArgument;
@@ -1207,8 +1325,14 @@ int32_t coreclr_wasm_dbi_dac_dbi_poll_process_state(uint32_t bufferAddress, uint
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_session_destroy)
 int32_t coreclr_wasm_dbi_dac_dbi_session_destroy()
 {
+    // session_destroy is intentionally NOT gated on g_protocolAcknowledged
+    // so a host that lost handshake state can still tear down cleanly.
+    // The ack flag is cleared at the end so any new session must
+    // re-handshake before doing further DBI work.
+
     if (g_cordb == nullptr)
     {
+        g_protocolAcknowledged = false;
         return S_OK;
     }
 
@@ -1222,6 +1346,7 @@ int32_t coreclr_wasm_dbi_dac_dbi_session_destroy()
 
     HRESULT result = cordb->Terminate();
     cordb->Release();
+    g_protocolAcknowledged = false;
     return result;
 }
 
@@ -1240,6 +1365,12 @@ int32_t coreclr_wasm_dbi_dac_transport_send_test_message(uint32_t messageAddress
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_receive_runtime_event)
 int32_t coreclr_wasm_dbi_dac_receive_runtime_event(uint32_t eventAddress, uint32_t eventLength)
 {
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
     if (g_cordb == nullptr || !g_connectedToRuntime)
     {
         return E_FAIL;
@@ -1262,6 +1393,12 @@ int32_t coreclr_wasm_dbi_dac_receive_runtime_event(uint32_t eventAddress, uint32
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_receive_runtime_event_record)
 int32_t coreclr_wasm_dbi_dac_receive_runtime_event_record(uint32_t eventRecordAddress, uint32_t eventRecordLength)
 {
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
     if (g_cordb == nullptr || !g_connectedToRuntime)
     {
         return E_FAIL;
@@ -1279,6 +1416,12 @@ int32_t coreclr_wasm_dbi_dac_receive_runtime_event_record(uint32_t eventRecordAd
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_receive_runtime_frame_record)
 int32_t coreclr_wasm_dbi_dac_receive_runtime_frame_record(uint32_t frameRecordAddress, uint32_t frameRecordLength)
 {
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
     if (g_cordb == nullptr || !g_connectedToRuntime)
     {
         return E_FAIL;

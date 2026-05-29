@@ -340,6 +340,27 @@ async function main() {
     const checkProtocolBadCounterResult = debuggerModule._coreclr_wasm_dbi_dac_check_protocol(
         ExpectedVersionBlobMagic, ExpectedAbiVersion, ExpectedProtocolBreakingChangeCounter + 1) | 0;
 
+    // Negative-path coverage: gated entry points must refuse work
+    // until acknowledge_protocol succeeds. session_destroy is intentionally
+    // ungated so a host that lost handshake state can still tear down,
+    // so it must succeed even before any acknowledge.
+    const sessionDestroyBeforeAckResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_session_destroy() | 0;
+    const sessionCreateBeforeAckResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_session_create() | 0;
+    const ackBadMagicResult = debuggerModule._coreclr_wasm_dbi_dac_acknowledge_protocol(
+        ExpectedVersionBlobMagic ^ 1, ExpectedAbiVersion, ExpectedProtocolBreakingChangeCounter) | 0;
+    const sessionCreateAfterBadAckResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_session_create() | 0;
+    const ackBadAbiResult = debuggerModule._coreclr_wasm_dbi_dac_acknowledge_protocol(
+        ExpectedVersionBlobMagic, ExpectedAbiVersion + 1, ExpectedProtocolBreakingChangeCounter) | 0;
+    const ackBadCounterResult = debuggerModule._coreclr_wasm_dbi_dac_acknowledge_protocol(
+        ExpectedVersionBlobMagic, ExpectedAbiVersion, ExpectedProtocolBreakingChangeCounter + 1) | 0;
+
+    // Acknowledge the protocol so all subsequent gated entry points
+    // can proceed. acknowledge_protocol is idempotent on a correct triple.
+    const ackResult = debuggerModule._coreclr_wasm_dbi_dac_acknowledge_protocol(
+        ExpectedVersionBlobMagic, ExpectedAbiVersion, ExpectedProtocolBreakingChangeCounter);
+    const ackAgainResult = debuggerModule._coreclr_wasm_dbi_dac_acknowledge_protocol(
+        ExpectedVersionBlobMagic, ExpectedAbiVersion, ExpectedProtocolBreakingChangeCounter);
+
     const descriptorResult = debuggerModule._coreclr_wasm_dbi_dac_probe_runtime_contract_descriptor(1, descriptorAddress);
     const pointerDataResult = debuggerModule._coreclr_wasm_dbi_dac_probe_contract_pointer_data(1, 2, pointerDataAddress);
     const testDataResult = debuggerModule._coreclr_wasm_dbi_dac_probe_test_data(1, testDataAddress);
@@ -414,6 +435,16 @@ async function main() {
             badAbi: `0x${(checkProtocolBadAbiResult >>> 0).toString(16)}`,
             badCounter: `0x${(checkProtocolBadCounterResult >>> 0).toString(16)}`
         },
+        handshake: {
+            sessionDestroyBeforeAck: `0x${(sessionDestroyBeforeAckResult >>> 0).toString(16)}`,
+            sessionCreateBeforeAck: `0x${(sessionCreateBeforeAckResult >>> 0).toString(16)}`,
+            ackBadMagic: `0x${(ackBadMagicResult >>> 0).toString(16)}`,
+            sessionCreateAfterBadAck: `0x${(sessionCreateAfterBadAckResult >>> 0).toString(16)}`,
+            ackBadAbi: `0x${(ackBadAbiResult >>> 0).toString(16)}`,
+            ackBadCounter: `0x${(ackBadCounterResult >>> 0).toString(16)}`,
+            ack: ackResult,
+            ackAgain: ackAgainResult
+        },
         descriptorResult,
         magic: `0x${descriptor.magic.toString(16)}`,
         flags: descriptor.flags,
@@ -473,6 +504,14 @@ async function main() {
         checkProtocolBadMagicResult !== HrIncompatibleProtocol ||
         checkProtocolBadAbiResult !== HrIncompatibleProtocol ||
         checkProtocolBadCounterResult !== HrIncompatibleProtocol ||
+        sessionCreateBeforeAckResult !== HrIncompatibleProtocol ||
+        sessionDestroyBeforeAckResult !== 0 ||
+        ackBadMagicResult !== HrIncompatibleProtocol ||
+        sessionCreateAfterBadAckResult !== HrIncompatibleProtocol ||
+        ackBadAbiResult !== HrIncompatibleProtocol ||
+        ackBadCounterResult !== HrIncompatibleProtocol ||
+        ackResult !== 0 ||
+        ackAgainResult !== 0 ||
         descriptorResult !== 0 ||
         descriptor.magic !== ContractDescriptorMagic ||
         descriptor.descriptorSize === 0 ||
