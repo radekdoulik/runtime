@@ -276,6 +276,119 @@ static_assert(sizeof(WasmDebugFrameRecord) == 88);
 static_assert(sizeof(WasmDbiProcessState) == 40);
 static_assert(sizeof(void*) == sizeof(uint32_t));
 
+// Page cache for ReadTargetMemory results. Most DAC reads are small
+// (a few bytes) and clustered around the same runtime data structures
+// (e.g., a contract pointer-data slot, then five adjacent words of the
+// pointed-to record). Without a cache, every read crosses the JS host
+// bridge, which dominates wall-clock cost in real DAC workloads.
+//
+// Design:
+//  - Single-page fully-associative cache (linear scan of N small slots).
+//  - 4 KiB pages, 32 slots = 128 KiB of cache memory (negligible vs.
+//    the 5+ MiB sidecar wasm binary).
+//  - LRU eviction via a monotonically-increasing tick counter.
+//  - O(1) invalidation: bump the epoch; entries from a prior epoch are
+//    treated as invalid on the next lookup. No need to scan + clear.
+//  - Cross-page reads (rare in DAC) bypass the cache entirely.
+//
+// Invalidation triggers (callers responsible):
+//  - DBI session connects to a new runtime instance.
+//  - DBI session disconnects.
+//  - DBI continues a stopped target (memory may advance).
+//  - Explicit host call to coreclr_wasm_dbi_dac_invalidate_page_cache.
+//
+// This is correct under wasm32's single-threaded execution model. If
+// the sidecar is ever rebuilt against threads-enabled emsdk, the stats
+// fields and the cache itself need synchronization.
+constexpr uint32_t PageCachePageSize = 4096;
+constexpr uint32_t PageCacheEntries = 32;
+constexpr uint32_t PageCachePageMask = PageCachePageSize - 1;
+static_assert((PageCachePageSize & (PageCachePageSize - 1)) == 0,
+              "PageCachePageSize must be a power of 2 so that PageCachePageMask is a valid offset mask.");
+
+struct PageCacheEntry
+{
+    uint32_t PageAddress;   // page-aligned target address; valid only when Epoch == g_currentEpoch
+    uint32_t Epoch;         // epoch at insertion; mismatched = invalid
+    uint32_t LastUseTick;   // for LRU eviction
+    uint8_t Data[PageCachePageSize];
+};
+
+struct PageCacheStatsBlob
+{
+    uint32_t Epoch;
+    uint32_t Hits;
+    uint32_t Misses;
+    uint32_t Bypasses;
+    uint32_t Invalidations;
+    uint32_t Pad0;
+};
+
+static_assert(sizeof(PageCacheStatsBlob) == 24);
+
+PageCacheEntry g_pageCache[PageCacheEntries] = {};
+uint32_t g_pageCacheEpoch = 1;
+uint32_t g_pageCacheTick = 0;
+uint32_t g_pageCacheHits = 0;
+uint32_t g_pageCacheMisses = 0;
+uint32_t g_pageCacheBypasses = 0;
+uint32_t g_pageCacheInvalidations = 0;
+
+void InvalidatePageCache()
+{
+    g_pageCacheEpoch++;
+    g_pageCacheInvalidations++;
+    if (g_pageCacheEpoch == 0)
+    {
+        // Wrap-around guard. An epoch of 0 is the "never written" sentinel
+        // produced by zero-init on g_pageCache, so wrapping back to 1 would
+        // accidentally "validate" every cold slot. After 2^32 invalidations
+        // (extraordinarily unlikely in practice) start at 2 and physically
+        // zero every entry to be safe.
+        g_pageCacheEpoch = 2;
+        for (auto& entry : g_pageCache)
+        {
+            entry.Epoch = 0;
+            entry.PageAddress = 0;
+        }
+    }
+}
+
+const PageCacheEntry* LookupPageCache(uint32_t pageAddress)
+{
+    for (auto& entry : g_pageCache)
+    {
+        if (entry.Epoch == g_pageCacheEpoch && entry.PageAddress == pageAddress)
+        {
+            entry.LastUseTick = ++g_pageCacheTick;
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+PageCacheEntry* AcquirePageCacheSlot(uint32_t pageAddress)
+{
+    PageCacheEntry* victim = &g_pageCache[0];
+    for (auto& entry : g_pageCache)
+    {
+        if (entry.Epoch != g_pageCacheEpoch)
+        {
+            victim = &entry;
+            break;
+        }
+        if (entry.LastUseTick < victim->LastUseTick)
+        {
+            victim = &entry;
+        }
+    }
+
+    victim->PageAddress = pageAddress;
+    victim->Epoch = g_pageCacheEpoch;
+    victim->LastUseTick = ++g_pageCacheTick;
+    return victim;
+}
+
 ICorDebug* g_cordb = nullptr;
 bool g_connectedToRuntime = false;
 uint32_t g_connectedRuntimeBase = 0;
@@ -688,12 +801,62 @@ HRESULT WasmDacDataTarget::ReadTargetMemory(
         return E_INVALIDARG;
     }
 
+    // Page-cache fast path. Most DAC reads are small structure-field
+    // reads that fall inside a single 4 KiB page; serving them from a
+    // local cache eliminates a JS-host round-trip per access. Reads
+    // that straddle a page boundary bypass the cache (rare in DAC).
+    uint32_t targetAddress = static_cast<uint32_t>(address);
+    uint32_t pageAddress = targetAddress & ~PageCachePageMask;
+    uint32_t pageOffset = targetAddress & PageCachePageMask;
+    bool fitsInPage = (pageOffset + bytesRequested) <= PageCachePageSize;
+
+    if (fitsInPage)
+    {
+        const PageCacheEntry* hit = LookupPageCache(pageAddress);
+        if (hit != nullptr)
+        {
+            memcpy(buffer, hit->Data + pageOffset, bytesRequested);
+            g_pageCacheHits++;
+            *bytesRead = bytesRequested;
+            return S_OK;
+        }
+
+        // Miss: try to fetch the entire 4 KiB page through the host
+        // bridge into a fresh cache slot, then serve the requested
+        // slice from that slot. Fetching whole pages amortises future
+        // nearby reads. If the page fetch fails (e.g., the page
+        // straddles the end of runtime linear memory), fall back to a
+        // direct read of just the requested bytes so the cache layer
+        // never narrows what a non-cached implementation would accept.
+        PageCacheEntry* slot = AcquirePageCacheSlot(pageAddress);
+        int32_t fetchResult = coreclr_wasm_dbi_dac_read_target_memory(
+            pageAddress,
+            static_cast<uint32_t>(reinterpret_cast<uintptr_t>(slot->Data)),
+            PageCachePageSize);
+        if (fetchResult == Success)
+        {
+            memcpy(buffer, slot->Data + pageOffset, bytesRequested);
+            g_pageCacheMisses++;
+            *bytesRead = bytesRequested;
+            return S_OK;
+        }
+
+        // Page-fetch failed - invalidate the partially-acquired slot
+        // (epoch=0 means "never written") and fall through to the
+        // direct-read path below. The bypass counter (not the miss
+        // counter) is bumped so smoke tests can detect this path.
+        slot->Epoch = 0;
+        slot->PageAddress = 0;
+    }
+
+    g_pageCacheBypasses++;
+
     // All-or-nothing semantics: the host callback either copies every
     // requested byte or fails the call. Partial reads are not supported
     // because the JS host has no way to report "I copied N bytes before
     // hitting an unmapped page" without a wire-format extension.
     int32_t result = coreclr_wasm_dbi_dac_read_target_memory(
-        static_cast<uint32_t>(address),
+        targetAddress,
         static_cast<uint32_t>(debuggerAddress),
         bytesRequested);
     if (result != Success)
@@ -967,6 +1130,49 @@ int32_t coreclr_wasm_dbi_dac_copy_from_target(uint32_t targetAddress, uint32_t d
         byteCount);
 
     return result == Success ? Success : HostReadFailed;
+}
+
+// Drop every cached page so the next ReadVirtual is forced back through
+// the host bridge. Hosts MUST call this after any out-of-band target
+// memory mutation (e.g., after running their own GC of the target, or
+// after applying a hot-reload). The sidecar itself bumps the cache on
+// connect/disconnect/continue, so well-behaved DBI flows do not need to
+// invoke this directly.
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_invalidate_page_cache)
+int32_t coreclr_wasm_dbi_dac_invalidate_page_cache()
+{
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
+    InvalidatePageCache();
+    return Success;
+}
+
+// Test-only observable for the page cache. Writes a PageCacheStatsBlob
+// (24 bytes) into the caller's buffer. Used by smoke tests to verify
+// that nearby reads hit the cache, that cross-page reads bypass it, and
+// that invalidation bumps the epoch as expected.
+WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_get_page_cache_stats)
+int32_t coreclr_wasm_dbi_dac_get_page_cache_stats(uint32_t statsOutAddress)
+{
+    if (statsOutAddress == 0 || statsOutAddress > UINT32_MAX - (sizeof(PageCacheStatsBlob) - 1))
+    {
+        return InvalidArgument;
+    }
+
+    PageCacheStatsBlob blob{};
+    blob.Epoch = g_pageCacheEpoch;
+    blob.Hits = g_pageCacheHits;
+    blob.Misses = g_pageCacheMisses;
+    blob.Bypasses = g_pageCacheBypasses;
+    blob.Invalidations = g_pageCacheInvalidations;
+    blob.Pad0 = 0;
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(statsOutAddress)), &blob, sizeof(blob));
+    return Success;
 }
 
 WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_try_get_symbol)
@@ -1284,6 +1490,7 @@ int32_t coreclr_wasm_dbi_dac_dbi_connect_runtime(uint32_t runtimeBase)
     g_lastRuntimeEventLength = 0;
     memset(&g_lastRuntimeEventRecord, 0, sizeof(g_lastRuntimeEventRecord));
     memset(&g_lastRuntimeFrameRecord, 0, sizeof(g_lastRuntimeFrameRecord));
+    InvalidatePageCache();
     return S_OK;
 }
 
@@ -1301,6 +1508,7 @@ int32_t coreclr_wasm_dbi_dac_dbi_disconnect_runtime()
     g_lastRuntimeEventLength = 0;
     memset(&g_lastRuntimeEventRecord, 0, sizeof(g_lastRuntimeEventRecord));
     memset(&g_lastRuntimeFrameRecord, 0, sizeof(g_lastRuntimeFrameRecord));
+    InvalidatePageCache();
     return S_OK;
 }
 
@@ -1385,6 +1593,7 @@ int32_t coreclr_wasm_dbi_dac_dbi_continue()
     WasmDebugCommandRecord command{};
     command.Magic = WasmDebugCommandRecordMagic;
     command.Kind = static_cast<uint32_t>(WasmDebugCommandKind::Continue);
+    InvalidatePageCache();
     return SendRuntimeCommandRecord(command);
 }
 

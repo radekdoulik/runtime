@@ -172,6 +172,17 @@ function readNullTerminatedAscii(memory, address, byteCount) {
     return result;
 }
 
+function readPageCacheStats(memory, address) {
+    const view = new DataView(memory.buffer, address, 24);
+    return {
+        epoch: view.getUint32(0, true),
+        hits: view.getUint32(4, true),
+        misses: view.getUint32(8, true),
+        bypasses: view.getUint32(12, true),
+        invalidations: view.getUint32(16, true)
+    };
+}
+
 async function main() {
     const coreclrObjDirectory = resolvePath(process.argv[2] ?? "artifacts/obj/coreclr/browser.wasm.Debug");
     const runtimeJsPath = resolvePath(process.argv[3] ?? path.join(coreclrObjDirectory, "hosts/corerun/corerun.js"));
@@ -361,6 +372,9 @@ async function main() {
     const symbolName = "DotNetRuntimeContractDescriptor";
     const symbolNameAddress = debuggerExports.stackAlloc(symbolName.length);
     const symbolOutAddress = debuggerExports.stackAlloc(8);
+    const pageCacheStatsAddress = debuggerExports.stackAlloc(24);
+    const pageCacheStatsAfterAddress = debuggerExports.stackAlloc(24);
+    const pageCacheStatsPostInvalidateAddress = debuggerExports.stackAlloc(24);
 
     writeAscii(debuggerModule.HEAPU8, symbolNameAddress, symbolName);
     writeBytes(debuggerModule.HEAPU8, transportMessageAddress, transportMessageBytes);
@@ -428,6 +442,33 @@ async function main() {
     const symbolTooLongResult = debuggerModule._coreclr_wasm_dbi_dac_try_get_symbol(symbolNameAddress, 0x1000 >>> 0, symbolOutAddress) | 0;
     const symbolAddressOverflowResult = debuggerModule._coreclr_wasm_dbi_dac_try_get_symbol(0xffffff00 >>> 0, 0x200 >>> 0, symbolOutAddress) | 0;
     const symbolNullOutResult = debuggerModule._coreclr_wasm_dbi_dac_try_get_symbol(symbolNameAddress, symbolName.length, 0) | 0;
+
+    // Page-cache coverage: the three probes above all went through
+    // dataTarget.ReadVirtual, which routes through the in-sidecar 4 KiB
+    // page cache. The descriptor + pointer-data + test-data flow re-
+    // reads the descriptor region multiple times across overlapping
+    // single-page reads, so by this point we expect at least one cache
+    // hit (the second + third descriptor read) and at least one miss
+    // (the cold descriptor + cold WasmDbiDacTestData fetch). Bypasses
+    // should still be 0 because every probe read fits in a single page.
+    const pageCacheStatsResult = debuggerModule._coreclr_wasm_dbi_dac_get_page_cache_stats(pageCacheStatsAddress) | 0;
+    const pageCacheStatsBefore = readPageCacheStats(debuggerModule.HEAPU8, pageCacheStatsAddress);
+
+    // Invalidate via the product export. The next stats read must show
+    // epoch and invalidations both incremented by exactly one; hits and
+    // misses are cumulative so they should be unchanged.
+    const pageCacheInvalidateResult = debuggerModule._coreclr_wasm_dbi_dac_invalidate_page_cache() | 0;
+    const pageCacheStatsAfterInvalidateResult = debuggerModule._coreclr_wasm_dbi_dac_get_page_cache_stats(pageCacheStatsAfterAddress) | 0;
+    const pageCacheStatsAfterInvalidate = readPageCacheStats(debuggerModule.HEAPU8, pageCacheStatsAfterAddress);
+
+    // Re-issue a probe that uses the cached path. Because we just
+    // invalidated, the next descriptor fetch must be a miss (or
+    // bypass), not a hit; the hit counter must remain at the
+    // post-invalidate baseline. This proves epoch invalidation
+    // actually drops the cached page rather than serving stale data.
+    const reprobeResult = debuggerModule._coreclr_wasm_dbi_dac_probe_runtime_contract_descriptor(1, descriptorAddress) | 0;
+    const pageCacheStatsAfterReprobeResult = debuggerModule._coreclr_wasm_dbi_dac_get_page_cache_stats(pageCacheStatsPostInvalidateAddress) | 0;
+    const pageCacheStatsAfterReprobe = readPageCacheStats(debuggerModule.HEAPU8, pageCacheStatsPostInvalidateAddress);
 
     const runtimeDescriptorAddress = runtimeExports.GetDotNetRuntimeContractDescriptor() >>> 0;
     const copyResult = debuggerModule._coreclr_wasm_dbi_dac_copy_from_target(runtimeDescriptorAddress, copyAddress, 8);
@@ -596,6 +637,16 @@ async function main() {
             debuggerOverflow: copyDebuggerOverflowResult,
             oversized: copyOversizedResult
         },
+        pageCache: {
+            getStatsResult: pageCacheStatsResult,
+            invalidateResult: pageCacheInvalidateResult,
+            statsAfterInvalidateResult: pageCacheStatsAfterInvalidateResult,
+            statsAfterReprobeResult: pageCacheStatsAfterReprobeResult,
+            reprobeResult,
+            before: pageCacheStatsBefore,
+            afterInvalidate: pageCacheStatsAfterInvalidate,
+            afterReprobe: pageCacheStatsAfterReprobe
+        },
         memoryGrowth: {
             runtimeGrowResult,
             debuggerGrowResult,
@@ -686,6 +737,23 @@ async function main() {
         copyTargetOverflowResult !== InvalidReadRange ||
         copyDebuggerOverflowResult !== InvalidReadRange ||
         copyOversizedResult !== InvalidReadRange ||
+        pageCacheStatsResult !== 0 ||
+        pageCacheInvalidateResult !== 0 ||
+        pageCacheStatsAfterInvalidateResult !== 0 ||
+        pageCacheStatsAfterReprobeResult !== 0 ||
+        reprobeResult !== 0 ||
+        pageCacheStatsBefore.epoch < 1 ||
+        pageCacheStatsBefore.hits < 1 ||
+        pageCacheStatsBefore.misses < 1 ||
+        pageCacheStatsBefore.bypasses !== 0 ||
+        pageCacheStatsAfterInvalidate.epoch !== pageCacheStatsBefore.epoch + 1 ||
+        pageCacheStatsAfterInvalidate.invalidations !== pageCacheStatsBefore.invalidations + 1 ||
+        pageCacheStatsAfterInvalidate.hits !== pageCacheStatsBefore.hits ||
+        pageCacheStatsAfterInvalidate.misses !== pageCacheStatsBefore.misses ||
+        pageCacheStatsAfterReprobe.epoch !== pageCacheStatsAfterInvalidate.epoch ||
+        pageCacheStatsAfterReprobe.invalidations !== pageCacheStatsAfterInvalidate.invalidations ||
+        pageCacheStatsAfterReprobe.misses !== pageCacheStatsAfterInvalidate.misses + 1 ||
+        pageCacheStatsAfterReprobe.hits !== pageCacheStatsAfterInvalidate.hits ||
         runtimeGrowResult < 0 ||
         debuggerGrowResult < 0 ||
         runtimePagesAfter !== runtimePagesBefore + 1 ||
