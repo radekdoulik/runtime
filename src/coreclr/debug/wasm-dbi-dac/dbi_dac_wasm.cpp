@@ -51,6 +51,23 @@ constexpr uint32_t WasmDbiDacSidecarBuildVersionLS = 0;
 // public corerror.h contract.
 constexpr int32_t HrIncompatibleProtocol = static_cast<int32_t>(0x8013134bu);
 
+// Sidecar-internal synthetic CorDebugPlatform value. The public enum
+// in src/coreclr/pal/prebuilt/inc/cordebug.h:1479 currently tops out
+// at CORDB_PLATFORM_POSIX_RISCV64 (= 14) and has no value for
+// WebAssembly. Adding one is a public-API change that requires API
+// review, so until then GetPlatform reports this sentinel.
+//
+// The value is intentionally far outside the public range so it cannot
+// be confused with a real platform if dotnet later extends the enum.
+// The bytes spell 'wAS1' in big-endian (low byte '1' = sidecar synthetic
+// platform protocol v1), giving us room to rev (0x77415332 = 'wAS2')
+// if the wasm sidecar's notion of "platform" ever needs to change.
+//
+// Public hosts that compare against the published CorDebugPlatform
+// enum will see an unknown value and can refuse to attach. Hosts that
+// recognize the sentinel can opt in to wasm sidecar behaviour.
+constexpr int32_t WasmSidecarSyntheticPlatform = static_cast<int32_t>(0x77415331u);
+
 enum ComponentMask : uint32_t
 {
     ComponentScaffold = 0x1,
@@ -411,8 +428,29 @@ public:
             return E_POINTER;
         }
 
-        *targetPlatform = static_cast<CorDebugPlatform>(0);
-        return E_NOTIMPL;
+        // No public CorDebugPlatform value exists for WebAssembly today.
+        // Until one is approved, report the sidecar's synthetic sentinel
+        // (see WasmSidecarSyntheticPlatform above) so a cooperating host
+        // can distinguish "wasm sidecar" from any real platform and a
+        // strict host that only understands the public enum will see an
+        // unknown value rather than a stale POSIX_X86 impersonation or
+        // the prior E_NOTIMPL that left the out parameter zeroed.
+        //
+        // The bit pattern is copied via memcpy instead of
+        // static_cast<CorDebugPlatform>(sentinel) because the sentinel is
+        // intentionally outside the named-enumerator range and a direct
+        // static_cast on an unscoped enum without a fixed underlying type
+        // is undefined behavior per [dcl.enum]/8 when the value exceeds
+        // the enumeration's implementation-defined value range. The
+        // memcpy reproduces the desired bit pattern without invoking UB,
+        // assuming the underlying type is exactly 32 bits wide (asserted
+        // below). Every supported compiler picks int as the underlying
+        // type for this enum.
+        static_assert(sizeof(CorDebugPlatform) == sizeof(int32_t),
+                      "CorDebugPlatform underlying type must be 32 bits wide");
+        int32_t sentinel = WasmSidecarSyntheticPlatform;
+        memcpy(targetPlatform, &sentinel, sizeof(sentinel));
+        return S_OK;
     }
 
 private:
@@ -536,6 +574,7 @@ extern "C" HRESULT DacDbiInterfaceInstance(
 
 extern "C" int32_t coreclr_wasm_dbi_dac_transport_get_last_event(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress);
 extern "C" int32_t coreclr_wasm_dbi_dac_probe_test_data(uint32_t runtimeBase, uint32_t probeOutAddress);
+extern "C" int32_t coreclr_wasm_dbi_dac_probe_get_platform(uint32_t runtimeBase, uint32_t platformOutAddress);
 
 namespace
 {
@@ -960,6 +999,35 @@ int32_t coreclr_wasm_dbi_dac_probe_test_data(uint32_t runtimeBase, uint32_t prob
     }
 
     memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(probeOutAddress)), &probe, sizeof(probe));
+    return Success;
+}
+
+WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_probe_get_platform)
+int32_t coreclr_wasm_dbi_dac_probe_get_platform(uint32_t runtimeBase, uint32_t platformOutAddress)
+{
+    if (platformOutAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    // runtimeBase is currently unused because GetPlatform returns a
+    // compile-time constant on the wasm sidecar (it does not read target
+    // memory). The parameter is kept for signature symmetry with the
+    // other probe_* exports (e.g. probe_test_data) and so a future
+    // GetPlatform that derives the value from target state can plug in
+    // without changing the probe's wire contract.
+    WasmDacDataTarget dataTarget(runtimeBase);
+    CorDebugPlatform platform = static_cast<CorDebugPlatform>(0);
+    HRESULT hr = dataTarget.GetPlatform(&platform);
+    if (FAILED(hr))
+    {
+        return static_cast<int32_t>(hr);
+    }
+
+    int32_t platformValue = 0;
+    memcpy(&platformValue, &platform, sizeof(platformValue));
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(platformOutAddress)),
+           &platformValue, sizeof(platformValue));
     return Success;
 }
 

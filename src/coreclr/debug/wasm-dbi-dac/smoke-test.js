@@ -18,6 +18,12 @@ const TestDataMagic = 0x43445744;
 const E_NOTIMPL = -2147467263;
 const TransportMessage = "dbi-command:set-breakpoint";
 
+// Sidecar synthetic CorDebugPlatform sentinel; must match
+// WasmSidecarSyntheticPlatform in dbi_dac_wasm.cpp. The public
+// CorDebugPlatform enum has no value for WebAssembly, so the sidecar
+// reports this value from ICorDebugDataTarget::GetPlatform.
+const WasmSidecarSyntheticPlatform = 0x77415331 | 0;
+
 function fail(message) {
     throw new Error(message);
 }
@@ -307,6 +313,7 @@ async function main() {
     const sessionEventAddress = debuggerExports.stackAlloc(64);
     const sessionEventBytesWrittenAddress = debuggerExports.stackAlloc(4);
     const versionBlobAddress = debuggerExports.stackAlloc(ExpectedVersionBlobSize);
+    const platformAddress = debuggerExports.stackAlloc(4);
     const versionBlobBytesWrittenAddress = debuggerExports.stackAlloc(4);
     const transportMessageBytes = new TextEncoder().encode(TransportMessage);
     const transportMessageAddress = debuggerExports.stackAlloc(transportMessageBytes.length);
@@ -364,6 +371,9 @@ async function main() {
     const descriptorResult = debuggerModule._coreclr_wasm_dbi_dac_probe_runtime_contract_descriptor(1, descriptorAddress);
     const pointerDataResult = debuggerModule._coreclr_wasm_dbi_dac_probe_contract_pointer_data(1, 2, pointerDataAddress);
     const testDataResult = debuggerModule._coreclr_wasm_dbi_dac_probe_test_data(1, testDataAddress);
+    const platformResult = debuggerModule._coreclr_wasm_dbi_dac_probe_get_platform(1, platformAddress) | 0;
+    const platformValue = new DataView(debuggerModule.HEAPU8.buffer, platformAddress, 4).getInt32(0, true);
+    const platformNullOutResult = debuggerModule._coreclr_wasm_dbi_dac_probe_get_platform(1, 0) | 0;
     const breakpointControlResult = debuggerModule._coreclr_wasm_dbi_dac_probe_breakpoint_control(controlProbeAddress);
     const symbolResult = debuggerModule._coreclr_wasm_dbi_dac_try_get_symbol(symbolNameAddress, symbolName.length, symbolOutAddress);
 
@@ -465,6 +475,12 @@ async function main() {
         },
         breakpointControlResult,
         breakpointControl: controlProbe,
+        platform: {
+            result: platformResult,
+            value: `0x${(platformValue >>> 0).toString(16)}`,
+            matchesSyntheticSentinel: platformValue === WasmSidecarSyntheticPlatform,
+            nullOutResult: platformNullOutResult
+        },
         session: {
             createResult: sessionCreateResult,
             createProcessResult: sessionCreateProcessResult,
@@ -534,6 +550,9 @@ async function main() {
         controlProbe.initializeResult !== 0 ||
         controlProbe.createProcessResult !== E_NOTIMPL ||
         controlProbe.breakpointResult !== E_NOTIMPL ||
+        platformResult !== 0 ||
+        platformValue !== WasmSidecarSyntheticPlatform ||
+        platformNullOutResult !== -1 ||
         sessionCreateResult !== 0 ||
         sessionCreateProcessResult !== E_NOTIMPL ||
         sessionConnectResult !== 0 ||
