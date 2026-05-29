@@ -379,6 +379,19 @@ async function main() {
 
     const runtimeDescriptorAddress = runtimeExports.GetDotNetRuntimeContractDescriptor() >>> 0;
     const copyResult = debuggerModule._coreclr_wasm_dbi_dac_copy_from_target(runtimeDescriptorAddress, copyAddress, 8);
+
+    // Memory-read robustness coverage: confirm the hardened
+    // copy_from_target rejects malformed reads before forwarding them
+    // to the host callback. All four cases should fail-fast inside the
+    // sidecar without ever touching JS.
+    const InvalidArgument = -1;
+    const InvalidReadRange = -8;
+    const copyZeroBytesResult = debuggerModule._coreclr_wasm_dbi_dac_copy_from_target(0, 0, 0) | 0;
+    const copyNullDebuggerDestResult = debuggerModule._coreclr_wasm_dbi_dac_copy_from_target(runtimeDescriptorAddress, 0, 8) | 0;
+    const copyTargetOverflowResult = debuggerModule._coreclr_wasm_dbi_dac_copy_from_target(0xffffff00 >>> 0, copyAddress, 0x200) | 0;
+    const copyDebuggerOverflowResult = debuggerModule._coreclr_wasm_dbi_dac_copy_from_target(runtimeDescriptorAddress, 0xffffff00 >>> 0, 0x200) | 0;
+    const copyOversizedResult = debuggerModule._coreclr_wasm_dbi_dac_copy_from_target(0, copyAddress, 0x20000000 >>> 0) | 0;
+
     const sessionCreateResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_session_create();
     const sessionCreateProcessResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_session_create_process();
     const sessionConnectResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_connect_runtime(1);
@@ -494,6 +507,13 @@ async function main() {
         symbolResult,
         symbolAddress: `0x${symbolAddress.toString(16)}`,
         copyResult,
+        copyRobustness: {
+            zeroBytes: copyZeroBytesResult,
+            nullDebuggerDest: copyNullDebuggerDestResult,
+            targetOverflow: copyTargetOverflowResult,
+            debuggerOverflow: copyDebuggerOverflowResult,
+            oversized: copyOversizedResult
+        },
         copiedMagic: `0x${copiedMagic.toString(16)}`,
         gDacTable: `0x${(runtimeExports.Getg_dacTable() >>> 0).toString(16)}`,
         clrDataResult,
@@ -564,6 +584,11 @@ async function main() {
         symbolResult !== 0 ||
         symbolAddress !== runtimeDescriptorAddress ||
         copyResult !== 0 ||
+        copyZeroBytesResult !== 0 ||
+        copyNullDebuggerDestResult !== InvalidArgument ||
+        copyTargetOverflowResult !== InvalidReadRange ||
+        copyDebuggerOverflowResult !== InvalidReadRange ||
+        copyOversizedResult !== InvalidReadRange ||
         copiedMagic !== ContractDescriptorMagic ||
         clrDataResult !== 0 ||
         dacDbiResult !== 0 ||

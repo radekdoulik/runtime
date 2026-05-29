@@ -94,7 +94,46 @@ enum Result : int32_t
     InvalidPointerDataIndex = -5,
     InvalidTestData = -6,
     BufferTooSmall = -7,
+    InvalidReadRange = -8,
 };
+
+// Maximum byte count accepted by a single ReadVirtual / copy_from_target
+// call. Caps a single read at 256 MiB so a confused or malicious host
+// cannot trigger a runaway host-side memcpy, a wasm memory-growth
+// avalanche, or an out-of-bounds JS host-callback that pushes past the
+// 4 GiB wasm32 linear-memory ceiling. DAC's largest legitimate single
+// read in practice is a small data structure (a few KiB), so the cap
+// is comfortably above any real workload while still bounding worst-
+// case behaviour.
+constexpr uint32_t MaxReadVirtualBytes = 256u * 1024u * 1024u;
+
+// Validate a wasm32 target read of [address, address + byteCount) and
+// matching debugger-side write at [debuggerAddress, debuggerAddress +
+// byteCount). Returns true when both ranges fit inside 32-bit linear
+// memory and byteCount is within MaxReadVirtualBytes. A zero-byte read
+// is always considered valid; callers should special-case it before
+// invoking the host callback.
+inline bool IsValidWasmReadRange(uint64_t address, uint64_t debuggerAddress, uint32_t byteCount)
+{
+    if (byteCount == 0)
+    {
+        return true;
+    }
+    if (byteCount > MaxReadVirtualBytes)
+    {
+        return false;
+    }
+    // address + byteCount - 1 must fit in 32 bits.
+    if (address > UINT32_MAX || address > static_cast<uint64_t>(UINT32_MAX) - (byteCount - 1))
+    {
+        return false;
+    }
+    if (debuggerAddress > UINT32_MAX || debuggerAddress > static_cast<uint64_t>(UINT32_MAX) - (byteCount - 1))
+    {
+        return false;
+    }
+    return true;
+}
 
 struct ContractDescriptorLayout
 {
@@ -591,19 +630,36 @@ HRESULT WasmDacDataTarget::ReadTargetMemory(
 
     *bytesRead = 0;
 
+    // A zero-byte read is always trivially successful, even if buffer
+    // is null. DAC occasionally probes a structure size by passing 0.
     if (bytesRequested == 0)
     {
         return S_OK;
     }
 
-    if (buffer == nullptr || address > UINT32_MAX)
+    if (buffer == nullptr)
     {
         return E_INVALIDARG;
     }
 
+    // Reject reads whose target or debugger-side range falls outside
+    // 32-bit linear memory or exceeds MaxReadVirtualBytes. Without this
+    // check a request for 0xFFFFFFFE bytes from address 0x10 would
+    // truncate to a wrap-around that the host callback would silently
+    // misinterpret.
+    uint64_t debuggerAddress = reinterpret_cast<uintptr_t>(buffer);
+    if (!IsValidWasmReadRange(address, debuggerAddress, bytesRequested))
+    {
+        return E_INVALIDARG;
+    }
+
+    // All-or-nothing semantics: the host callback either copies every
+    // requested byte or fails the call. Partial reads are not supported
+    // because the JS host has no way to report "I copied N bytes before
+    // hitting an unmapped page" without a wire-format extension.
     int32_t result = coreclr_wasm_dbi_dac_read_target_memory(
         static_cast<uint32_t>(address),
-        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(buffer)),
+        static_cast<uint32_t>(debuggerAddress),
         bytesRequested);
     if (result != Success)
     {
@@ -848,9 +904,19 @@ int32_t EnsureProtocolAcknowledged()
 WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_copy_from_target)
 int32_t coreclr_wasm_dbi_dac_copy_from_target(uint32_t targetAddress, uint32_t debuggerAddress, uint32_t byteCount)
 {
-    if (debuggerAddress == 0 && byteCount != 0)
+    if (byteCount == 0)
+    {
+        return Success;
+    }
+
+    if (debuggerAddress == 0)
     {
         return InvalidArgument;
+    }
+
+    if (!IsValidWasmReadRange(targetAddress, debuggerAddress, byteCount))
+    {
+        return InvalidReadRange;
     }
 
     int32_t result = coreclr_wasm_dbi_dac_read_target_memory(
