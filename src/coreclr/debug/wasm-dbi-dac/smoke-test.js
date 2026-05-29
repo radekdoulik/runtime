@@ -184,7 +184,10 @@ async function main() {
 
     const runtime = await loadRuntime(runtimeJsPath);
     const runtimeExports = runtime.exports;
-    const runtimeMemory = runtime.module.HEAPU8;
+
+    if (typeof runtimeExports.memory === "undefined" || typeof runtimeExports.memory.buffer === "undefined") {
+        fail("runtime export 'memory' is missing or does not expose a buffer");
+    }
 
     if (typeof runtimeExports.GetDotNetRuntimeContractDescriptor !== "function") {
         fail("runtime export GetDotNetRuntimeContractDescriptor is missing");
@@ -205,18 +208,47 @@ async function main() {
     }
 
     let debuggerModule;
+    let debuggerExports;
     const hostImports = {};
+
+    // Re-fetch typed-array views on every host callback. WebAssembly.Memory
+    // can grow at any time (stack expansion, heap allocation, etc.); after
+    // growth, any cached Uint8Array becomes detached and access throws
+    // "memory access out of bounds". Reading `.buffer` from a live wasm
+    // `memory` export always returns the current backing ArrayBuffer.
+    //
+    // The helpers reference late-bound `let`s by name. If a host import
+    // somehow fires before the runtime/debugger module finishes binding
+    // (e.g., a future change that invokes an import from WASM init), the
+    // descriptive throw is friendlier than a raw "cannot read .memory of
+    // undefined". Our sidecar does not call any imports during module init
+    // today, so these checks are a forward-compatibility guard.
+    const getRuntimeHeap = () => {
+        if (typeof runtimeExports === "undefined" || !runtimeExports.memory) {
+            fail("getRuntimeHeap called before runtimeExports.memory was bound");
+        }
+        return new Uint8Array(runtimeExports.memory.buffer);
+    };
+    const getDebuggerHeap = () => {
+        if (typeof debuggerExports === "undefined" || !debuggerExports.memory) {
+            fail("getDebuggerHeap called before debuggerExports.memory was bound");
+        }
+        return new Uint8Array(debuggerExports.memory.buffer);
+    };
+
     hostImports.read_target_memory = (targetAddressArg, debuggerAddressArg, byteCountArg) => {
         const targetAddress = targetAddressArg >>> 0;
         const debuggerAddress = debuggerAddressArg >>> 0;
         const byteCount = byteCountArg >>> 0;
 
-        if (targetAddress + byteCount > runtimeMemory.length ||
-            debuggerAddress + byteCount > debuggerModule.HEAPU8.length) {
+        const runtimeHeap = getRuntimeHeap();
+        const debuggerHeap = getDebuggerHeap();
+        if (targetAddress + byteCount > runtimeHeap.length ||
+            debuggerAddress + byteCount > debuggerHeap.length) {
             return -1;
         }
 
-        debuggerModule.HEAPU8.set(runtimeMemory.subarray(targetAddress, targetAddress + byteCount), debuggerAddress);
+        debuggerHeap.set(runtimeHeap.subarray(targetAddress, targetAddress + byteCount), debuggerAddress);
         return 0;
     };
 
@@ -224,12 +256,13 @@ async function main() {
         const symbolNameAddress = symbolNameAddressArg >>> 0;
         const symbolNameLength = symbolNameLengthArg >>> 0;
         const addressOutAddress = addressOutAddressArg >>> 0;
-        if (symbolNameAddress + symbolNameLength > debuggerModule.HEAPU8.length ||
-            addressOutAddress + 8 > debuggerModule.HEAPU8.length) {
+        const debuggerHeap = getDebuggerHeap();
+        if (symbolNameAddress + symbolNameLength > debuggerHeap.length ||
+            addressOutAddress + 8 > debuggerHeap.length) {
             return -1;
         }
 
-        const symbolName = new TextDecoder().decode(debuggerModule.HEAPU8.subarray(symbolNameAddress, symbolNameAddress + symbolNameLength));
+        const symbolName = new TextDecoder().decode(debuggerHeap.subarray(symbolNameAddress, symbolNameAddress + symbolNameLength));
         const symbolAddress =
             symbolName === "DotNetRuntimeContractDescriptor" ? runtimeExports.GetDotNetRuntimeContractDescriptor() >>> 0 :
             symbolName === "g_dacTable" ? runtimeExports.Getg_dacTable() >>> 0 :
@@ -240,29 +273,33 @@ async function main() {
             return -1;
         }
 
-        writeUint64(debuggerModule.HEAPU8, addressOutAddress, symbolAddress >>> 0);
+        writeUint64(debuggerHeap, addressOutAddress, symbolAddress >>> 0);
         return 0;
     };
 
     hostImports.get_target_module_base = (imageNameAddressArg, imageNameCharCountArg, addressOutAddressArg) => {
         const addressOutAddress = addressOutAddressArg >>> 0;
-        if (addressOutAddress + 8 > debuggerModule.HEAPU8.length) {
+        const debuggerHeap = getDebuggerHeap();
+        if (addressOutAddress + 8 > debuggerHeap.length) {
             return -1;
         }
 
-        writeUint64(debuggerModule.HEAPU8, addressOutAddress, 1);
+        writeUint64(debuggerHeap, addressOutAddress, 1);
         return 0;
     };
     hostImports.send_ipc_to_runtime = (messageAddressArg, messageLengthArg) => {
         const messageAddress = messageAddressArg >>> 0;
         const messageLength = messageLengthArg >>> 0;
-        if (messageAddress + messageLength > debuggerModule.HEAPU8.length) {
+        const debuggerHeapForRead = getDebuggerHeap();
+        if (messageAddress + messageLength > debuggerHeapForRead.length) {
             return -1;
         }
 
         const savedRuntimeStack = runtime.exports.stackSave();
         const runtimeMessageAddress = runtime.exports.stackAlloc(messageLength);
-        runtimeMemory.set(debuggerModule.HEAPU8.subarray(messageAddress, messageAddress + messageLength), runtimeMessageAddress);
+        // Re-fetch both heaps after the stackAlloc above: it can grow the
+        // runtime's linear memory and detach any prior view.
+        getRuntimeHeap().set(getDebuggerHeap().subarray(messageAddress, messageAddress + messageLength), runtimeMessageAddress);
         const receiveResult = runtimeExports.CoreClrWasmDebugReceiveCommand(runtimeMessageAddress, messageLength);
         runtime.exports.stackRestore(savedRuntimeStack);
         if (receiveResult !== 0) {
@@ -273,7 +310,7 @@ async function main() {
         const savedCopyStack = runtime.exports.stackSave();
         const runtimeCopyAddress = runtime.exports.stackAlloc(runtimeCommandLength);
         const copyResult = runtimeExports.CoreClrWasmDebugCopyLastCommand(runtimeCopyAddress, runtimeCommandLength);
-        const message = copyResult === 0 ? readAscii(runtimeMemory, runtimeCopyAddress, runtimeCommandLength) : "";
+        const message = copyResult === 0 ? readAscii(getRuntimeHeap(), runtimeCopyAddress, runtimeCommandLength) : "";
         runtime.exports.stackRestore(savedCopyStack);
         if (copyResult !== 0) {
             return copyResult;
@@ -282,7 +319,7 @@ async function main() {
         const event = new TextEncoder().encode(`runtime-event:${message}`);
         const savedStack = debuggerExports.stackSave();
         const eventAddress = debuggerExports.stackAlloc(event.length);
-        writeBytes(debuggerModule.HEAPU8, eventAddress, event);
+        writeBytes(getDebuggerHeap(), eventAddress, event);
         const result = debuggerModule._coreclr_wasm_dbi_dac_receive_runtime_event(eventAddress, event.length);
         debuggerExports.stackRestore(savedStack);
         return result;
@@ -294,9 +331,13 @@ async function main() {
     });
 
     debuggerModule = debuggerInstance.module;
-    const debuggerExports = debuggerInstance.exports;
+    debuggerExports = debuggerInstance.exports;
 
-    if (runtimeMemory.buffer === debuggerModule.HEAPU8.buffer) {
+    if (typeof debuggerExports.memory === "undefined" || typeof debuggerExports.memory.buffer === "undefined") {
+        fail("debugger export 'memory' is missing or does not expose a buffer");
+    }
+
+    if (getRuntimeHeap().buffer === getDebuggerHeap().buffer) {
         fail("runtime and debugger modules unexpectedly share the same WebAssembly memory");
     }
 
@@ -435,6 +476,29 @@ async function main() {
     const dacDbiResult = debuggerModule._coreclr_wasm_dbi_dac_create_dac_dbi_interface(1);
     const cordbSecondResult = debuggerModule._coreclr_wasm_dbi_dac_create_cordb_object();
 
+    // Memory-growth resilience: deliberately grow both wasm linear memories
+    // and re-issue a positive copy_from_target. Growth invalidates every
+    // previously-captured Uint8Array view; if the host bridge cached a
+    // stale view we would either get -1 from the bounds check or throw
+    // "memory access out of bounds" inside the host callback. With
+    // per-call buffer refetching, the second copy must succeed and the
+    // re-read descriptor magic must equal the pre-growth value.
+    // Run this AFTER every other read from debugger memory, because the
+    // smoke body itself caches DataView buffer references that would also
+    // become detached. The host bridge's per-call refetch keeps the next
+    // copy_from_target working even though the smoke body cannot.
+    const postGrowthStack = debuggerExports.stackSave();
+    const postGrowthCopyAddress = debuggerExports.stackAlloc(8);
+    const runtimePagesBefore = runtimeExports.memory.buffer.byteLength / 0x10000;
+    const debuggerPagesBefore = debuggerExports.memory.buffer.byteLength / 0x10000;
+    const runtimeGrowResult = runtimeExports.memory.grow(1);
+    const debuggerGrowResult = debuggerExports.memory.grow(1);
+    const runtimePagesAfter = runtimeExports.memory.buffer.byteLength / 0x10000;
+    const debuggerPagesAfter = debuggerExports.memory.buffer.byteLength / 0x10000;
+    const postGrowthCopyResult = debuggerModule._coreclr_wasm_dbi_dac_copy_from_target(runtimeDescriptorAddress, postGrowthCopyAddress, 8) | 0;
+    const postGrowthCopiedMagic = new DataView(getDebuggerHeap().buffer, postGrowthCopyAddress, 8).getBigUint64(0, true);
+    debuggerExports.stackRestore(postGrowthStack);
+
     const result = {
         abiVersion,
         componentMask,
@@ -514,6 +578,16 @@ async function main() {
             debuggerOverflow: copyDebuggerOverflowResult,
             oversized: copyOversizedResult
         },
+        memoryGrowth: {
+            runtimeGrowResult,
+            debuggerGrowResult,
+            runtimePagesBefore,
+            runtimePagesAfter,
+            debuggerPagesBefore,
+            debuggerPagesAfter,
+            postGrowthCopyResult,
+            postGrowthCopiedMagic: `0x${postGrowthCopiedMagic.toString(16)}`
+        },
         copiedMagic: `0x${copiedMagic.toString(16)}`,
         gDacTable: `0x${(runtimeExports.Getg_dacTable() >>> 0).toString(16)}`,
         clrDataResult,
@@ -589,6 +663,12 @@ async function main() {
         copyTargetOverflowResult !== InvalidReadRange ||
         copyDebuggerOverflowResult !== InvalidReadRange ||
         copyOversizedResult !== InvalidReadRange ||
+        runtimeGrowResult < 0 ||
+        debuggerGrowResult < 0 ||
+        runtimePagesAfter !== runtimePagesBefore + 1 ||
+        debuggerPagesAfter !== debuggerPagesBefore + 1 ||
+        postGrowthCopyResult !== 0 ||
+        postGrowthCopiedMagic !== ContractDescriptorMagic ||
         copiedMagic !== ContractDescriptorMagic ||
         clrDataResult !== 0 ||
         dacDbiResult !== 0 ||

@@ -395,7 +395,6 @@ async function main() {
     const appPath = buildHelloWorld(repoRoot);
 
     let runtimeExports;
-    let runtimeMemory;
     let debuggerInstance;
     let sawBreakpointBeforeContinue = false;
     let callbackEvent = "";
@@ -406,11 +405,39 @@ async function main() {
     let testDataDuringCallback = { readResult: -1, testData: null };
     let continueDuringCallbackResult = -1;
 
+    // Re-fetch typed-array views on every callback. WebAssembly.Memory can
+    // grow at any time during real runtime execution (GC heap, stack
+    // expansion, native heap allocations); after growth, every prior
+    // Uint8Array view becomes detached and access throws "memory access
+    // out of bounds". Reading `.buffer` from a live wasm `memory` export
+    // always returns the current backing ArrayBuffer.
+    //
+    // The helpers reference late-bound `let`s by name. If a host import
+    // somehow fires before the runtime/debugger module finishes binding
+    // (e.g., a future change that invokes an import from WASM init), the
+    // descriptive throw is friendlier than a raw "cannot read .memory of
+    // undefined". Our sidecar does not call any imports during module init
+    // today, so these checks are a forward-compatibility guard.
+    const getRuntimeHeap = () => {
+        if (typeof runtimeExports === "undefined" || !runtimeExports.memory) {
+            fail("getRuntimeHeap called before runtimeExports.memory was bound");
+        }
+        return new Uint8Array(runtimeExports.memory.buffer);
+    };
+    const getDebuggerHeap = () => {
+        if (typeof debuggerInstance === "undefined" || !debuggerInstance.exports.memory) {
+            fail("getDebuggerHeap called before debuggerInstance.exports.memory was bound");
+        }
+        return new Uint8Array(debuggerInstance.exports.memory.buffer);
+    };
+
     debuggerInstance = await loadDebugger(debuggerJsPath, (messageAddress, messageLength) => {
-        const message = debuggerInstance.module.HEAPU8.slice(messageAddress, messageAddress + messageLength);
+        const message = getDebuggerHeap().slice(messageAddress, messageAddress + messageLength);
         const stack = runtimeExports.stackSave();
         const runtimeMessageAddress = runtimeExports.stackAlloc(messageLength);
-        runtimeMemory.set(message, runtimeMessageAddress);
+        // Re-fetch after stackAlloc: it may grow the runtime's memory and
+        // detach prior views.
+        getRuntimeHeap().set(message, runtimeMessageAddress);
         const result =
             messageLength === CommandRecordSize &&
             new DataView(message.buffer, message.byteOffset, message.byteLength).getUint32(0, true) === CommandRecordMagic
@@ -420,50 +447,58 @@ async function main() {
         return result;
     });
 
+    if (typeof debuggerInstance.exports.memory === "undefined" || typeof debuggerInstance.exports.memory.buffer === "undefined") {
+        fail("debugger export 'memory' is missing or does not expose a buffer");
+    }
+
     try {
         await loadAndRunRuntime(runtimeJsPath, appPath, sharedFrameworkPath, instance => {
             runtimeExports = instance.exports;
-            runtimeMemory = new Uint8Array(runtimeExports.memory.buffer);
+            if (typeof runtimeExports.memory === "undefined" || typeof runtimeExports.memory.buffer === "undefined") {
+                fail("runtime export 'memory' is missing or does not expose a buffer");
+            }
             globalThis.CoreClrWasmDebugReadTargetMemory = (targetAddress, debuggerAddress, byteCount) => {
-                const currentRuntimeMemory = new Uint8Array(runtimeExports.memory.buffer);
-                if (targetAddress + byteCount > currentRuntimeMemory.length ||
-                    debuggerAddress + byteCount > debuggerInstance.module.HEAPU8.length) {
+                const runtimeHeap = getRuntimeHeap();
+                const debuggerHeap = getDebuggerHeap();
+                if (targetAddress + byteCount > runtimeHeap.length ||
+                    debuggerAddress + byteCount > debuggerHeap.length) {
                     return -1;
                 }
 
-                debuggerInstance.module.HEAPU8.set(currentRuntimeMemory.subarray(targetAddress, targetAddress + byteCount), debuggerAddress);
+                debuggerHeap.set(runtimeHeap.subarray(targetAddress, targetAddress + byteCount), debuggerAddress);
                 return 0;
             };
             globalThis.CoreClrWasmDebugGetSymbolAddress = (baseAddress, symbolNameAddress, symbolNameLength, addressOutAddress) => {
-                const symbolName = readAscii(debuggerInstance.module.HEAPU8, symbolNameAddress, symbolNameLength);
+                const debuggerHeap = getDebuggerHeap();
+                const symbolName = readAscii(debuggerHeap, symbolNameAddress, symbolNameLength);
                 const symbolAddress =
                     symbolName === "DotNetRuntimeContractDescriptor" ? runtimeExports.GetDotNetRuntimeContractDescriptor() >>> 0 :
                     symbolName === "g_dacTable" ? runtimeExports.Getg_dacTable() >>> 0 :
                     symbolName === "WasmDbiDacTestData" ? runtimeExports.GetWasmDbiDacTestData() >>> 0 :
                     0;
-                if (symbolAddress === 0 || addressOutAddress + 8 > debuggerInstance.module.HEAPU8.length) {
+                if (symbolAddress === 0 || addressOutAddress + 8 > debuggerHeap.length) {
                     return -1;
                 }
 
-                writeUint64(debuggerInstance.module.HEAPU8, addressOutAddress, symbolAddress);
+                writeUint64(debuggerHeap, addressOutAddress, symbolAddress);
                 return 0;
             };
             globalThis.CoreClrWasmDebugGetTargetModuleBase = (imageNameAddress, imageNameCharCount, addressOutAddress) => {
-                if (addressOutAddress + 8 > debuggerInstance.module.HEAPU8.length) {
+                const debuggerHeap = getDebuggerHeap();
+                if (addressOutAddress + 8 > debuggerHeap.length) {
                     return -1;
                 }
 
-                writeUint64(debuggerInstance.module.HEAPU8, addressOutAddress, 1);
+                writeUint64(debuggerHeap, addressOutAddress, 1);
                 return 0;
             };
             globalThis.CoreClrWasmDebugOnBreakpointHit = (eventAddress, eventLength) => {
-                const currentRuntimeMemory = new Uint8Array(runtimeExports.memory.buffer);
-                const event = readAscii(currentRuntimeMemory, eventAddress >>> 0, eventLength >>> 0);
+                const event = readAscii(getRuntimeHeap(), eventAddress >>> 0, eventLength >>> 0);
                 callbackEvent = event;
                 const eventBytes = new TextEncoder().encode(event);
                 const stack = debuggerInstance.exports.stackSave();
                 const debuggerEventAddress = debuggerInstance.exports.stackAlloc(eventBytes.length);
-                writeBytes(debuggerInstance.module.HEAPU8, debuggerEventAddress, eventBytes);
+                writeBytes(getDebuggerHeap(), debuggerEventAddress, eventBytes);
                 const receiveResult = debuggerInstance.module._coreclr_wasm_dbi_dac_receive_runtime_event(debuggerEventAddress, eventBytes.length);
                 debuggerInstance.exports.stackRestore(stack);
 
@@ -472,7 +507,7 @@ async function main() {
                     const runtimeStack = runtimeExports.stackSave();
                     const runtimeRecordAddress = runtimeExports.stackAlloc(recordSize);
                     const copyRecordResult = runtimeExports.CoreClrWasmDebugCopyLastEventRecord(runtimeRecordAddress, recordSize);
-                    const recordBytes = new Uint8Array(runtimeExports.memory.buffer).slice(runtimeRecordAddress, runtimeRecordAddress + recordSize);
+                    const recordBytes = getRuntimeHeap().slice(runtimeRecordAddress, runtimeRecordAddress + recordSize);
                     runtimeExports.stackRestore(runtimeStack);
                     if (copyRecordResult !== 0) {
                         return copyRecordResult;
@@ -480,7 +515,7 @@ async function main() {
 
                     const debuggerStack = debuggerInstance.exports.stackSave();
                     const debuggerRecordAddress = debuggerInstance.exports.stackAlloc(recordBytes.length);
-                    writeBytes(debuggerInstance.module.HEAPU8, debuggerRecordAddress, recordBytes);
+                    writeBytes(getDebuggerHeap(), debuggerRecordAddress, recordBytes);
                     const receiveRecordResult = debuggerInstance.module._coreclr_wasm_dbi_dac_receive_runtime_event_record(debuggerRecordAddress, recordBytes.length);
                     debuggerInstance.exports.stackRestore(debuggerStack);
                     if (receiveRecordResult !== 0) {
@@ -491,7 +526,7 @@ async function main() {
                     const runtimeFrameStack = runtimeExports.stackSave();
                     const runtimeFrameRecordAddress = runtimeExports.stackAlloc(frameRecordSize);
                     const copyFrameRecordResult = runtimeExports.CoreClrWasmDebugCopyLastFrameRecord(runtimeFrameRecordAddress, frameRecordSize);
-                    const frameRecordBytes = new Uint8Array(runtimeExports.memory.buffer).slice(runtimeFrameRecordAddress, runtimeFrameRecordAddress + frameRecordSize);
+                    const frameRecordBytes = getRuntimeHeap().slice(runtimeFrameRecordAddress, runtimeFrameRecordAddress + frameRecordSize);
                     runtimeExports.stackRestore(runtimeFrameStack);
                     if (copyFrameRecordResult !== 0) {
                         return copyFrameRecordResult;
@@ -499,7 +534,7 @@ async function main() {
 
                     const debuggerFrameStack = debuggerInstance.exports.stackSave();
                     const debuggerFrameRecordAddress = debuggerInstance.exports.stackAlloc(frameRecordBytes.length);
-                    writeBytes(debuggerInstance.module.HEAPU8, debuggerFrameRecordAddress, frameRecordBytes);
+                    writeBytes(getDebuggerHeap(), debuggerFrameRecordAddress, frameRecordBytes);
                     const receiveFrameRecordResult = debuggerInstance.module._coreclr_wasm_dbi_dac_receive_runtime_frame_record(debuggerFrameRecordAddress, frameRecordBytes.length);
                     debuggerInstance.exports.stackRestore(debuggerFrameStack);
                     if (receiveFrameRecordResult !== 0) {
@@ -537,7 +572,7 @@ async function main() {
             const methodName = new TextEncoder().encode(BreakpointMethodName);
             const stack = debuggerInstance.exports.stackSave();
             const methodNameAddress = debuggerInstance.exports.stackAlloc(methodName.length);
-            writeBytes(debuggerInstance.module.HEAPU8, methodNameAddress, methodName);
+            writeBytes(getDebuggerHeap(), methodNameAddress, methodName);
             const breakpointResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_name(methodNameAddress, methodName.length);
             debuggerInstance.exports.stackRestore(stack);
             if (breakpointResult !== 0) {
