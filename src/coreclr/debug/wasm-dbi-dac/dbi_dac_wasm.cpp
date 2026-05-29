@@ -17,6 +17,24 @@ EXTERN_C const IID IID_IDacDbiAllocator;
 EXTERN_C const IID IID_IDacDbiMetaDataLookup;
 EXTERN_C bool TryGetSymbol(ICorDebugDataTarget* dataTarget, uint64_t baseAddress, const char* symbolName, uint64_t* symbolAddress);
 
+// Minimal facade-side view of IDacDbiInterface, replicating just the leading
+// vtable slots so we can invoke DacSetTargetConsistencyChecks without pulling
+// in the full dacdbiinterface.h dependency chain (which transitively needs
+// crst.h and other VM-internal headers not visible from this facade
+// compilation unit). The vtable order must stay in sync with
+// src/coreclr/debug/inc/dacdbiinterface.h:169 (IDacDbiInterface) — see
+// CheckDbiVersion / FlushCache / DacSetTargetConsistencyChecks at lines
+// 193 / 207 / 230 respectively. The earlier methods are never called through
+// this declaration so their argument types are stubbed as void*; only the
+// slot count and the signature of DacSetTargetConsistencyChecks need to be
+// accurate.
+struct WasmIDacDbiInterfaceMinimal : public IUnknown
+{
+    virtual HRESULT STDMETHODCALLTYPE CheckDbiVersion(const void* pVersion) = 0;
+    virtual HRESULT STDMETHODCALLTYPE FlushCache() = 0;
+    virtual HRESULT STDMETHODCALLTYPE DacSetTargetConsistencyChecks(BOOL fEnableAsserts) = 0;
+};
+
 namespace
 {
 constexpr uint32_t WasmDbiDacAbiVersion = 1;
@@ -1396,6 +1414,52 @@ int32_t coreclr_wasm_dbi_dac_create_dac_dbi_interface(uint32_t runtimeBase)
         reinterpret_cast<IUnknown*>(dacDbi)->Release();
     }
 
+    return result;
+}
+
+// Phase 3 onramp probe: verify IDacDbiInterface::DacSetTargetConsistencyChecks
+// is reachable from the in-sidecar DAC build. The desktop V3 attach path
+// (CordbProcess::CreateDacDbiInterface in src/coreclr/debug/di/process.cpp:700)
+// calls this immediately after binding the DAC. Until OpenVirtualProcessImpl
+// is wired up in our sidecar, that call site is unreachable; this probe
+// proves the underlying DAC method is present and returns S_OK so a future
+// real-CordbProcess slice cannot regress silently. The probe writes the
+// HRESULT from DacSetTargetConsistencyChecks(FALSE) to consistencyHrAddress
+// and returns the creation result (or InvalidArgument on out-pointer issues).
+WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_probe_dac_consistency_checks)
+int32_t coreclr_wasm_dbi_dac_probe_dac_consistency_checks(uint32_t runtimeBase, uint32_t consistencyHrAddress)
+{
+    if (runtimeBase == 0 || consistencyHrAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    if (consistencyHrAddress > UINT32_MAX - (sizeof(int32_t) - 1))
+    {
+        return InvalidReadRange;
+    }
+
+    WasmDacDataTarget* dataTarget = new (std::nothrow) WasmDacDataTarget(runtimeBase);
+    if (dataTarget == nullptr)
+    {
+        return E_OUTOFMEMORY;
+    }
+
+    WasmDbiAllocator allocator;
+    WasmMetaDataLookup metadataLookup;
+    void* dacDbi = nullptr;
+    HRESULT result = DacDbiInterfaceInstance(dataTarget, runtimeBase, &allocator, &metadataLookup, &dacDbi);
+    dataTarget->Release();
+
+    int32_t consistencyHr = E_FAIL;
+    if (SUCCEEDED(result) && dacDbi != nullptr)
+    {
+        WasmIDacDbiInterfaceMinimal* dacDbiInterface = reinterpret_cast<WasmIDacDbiInterfaceMinimal*>(dacDbi);
+        consistencyHr = static_cast<int32_t>(dacDbiInterface->DacSetTargetConsistencyChecks(FALSE));
+        dacDbiInterface->Release();
+    }
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(consistencyHrAddress)), &consistencyHr, sizeof(consistencyHr));
     return result;
 }
 

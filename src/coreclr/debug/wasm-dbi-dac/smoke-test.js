@@ -528,6 +528,20 @@ async function main() {
     const dacDbiResult = debuggerModule._coreclr_wasm_dbi_dac_create_dac_dbi_interface(1);
     const cordbSecondResult = debuggerModule._coreclr_wasm_dbi_dac_create_cordb_object();
 
+    // Phase 3 onramp probe: confirm IDacDbiInterface::DacSetTargetConsistencyChecks
+    // is reachable from the in-sidecar DAC. The desktop V3 attach
+    // (CordbProcess::CreateDacDbiInterface) calls this immediately after binding
+    // the DAC, so if it ever drops out of our build a future real-CordbProcess
+    // slice would regress silently. Calling against runtimeBase=1 mirrors the
+    // existing dacDbiResult probe: creation succeeds without touching target
+    // memory, and DacSetTargetConsistencyChecks just toggles a flag on the
+    // ClrDataAccess base, so both should return S_OK.
+    const dacConsistencyStack = debuggerExports.stackSave();
+    const dacConsistencyHrAddress = debuggerExports.stackAlloc(4);
+    const dacConsistencyProbeResult = debuggerModule._coreclr_wasm_dbi_dac_probe_dac_consistency_checks(1, dacConsistencyHrAddress);
+    const dacConsistencyHr = new DataView(debuggerModule.HEAPU8.buffer, dacConsistencyHrAddress, 4).getInt32(0, true);
+    debuggerExports.stackRestore(dacConsistencyStack);
+
     // Memory-growth resilience: deliberately grow both wasm linear memories
     // and re-issue a positive copy_from_target. Growth invalidates every
     // previously-captured Uint8Array view; if the host bridge cached a
@@ -661,7 +675,9 @@ async function main() {
         gDacTable: `0x${(runtimeExports.Getg_dacTable() >>> 0).toString(16)}`,
         clrDataResult,
         dacDbiResult,
-        cordbSecondResult
+        cordbSecondResult,
+        dacConsistencyProbeResult,
+        dacConsistencyHr: `0x${(dacConsistencyHr >>> 0).toString(16)}`
     };
 
     console.log(JSON.stringify(result, null, 2));
@@ -763,7 +779,9 @@ async function main() {
         copiedMagic !== ContractDescriptorMagic ||
         clrDataResult !== 0 ||
         dacDbiResult !== 0 ||
-        cordbSecondResult !== 0) {
+        cordbSecondResult !== 0 ||
+        dacConsistencyProbeResult !== 0 ||
+        dacConsistencyHr !== 0) {
         fail("WASM DBI/DAC smoke test failed");
     }
 }

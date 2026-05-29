@@ -222,6 +222,7 @@ offset  size  field
 | `coreclr_wasm_dbi_dac_probe_get_platform`              | Probe `ICorDebugDataTarget::GetPlatform()`; today returns the synthetic `WasmSidecarSyntheticPlatform` sentinel. |
 | `coreclr_wasm_dbi_dac_create_clr_data_instance`        | Direct `CLRDataCreateInstance` smoke (legacy DAC). |
 | `coreclr_wasm_dbi_dac_create_dac_dbi_interface`        | Direct `DacDbiInterfaceInstance` smoke (DBI-facing DAC). |
+| `coreclr_wasm_dbi_dac_probe_dac_consistency_checks`    | Phase 3 onramp: creates `IDacDbiInterface` then calls `DacSetTargetConsistencyChecks(FALSE)` and writes the HRESULT to the supplied address. Guards the desktop V3-attach call site (`CordbProcess::CreateDacDbiInterface`) against silent regressions. |
 | `coreclr_wasm_dbi_dac_create_cordb_object`             | Smoke wrapper around `CreateCordbObject`. |
 | `coreclr_wasm_dbi_dac_probe_breakpoint_control`        | End-to-end probe for the breakpoint facade. |
 | `coreclr_wasm_dbi_dac_transport_send_test_message`     | Smoke-only: round-trip a transport message without going through DBI. |
