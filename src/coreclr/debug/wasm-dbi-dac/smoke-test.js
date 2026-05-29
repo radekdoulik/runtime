@@ -418,6 +418,17 @@ async function main() {
     const breakpointControlResult = debuggerModule._coreclr_wasm_dbi_dac_probe_breakpoint_control(controlProbeAddress);
     const symbolResult = debuggerModule._coreclr_wasm_dbi_dac_try_get_symbol(symbolNameAddress, symbolName.length, symbolOutAddress);
 
+    // Symbol-name robustness coverage: confirm coreclr_wasm_dbi_dac_try_get_symbol
+    // rejects malformed symbol-name buffers before forwarding them to
+    // the host callback. All five cases should fail-fast inside the
+    // sidecar without ever touching JS.
+    const InvalidSymbolName = -9;
+    const symbolEmptyResult = debuggerModule._coreclr_wasm_dbi_dac_try_get_symbol(symbolNameAddress, 0, symbolOutAddress) | 0;
+    const symbolNullAddressResult = debuggerModule._coreclr_wasm_dbi_dac_try_get_symbol(0, symbolName.length, symbolOutAddress) | 0;
+    const symbolTooLongResult = debuggerModule._coreclr_wasm_dbi_dac_try_get_symbol(symbolNameAddress, 0x1000 >>> 0, symbolOutAddress) | 0;
+    const symbolAddressOverflowResult = debuggerModule._coreclr_wasm_dbi_dac_try_get_symbol(0xffffff00 >>> 0, 0x200 >>> 0, symbolOutAddress) | 0;
+    const symbolNullOutResult = debuggerModule._coreclr_wasm_dbi_dac_try_get_symbol(symbolNameAddress, symbolName.length, 0) | 0;
+
     const runtimeDescriptorAddress = runtimeExports.GetDotNetRuntimeContractDescriptor() >>> 0;
     const copyResult = debuggerModule._coreclr_wasm_dbi_dac_copy_from_target(runtimeDescriptorAddress, copyAddress, 8);
 
@@ -570,6 +581,13 @@ async function main() {
         },
         symbolResult,
         symbolAddress: `0x${symbolAddress.toString(16)}`,
+        symbolRobustness: {
+            empty: symbolEmptyResult,
+            nullAddress: symbolNullAddressResult,
+            tooLong: symbolTooLongResult,
+            addressOverflow: symbolAddressOverflowResult,
+            nullOut: symbolNullOutResult
+        },
         copyResult,
         copyRobustness: {
             zeroBytes: copyZeroBytesResult,
@@ -657,6 +675,11 @@ async function main() {
         sessionDestroyResult !== 0 ||
         symbolResult !== 0 ||
         symbolAddress !== runtimeDescriptorAddress ||
+        symbolEmptyResult !== InvalidSymbolName ||
+        symbolNullAddressResult !== InvalidSymbolName ||
+        symbolTooLongResult !== InvalidSymbolName ||
+        symbolAddressOverflowResult !== InvalidSymbolName ||
+        symbolNullOutResult !== InvalidArgument ||
         copyResult !== 0 ||
         copyZeroBytesResult !== 0 ||
         copyNullDebuggerDestResult !== InvalidArgument ||

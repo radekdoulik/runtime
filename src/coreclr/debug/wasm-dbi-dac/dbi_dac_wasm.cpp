@@ -95,6 +95,7 @@ enum Result : int32_t
     InvalidTestData = -6,
     BufferTooSmall = -7,
     InvalidReadRange = -8,
+    InvalidSymbolName = -9,
 };
 
 // Maximum byte count accepted by a single ReadVirtual / copy_from_target
@@ -106,6 +107,15 @@ enum Result : int32_t
 // is comfortably above any real workload while still bounding worst-
 // case behaviour.
 constexpr uint32_t MaxReadVirtualBytes = 256u * 1024u * 1024u;
+
+// Maximum byte count accepted for a symbol name in any symbol-lookup
+// callback. Caps the value at 256 bytes, which is well above any real
+// CoreCLR symbol name (the longest in the runtime today is ~70 chars)
+// but small enough to bound JS-side TextDecoder work and prevent a
+// confused or malicious host from forwarding a multi-megabyte buffer
+// for "symbol resolution". Also defends against unbounded strlen()
+// scans on non-NUL-terminated input by anchoring strnlen at this limit.
+constexpr uint32_t MaxSymbolNameBytes = 256;
 
 // Validate a wasm32 target read of [address, address + byteCount) and
 // matching debugger-side write at [debuggerAddress, debuggerAddress +
@@ -129,6 +139,31 @@ inline bool IsValidWasmReadRange(uint64_t address, uint64_t debuggerAddress, uin
         return false;
     }
     if (debuggerAddress > UINT32_MAX || debuggerAddress > static_cast<uint64_t>(UINT32_MAX) - (byteCount - 1))
+    {
+        return false;
+    }
+    return true;
+}
+
+// Validate a wasm32 symbol-name buffer at [symbolNameAddress,
+// symbolNameAddress + symbolNameLength). Rejects empty names, names
+// longer than MaxSymbolNameBytes, a null buffer pointer with non-zero
+// length, and ranges that wrap past the 4 GiB wasm32 linear-memory
+// ceiling. The complementary debugger-side bounds check (the buffer
+// actually fits inside the sidecar's heap) is the JS host's
+// responsibility because it depends on the live heap size.
+inline bool IsValidSymbolNameRange(uint32_t symbolNameAddress, uint32_t symbolNameLength)
+{
+    if (symbolNameLength == 0 || symbolNameLength > MaxSymbolNameBytes)
+    {
+        return false;
+    }
+    if (symbolNameAddress == 0)
+    {
+        return false;
+    }
+    // symbolNameAddress + symbolNameLength - 1 must fit in 32 bits.
+    if (symbolNameAddress > UINT32_MAX - (symbolNameLength - 1))
     {
         return false;
     }
@@ -766,8 +801,15 @@ TryGetSymbol(ICorDebugDataTarget* dataTarget, uint64_t baseAddress, const char* 
     }
 
     uint64_t resolvedAddress = 0;
-    size_t symbolNameLength = strlen(symbolName);
-    if (symbolNameLength > UINT32_MAX)
+
+    // Anchor the strlen scan at MaxSymbolNameBytes + 1 so a caller that
+    // forgot to NUL-terminate cannot trigger a runaway scan into
+    // unrelated wasm memory. A length of 0 (empty name) and a length
+    // greater than MaxSymbolNameBytes are both rejected here so the
+    // host symbol-lookup callback is never asked to resolve an empty
+    // or unreasonably large name.
+    size_t symbolNameLength = strnlen(symbolName, MaxSymbolNameBytes + 1);
+    if (symbolNameLength == 0 || symbolNameLength > MaxSymbolNameBytes)
     {
         return false;
     }
@@ -930,9 +972,13 @@ int32_t coreclr_wasm_dbi_dac_copy_from_target(uint32_t targetAddress, uint32_t d
 WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_try_get_symbol)
 int32_t coreclr_wasm_dbi_dac_try_get_symbol(uint32_t symbolNameAddress, uint32_t symbolNameLength, uint32_t addressOutAddress)
 {
-    if (symbolNameAddress == 0 || addressOutAddress == 0)
+    if (addressOutAddress == 0 || addressOutAddress > UINT32_MAX - 7)
     {
         return InvalidArgument;
+    }
+    if (!IsValidSymbolNameRange(symbolNameAddress, symbolNameLength))
+    {
+        return InvalidSymbolName;
     }
 
     uint64_t resolvedAddress = 0;
