@@ -1463,6 +1463,75 @@ int32_t coreclr_wasm_dbi_dac_probe_dac_consistency_checks(uint32_t runtimeBase, 
     return result;
 }
 
+// Phase 3 onramp probe: surface which IIDs the sidecar's data target
+// already implements before any real CordbProcess work begins. The
+// desktop V3 connect path (CordbProcess::CordbProcess + CordbProcess::Init
+// in src/coreclr/debug/di/process.cpp) QIs the data target for at least
+// ICorDebugDataTarget, ICorDebugMutableDataTarget, and
+// ICorDebugMetaDataLocator; mscordbi tolerates E_NOINTERFACE on the
+// metadata locator but EXPECTS the mutable data target. Today
+// WasmDacDataTarget (dbi_dac_wasm.cpp:449-489) only implements
+// IUnknown / ICLRDataTarget / ICLRRuntimeLocator / ICorDebugDataTarget,
+// so this probe is expected to report bit-mask 0x0F until the Phase 3
+// mutable-data-target gap is closed. The bit layout is:
+//   bit 0 (0x01) IUnknown                       — must be set
+//   bit 1 (0x02) ICLRDataTarget                 — must be set
+//   bit 2 (0x04) ICLRRuntimeLocator             — must be set
+//   bit 3 (0x08) ICorDebugDataTarget            — must be set
+//   bit 4 (0x10) ICorDebugMutableDataTarget     — Phase 3 gap (0 today)
+//   bit 5 (0x20) ICorDebugMetaDataLocator       — desktop tolerates 0
+WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_probe_data_target_qi)
+int32_t coreclr_wasm_dbi_dac_probe_data_target_qi(uint32_t outFlagsAddress)
+{
+    if (outFlagsAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    if (outFlagsAddress > UINT32_MAX - (sizeof(uint32_t) - 1))
+    {
+        return InvalidReadRange;
+    }
+
+    WasmDacDataTarget* dataTarget = new (std::nothrow) WasmDacDataTarget(0);
+    if (dataTarget == nullptr)
+    {
+        return E_OUTOFMEMORY;
+    }
+
+    struct ProbeIid
+    {
+        REFIID Iid;
+        uint32_t Bit;
+    };
+
+    const ProbeIid probes[] = {
+        { IID_IUnknown,                       0x01u },
+        { __uuidof(ICLRDataTarget),           0x02u },
+        { __uuidof(ICLRRuntimeLocator),       0x04u },
+        { __uuidof(ICorDebugDataTarget),      0x08u },
+        { __uuidof(ICorDebugMutableDataTarget), 0x10u },
+        { __uuidof(ICorDebugMetaDataLocator), 0x20u },
+    };
+
+    uint32_t flags = 0;
+    for (const ProbeIid& probe : probes)
+    {
+        void* iface = nullptr;
+        HRESULT hr = dataTarget->QueryInterface(probe.Iid, &iface);
+        if (SUCCEEDED(hr) && iface != nullptr)
+        {
+            flags |= probe.Bit;
+            reinterpret_cast<IUnknown*>(iface)->Release();
+        }
+    }
+
+    dataTarget->Release();
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outFlagsAddress)), &flags, sizeof(flags));
+    return Success;
+}
+
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_session_create)
 int32_t coreclr_wasm_dbi_dac_dbi_session_create()
 {

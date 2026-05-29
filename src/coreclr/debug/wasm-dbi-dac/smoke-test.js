@@ -542,6 +542,21 @@ async function main() {
     const dacConsistencyHr = new DataView(debuggerModule.HEAPU8.buffer, dacConsistencyHrAddress, 4).getInt32(0, true);
     debuggerExports.stackRestore(dacConsistencyStack);
 
+    // Phase 3 onramp probe: surface which IIDs WasmDacDataTarget already
+    // implements. The desktop V3 connect path QIs the data target for
+    // ICorDebugDataTarget, ICorDebugMutableDataTarget, and
+    // ICorDebugMetaDataLocator; mscordbi tolerates E_NOINTERFACE on the
+    // metadata locator but expects mutable data target. Today the sidecar
+    // implements only IUnknown / ICLRDataTarget / ICLRRuntimeLocator /
+    // ICorDebugDataTarget, so the expected bitmask is 0x0F. Bits 0x10
+    // (mutable data target) and 0x20 (metadata locator) are documented
+    // Phase 3 gaps that this probe surfaces.
+    const dataTargetQiStack = debuggerExports.stackSave();
+    const dataTargetQiFlagsAddress = debuggerExports.stackAlloc(4);
+    const dataTargetQiResult = debuggerModule._coreclr_wasm_dbi_dac_probe_data_target_qi(dataTargetQiFlagsAddress);
+    const dataTargetQiFlags = new DataView(debuggerModule.HEAPU8.buffer, dataTargetQiFlagsAddress, 4).getUint32(0, true);
+    debuggerExports.stackRestore(dataTargetQiStack);
+
     // Memory-growth resilience: deliberately grow both wasm linear memories
     // and re-issue a positive copy_from_target. Growth invalidates every
     // previously-captured Uint8Array view; if the host bridge cached a
@@ -677,7 +692,9 @@ async function main() {
         dacDbiResult,
         cordbSecondResult,
         dacConsistencyProbeResult,
-        dacConsistencyHr: `0x${(dacConsistencyHr >>> 0).toString(16)}`
+        dacConsistencyHr: `0x${(dacConsistencyHr >>> 0).toString(16)}`,
+        dataTargetQiResult,
+        dataTargetQiFlags: `0x${dataTargetQiFlags.toString(16)}`
     };
 
     console.log(JSON.stringify(result, null, 2));
@@ -781,7 +798,9 @@ async function main() {
         dacDbiResult !== 0 ||
         cordbSecondResult !== 0 ||
         dacConsistencyProbeResult !== 0 ||
-        dacConsistencyHr !== 0) {
+        dacConsistencyHr !== 0 ||
+        dataTargetQiResult !== 0 ||
+        dataTargetQiFlags !== 0x0f) {
         fail("WASM DBI/DAC smoke test failed");
     }
 }
