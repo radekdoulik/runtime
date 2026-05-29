@@ -270,6 +270,7 @@ static_assert(sizeof(ContractDescriptorLayout) == 32);
 static_assert(sizeof(ContractPointerDataProbe) == 8);
 static_assert(sizeof(TestDataProbe) == 48);
 static_assert(sizeof(DbiControlProbe) == 16);
+static_assert(sizeof(WasmDbiDacVersionBlob) == 32);
 static_assert(sizeof(WasmDebugCommandRecord) == 80);
 static_assert(sizeof(WasmDebugEventRecord) == 340);
 static_assert(sizeof(WasmDebugFrameRecord) == 88);
