@@ -409,6 +409,15 @@ ICorDebug* g_cordb = nullptr;
 bool g_connectedToRuntime = false;
 uint32_t g_connectedRuntimeBase = 0;
 uint32_t g_syntheticProcessId = 1;
+// Real V3 ICorDebugProcess obtained from OpenVirtualProcessImpl during
+// dbi_connect_runtime. Held as IUnknown* to avoid pulling the entire
+// ICorDebugProcess vtable header into this façade compilation unit; the
+// only operation we perform on it from the façade is Release(). The
+// sidecar instantiates this in addition to (not in place of) the
+// existing synthetic g_connectedToRuntime / g_syntheticProcessId facade
+// during the Phase 3 transition; once the synthetic facade is fully
+// retired the IUnknown* will become the sole process representation.
+IUnknown* g_realCordbProcess = nullptr;
 uint8_t g_lastRuntimeEvent[MaxTransportMessageBytes];
 uint32_t g_lastRuntimeEventLength = 0;
 WasmDebugEventRecord g_lastRuntimeEventRecord{};
@@ -1894,6 +1903,61 @@ int32_t coreclr_wasm_dbi_dac_dbi_connect_runtime(uint32_t runtimeBase)
     memset(&g_lastRuntimeEventRecord, 0, sizeof(g_lastRuntimeEventRecord));
     memset(&g_lastRuntimeFrameRecord, 0, sizeof(g_lastRuntimeFrameRecord));
     InvalidatePageCache();
+
+    // Phase 3: instantiate a real V3 CordbProcess via OpenVirtualProcessImpl
+    // alongside the existing synthetic facade. Failure is non-fatal during
+    // the Phase 3 transition — the synthetic facade carries the smoke
+    // contract until the next slice retires it.
+    if (g_realCordbProcess == nullptr)
+    {
+        // PAL_InitializeDLL is required for CordbProcess::Init's three
+        // CreateEventW calls (process.cpp:1679-1695). The wasm sidecar's
+        // partial PAL usage does not bootstrap g_pObjectManager on its
+        // own; probe_create_events documents the gap. Idempotent on
+        // success (returns 0 if already initialized).
+        if (PAL_InitializeDLL() == 0)
+        {
+            WasmDacDataTarget* dataTarget = new (std::nothrow) WasmDacDataTarget(runtimeBase);
+            if (dataTarget != nullptr)
+            {
+                uint64_t descriptorAddress = 0;
+                if (TryGetSymbol(
+                        static_cast<ICorDebugDataTarget*>(dataTarget),
+                        runtimeBase,
+                        "DotNetRuntimeContractDescriptor",
+                        &descriptorAddress) &&
+                    descriptorAddress != 0 &&
+                    descriptorAddress <= UINT32_MAX)
+                {
+                    struct
+                    {
+                        WORD wStructVersion;
+                        WORD wMajor;
+                        WORD wMinor;
+                        WORD wBuild;
+                        WORD wRevision;
+                    } maxDebuggerVersion = { 0, 4, 0, 0, 0 };
+
+                    IUnknown* pInstance = nullptr;
+                    DWORD flagsOut = 0;
+                    HRESULT openHr = OpenVirtualProcessImpl(
+                        descriptorAddress,
+                        static_cast<IUnknown*>(static_cast<ICorDebugDataTarget*>(dataTarget)),
+                        nullptr,
+                        reinterpret_cast<_CLR_DEBUGGING_VERSION*>(&maxDebuggerVersion),
+                        __uuidof(ICorDebugProcess),
+                        &pInstance,
+                        &flagsOut);
+                    if (SUCCEEDED(openHr) && pInstance != nullptr)
+                    {
+                        g_realCordbProcess = pInstance;
+                    }
+                }
+                dataTarget->Release();
+            }
+        }
+    }
+
     return S_OK;
 }
 
@@ -1906,6 +1970,11 @@ int32_t coreclr_wasm_dbi_dac_dbi_disconnect_runtime()
         return gate;
     }
 
+    if (g_realCordbProcess != nullptr)
+    {
+        g_realCordbProcess->Release();
+        g_realCordbProcess = nullptr;
+    }
     g_connectedToRuntime = false;
     g_connectedRuntimeBase = 0;
     g_lastRuntimeEventLength = 0;
@@ -2102,7 +2171,7 @@ int32_t coreclr_wasm_dbi_dac_dbi_poll_process_state(uint32_t bufferAddress, uint
     state.Connected = g_connectedToRuntime ? 1 : 0;
     state.RuntimeBase = g_connectedRuntimeBase;
     state.SyntheticProcessId = g_connectedToRuntime ? g_syntheticProcessId : 0;
-    state.HasRealCordbProcess = 0;
+    state.HasRealCordbProcess = g_realCordbProcess != nullptr ? 1 : 0;
     state.LastEventKind = g_lastRuntimeEventRecord.Kind;
     state.LastMethodToken = g_lastRuntimeEventRecord.MethodToken;
     state.LastILOffset = g_lastRuntimeEventRecord.ILOffset;

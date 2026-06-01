@@ -621,7 +621,7 @@ async function main() {
             dbiProcessStateDuringCallback.state?.connected !== 1 ||
             dbiProcessStateDuringCallback.state?.runtimeBase !== 1 ||
             dbiProcessStateDuringCallback.state?.syntheticProcessId !== 1 ||
-            dbiProcessStateDuringCallback.state?.hasRealCordbProcess !== 0 ||
+            dbiProcessStateDuringCallback.state?.hasRealCordbProcess !== 1 ||
             dbiProcessStateDuringCallback.state?.lastEventKind !== 1 ||
             dbiProcessStateDuringCallback.state?.lastMethodToken !== dbiEventRecordDuringCallback.record?.methodToken ||
             testDataDuringCallback.readResult !== 0 ||
