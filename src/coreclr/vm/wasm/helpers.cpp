@@ -724,9 +724,6 @@ void _DacGlobals::Initialize()
 }
 #endif // !FEATURE_WASM_DBI_DAC
 
-// Incorrectly typed temporary symbol to satisfy the linker.
-int g_pDebugger;
-
 void InvokeCalliStub(CalliStubParam* pParam)
 {
     _ASSERTE(pParam->ftn != (PCODE)NULL);

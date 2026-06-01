@@ -292,47 +292,62 @@ extern "C" EMSCRIPTEN_KEEPALIVE void* GetWasmDbiDacTestData()
 
 // Smoke-only probe: write a small fixed-size block of well-known DacGlobals
 // slot values into the caller-supplied buffer. Returns the number of TADDR
-// slots written (currently 7). The smoke harness uses this after init to
+// slots written (currently 13). The smoke harness uses this after init to
 // verify that the dynamic InitializeEntries path (debug/ee/dactable.cpp on
 // wasm) actually populated the dac__g_pXxx / Class__member slots — before
 // the dactable migration these slots were all zero except ThreadStore.
 //
 // The slot ordering must match the smoke harness's reader:
-//   [0] = ThreadStore::s_pThreadStore   — single seed retained from the old
-//                                          hand-rolled init; non-zero proves
-//                                          ThreadStore class exists.
-//   [1] = AppDomain::m_pTheAppDomain    — non-zero proves AppDomain class
-//                                          symbol is now linked into the
-//                                          DAC table.
-//   [2] = SystemDomain::m_pSystemDomain — same for SystemDomain.
-//   [3] = g_pConfig                     — global EEConfig pointer var.
-//   [4] = g_pGCHeap                     — global GC heap pointer var.
-//   [5] = g_pObjectClass                — type-system globals.
+//   [0] = ThreadStore::s_pThreadStore       — single seed retained from the
+//                                              old hand-rolled init; non-zero
+//                                              proves ThreadStore class exists.
+//   [1] = AppDomain::m_pTheAppDomain        — non-zero proves AppDomain class
+//                                              symbol is now linked into the
+//                                              DAC table.
+//   [2] = SystemDomain::m_pSystemDomain     — same for SystemDomain.
+//   [3] = g_pConfig                         — global EEConfig pointer var.
+//   [4] = g_pGCHeap                         — global GC heap pointer var.
+//   [5] = g_pObjectClass                    — type-system globals.
 //   [6] = g_pStringClass
+//   [7] = g_pDebugger                       — wasm stub (null) from
+//                                              vm/wasm/wasm-debuggee-stubs.cpp;
+//                                              slot value is the address of
+//                                              the stub variable.
+//   [8] = g_pEEInterface                    — wasm stub.
+//   [9] = CLRJitAttachState                 — wasm stub.
+//  [10] = DebuggerController::g_patches     — wasm stub.
+//  [11] = DebuggerController::g_patchTableValid — wasm stub.
+//  [12] = Debugger::s_fCanChangeNgenFlags   — wasm stub.
 //
 // Each TADDR is the *address of the variable*, not the variable's value.
 // PTR_TO_TADDR(&var) is what InitializeEntries stores. A zero address
-// means InitializeEntries skipped that slot (e.g. the REQUIRES_DEBUG_EE
-// no-op on wasm) or the var has no storage. The smoke asserts all 7 are
-// non-zero on wasm; that proves the dynamic init wired ~140 of the ~145
-// DacGlobals slots (the 5 wks-only ones stay zero, see vptr_list.h /
-// dacvars.h _REQUIRES_DEBUG_EE tags).
+// means InitializeEntries skipped that slot or the var has no storage.
+// The smoke asserts ALL 13 are non-zero on wasm; with the wasm-debuggee-
+// stubs.cpp providing the 6 previously-skipped globals, ~145 of the ~145
+// DacGlobals slots are now wired (only 5 vtable identity slots remain
+// zero — see VPTR_CLASS_REQUIRES_DEBUG_EE handling in dactable.cpp).
 extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReadDacGlobalsProbe(uint32_t* outBuffer, uint32_t bufferLengthBytes)
 {
-    constexpr uint32_t SlotCount = 7;
+    constexpr uint32_t SlotCount = 13;
     constexpr uint32_t RequiredBytes = SlotCount * sizeof(uint32_t);
     if (outBuffer == nullptr || bufferLengthBytes < RequiredBytes)
     {
         return -1;
     }
 
-    outBuffer[0] = static_cast<uint32_t>(g_dacTable.ThreadStore__s_pThreadStore);
-    outBuffer[1] = static_cast<uint32_t>(g_dacTable.AppDomain__m_pTheAppDomain);
-    outBuffer[2] = static_cast<uint32_t>(g_dacTable.SystemDomain__m_pSystemDomain);
-    outBuffer[3] = static_cast<uint32_t>(g_dacTable.dac__g_pConfig);
-    outBuffer[4] = static_cast<uint32_t>(g_dacTable.dac__g_pGCHeap);
-    outBuffer[5] = static_cast<uint32_t>(g_dacTable.dac__g_pObjectClass);
-    outBuffer[6] = static_cast<uint32_t>(g_dacTable.dac__g_pStringClass);
+    outBuffer[0]  = static_cast<uint32_t>(g_dacTable.ThreadStore__s_pThreadStore);
+    outBuffer[1]  = static_cast<uint32_t>(g_dacTable.AppDomain__m_pTheAppDomain);
+    outBuffer[2]  = static_cast<uint32_t>(g_dacTable.SystemDomain__m_pSystemDomain);
+    outBuffer[3]  = static_cast<uint32_t>(g_dacTable.dac__g_pConfig);
+    outBuffer[4]  = static_cast<uint32_t>(g_dacTable.dac__g_pGCHeap);
+    outBuffer[5]  = static_cast<uint32_t>(g_dacTable.dac__g_pObjectClass);
+    outBuffer[6]  = static_cast<uint32_t>(g_dacTable.dac__g_pStringClass);
+    outBuffer[7]  = static_cast<uint32_t>(g_dacTable.dac__g_pDebugger);
+    outBuffer[8]  = static_cast<uint32_t>(g_dacTable.dac__g_pEEInterface);
+    outBuffer[9]  = static_cast<uint32_t>(g_dacTable.dac__CLRJitAttachState);
+    outBuffer[10] = static_cast<uint32_t>(g_dacTable.DebuggerController__g_patches);
+    outBuffer[11] = static_cast<uint32_t>(g_dacTable.DebuggerController__g_patchTableValid);
+    outBuffer[12] = static_cast<uint32_t>(g_dacTable.Debugger__s_fCanChangeNgenFlags);
     return static_cast<int32_t>(SlotCount);
 }
 

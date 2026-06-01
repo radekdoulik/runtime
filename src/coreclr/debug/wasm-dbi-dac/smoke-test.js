@@ -668,21 +668,20 @@ async function main() {
     const dbgIpcEventOffset = dbgIpcEventBufferView.getUint32(68, true);
     debuggerExports.stackRestore(dbgIpcEventStack);
 
-    // DAC-completeness probe: read 7 well-known DacGlobals slot addresses
-    // from the runtime via CoreClrWasmDebugReadDacGlobalsProbe. Before the
-    // dactable migration (debug/ee/dactable.cpp on wasm using the dynamic
-    // x-macro init path) every slot except ThreadStore was zero. With the
-    // migration in place, all 7 reported slots must be non-zero — which
-    // proves the dynamic InitializeEntries actually wired the ~140
-    // non-REQUIRES_DEBUG_EE DacGlobals slots. The 5 wks-only slots
-    // (g_pDebugger, Debugger::s_fCanChangeNgenFlags, ...) stay zero by
-    // design; this probe deliberately does not query them.
-    //
-    // Slot order matches CoreClrWasmDebugReadDacGlobalsProbe in
-    // src/coreclr/vm/wasm/dbi-control-plane.cpp: ThreadStore,
-    // AppDomain::m_pTheAppDomain, SystemDomain::m_pSystemDomain, g_pConfig,
-    // g_pGCHeap, g_pObjectClass, g_pStringClass.
-    const DacGlobalsProbeSlotCount = 7;
+    // DAC-completeness probe: read 13 well-known DacGlobals slot addresses
+    // from the runtime via CoreClrWasmDebugReadDacGlobalsProbe. With the
+    // dactable migration + wasm-debuggee-stubs in place, ALL ~145
+    // DacGlobals dacvar slots are wired (the 5 vtable identity slots
+    // remain zero by design — no Debugger/DebuggerController instances
+    // exist on wasm). The 7 baseline slots (ThreadStore, AppDomain,
+    // SystemDomain, g_pConfig, g_pGCHeap, g_pObjectClass, g_pStringClass)
+    // come from runtime VM globals. The 6 additional slots (g_pDebugger,
+    // g_pEEInterface, CLRJitAttachState, DebuggerController::g_patches,
+    // DebuggerController::g_patchTableValid, Debugger::s_fCanChangeNgenFlags)
+    // come from src/coreclr/vm/wasm/wasm-debuggee-stubs.cpp — they're
+    // address-of-stub values; DAC reads them as null/zero, which is the
+    // truthful "no debugger EE attached" state.
+    const DacGlobalsProbeSlotCount = 13;
     const dacGlobalsProbeStack = runtimeExports.stackAlloc
         ? runtimeExports.stackAlloc(DacGlobalsProbeSlotCount * 4)
         : null;
@@ -707,7 +706,13 @@ async function main() {
         pConfig: `0x${dacGlobalsSlots[3].toString(16)}`,
         pGCHeap: `0x${dacGlobalsSlots[4].toString(16)}`,
         pObjectClass: `0x${dacGlobalsSlots[5].toString(16)}`,
-        pStringClass: `0x${dacGlobalsSlots[6].toString(16)}`
+        pStringClass: `0x${dacGlobalsSlots[6].toString(16)}`,
+        pDebugger: `0x${dacGlobalsSlots[7].toString(16)}`,
+        pEEInterface: `0x${dacGlobalsSlots[8].toString(16)}`,
+        clrJitAttachState: `0x${dacGlobalsSlots[9].toString(16)}`,
+        debuggerControllerGPatches: `0x${dacGlobalsSlots[10].toString(16)}`,
+        debuggerControllerGPatchTableValid: `0x${dacGlobalsSlots[11].toString(16)}`,
+        debuggerSFCanChangeNgenFlags: `0x${dacGlobalsSlots[12].toString(16)}`
     };
     const dacGlobalsAllNonZero = dacGlobalsSlots.every(v => v !== 0);
 

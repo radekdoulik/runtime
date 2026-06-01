@@ -14,12 +14,29 @@
 
 #ifdef TARGET_WASM
 // On wasm the debug EE WKS subdir is not built (see CMakeLists.txt in this
-// directory). Some entries in dacvars.h and vptr_list.h reference symbols
-// defined in debug/ee/wks/ (Debugger, DebuggerController, ...) that are
-// therefore not linkable here. Those entries are tagged with the
-// _REQUIRES_DEBUG_EE macros in the shared x-macro headers; overriding the
-// tag macros to no-op for the dynamic-init body below keeps the path from
-// emitting references to the unlinked symbols.
+// directory).
+//
+// The dacvars.h entries that reference debug/ee/wks-only globals
+// (g_pDebugger, DebuggerController::g_patches, etc.) are tagged with
+// DEFINE_DACVAR_REQUIRES_DEBUG_EE. We do NOT override that macro on
+// wasm anymore — instead, src/coreclr/vm/wasm/wasm-debuggee-stubs.cpp
+// provides typed null/zero stubs for those 6 symbols so the dynamic
+// DacGlobals init can wire all of them. DAC reads then correctly
+// report "no debugger attached" (null/zero) instead of skipping the
+// slots entirely. See docs/design/coreclr/wasm-debug-phase5-decision.md
+// for the Option 5b rationale.
+//
+// VPTR_CLASS_REQUIRES_DEBUG_EE entries (5 classes: Debugger,
+// EEDbgInterfaceImpl, DebuggerController, DebuggerMethodInfoTable,
+// DebuggerPatchTable) ARE still skipped here because the dynamic-init
+// path's placement-new pattern (in the non-MSVC VPTR_CLASS expansion
+// below) needs each class's `(int)` constructor to link, and those
+// constructors live in debug/ee/wks/ which isn't built on wasm. Adding
+// stub ctors would be pure overhead because no instances of these
+// classes exist on wasm (the wks-side debugger EE that creates them
+// isn't running), so DAC will never encounter an object whose vtable
+// needs identifying against these slots. The vptr fields in DacGlobals
+// stay zero, which is correct for "no instance can possibly exist."
 //
 // IMPORTANT: this override block is placed AFTER `#include <daccess.h>` so
 // the DacGlobals struct is laid out with its full set of fields (using the
@@ -33,13 +50,11 @@
 //
 // The DacGlobals struct layout is unchanged on every platform because the
 // REQUIRES_DEBUG_EE tag macros default to their unrestricted counterparts
-// during struct-field generation; only the assignment phase below skips
-// the tagged entries on wasm.
+// during struct-field generation; only the assignment phase below for
+// VPTR_CLASS_REQUIRES_DEBUG_EE skips the tagged entries on wasm.
 //
-// The undefs guard against the daccess.h #ifndef block re-defining the
-// macros to their default forwarding form before we install our no-op.
-#undef DEFINE_DACVAR_REQUIRES_DEBUG_EE
-#define DEFINE_DACVAR_REQUIRES_DEBUG_EE(true_type, id, var)
+// The undef guards against the daccess.h #ifndef block re-defining the
+// macro to its default forwarding form before we install our no-op.
 #undef VPTR_CLASS_REQUIRES_DEBUG_EE
 #define VPTR_CLASS_REQUIRES_DEBUG_EE(name)
 #include <emscripten.h>

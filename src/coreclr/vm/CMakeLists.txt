@@ -960,6 +960,14 @@ elseif(CLR_CMAKE_TARGET_ARCH_WASM)
         # not be compiled into any target on this platform.
         ${CLR_DIR}/debug/ee/dactable.cpp
         ${ARCH_SOURCES_DIR}/dbi-control-plane.cpp
+        # Wasm-only stubs for the 6 debug-EE globals (g_pDebugger,
+        # DebuggerController::g_patches, etc.) that normally come from
+        # debug/ee/wks. Without these stubs the dynamic DacGlobals init
+        # would have to skip those slots; with them, all ~145 DacGlobals
+        # slots get populated and DAC reads "no debugger attached"
+        # (null/zero) — which is the truthful state on wasm today.
+        # See docs/design/coreclr/wasm-debug-phase5-decision.md.
+        ${ARCH_SOURCES_DIR}/wasm-debuggee-stubs.cpp
     )
     set(VM_SOURCES_WKS_GEN
         ${ARCH_SOURCES_DIR}/callhelpers-interp-to-managed.cpp
