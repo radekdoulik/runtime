@@ -3,6 +3,22 @@
 
 // Any class with a vtable that needs to be instantiated
 // during debugging data access must be listed here.
+//
+// Use VPTR_CLASS_REQUIRES_DEBUG_EE for classes whose vtables live in
+// src/coreclr/debug/ee/wks/ (i.e. provided by the runtime-side debugger EE:
+// Debugger, DebuggerController, ...). Those translation units are not built
+// for TARGET_WASM today (see src/coreclr/debug/ee/CMakeLists.txt
+// `if (NOT CLR_CMAKE_TARGET_ARCH_WASM)`). Targets that DO link the debugger
+// EE see this expand to a regular VPTR_CLASS; wasm overrides this macro
+// before #include "vptr_list.h" to skip the assignment so the dynamic
+// DacGlobals InitializeEntries path does not need to placement-new an
+// instance of an unlinked class. The DacGlobals struct layout is unchanged
+// on every platform because the vptr field is still declared via the
+// VPTR_CLASS forwarding.
+
+#ifndef VPTR_CLASS_REQUIRES_DEBUG_EE
+#define VPTR_CLASS_REQUIRES_DEBUG_EE(name) VPTR_CLASS(name)
+#endif
 
 VPTR_CLASS(EEJitManager)
 
@@ -48,16 +64,25 @@ VPTR_CLASS(NativeImageLayout)
 VPTR_CLASS(FlatImageLayout)
 
 #ifdef DEBUGGING_SUPPORTED
-VPTR_CLASS(Debugger)
-VPTR_CLASS(EEDbgInterfaceImpl)
+VPTR_CLASS_REQUIRES_DEBUG_EE(Debugger)
+VPTR_CLASS_REQUIRES_DEBUG_EE(EEDbgInterfaceImpl)
 #endif // DEBUGGING_SUPPORTED
 
-VPTR_CLASS(DebuggerController)
-VPTR_CLASS(DebuggerMethodInfoTable)
-VPTR_CLASS(DebuggerPatchTable)
+VPTR_CLASS_REQUIRES_DEBUG_EE(DebuggerController)
+VPTR_CLASS_REQUIRES_DEBUG_EE(DebuggerMethodInfoTable)
+VPTR_CLASS_REQUIRES_DEBUG_EE(DebuggerPatchTable)
 
 VPTR_CLASS(LoaderCodeHeap)
 VPTR_CLASS(HostCodeHeap)
 
 VPTR_CLASS(GlobalLoaderAllocator)
 VPTR_CLASS(AssemblyLoaderAllocator)
+
+// Note: VPTR_CLASS_REQUIRES_DEBUG_EE intentionally not undefined here.
+// Callers define this macro once at the top of the TU to override
+// REQUIRES_DEBUG_EE entries. vptr_list.h is included multiple times in
+// dactable.cpp (e.g. once to forward-declare vtables on MSVC, once to
+// emit the initializer values; or once to placement-new on non-MSVC).
+// Undefining here would break the override on the subsequent include
+// because the `#ifndef VPTR_CLASS_REQUIRES_DEBUG_EE` guard at the top
+// would then re-define it as a forward to the unconditional VPTR_CLASS.

@@ -74,6 +74,19 @@
 #define DEFINE_DACVAR_NO_DUMP(true_type, id, var)
 #endif
 
+// Use this macro for a DAC variable whose backing symbol lives in src/coreclr/debug/ee/wks/
+// (i.e. provided by the runtime-side debugger EE: Debugger, DebuggerController, ...). These
+// translation units are not built for TARGET_WASM today (see src/coreclr/debug/ee/CMakeLists.txt
+// `if (NOT CLR_CMAKE_TARGET_ARCH_WASM)`). Targets that DO link the debugger EE see this expand
+// to a regular DEFINE_DACVAR; wasm overrides this macro before #include "dacvars.h" to skip the
+// assignment so the dynamic InitializeEntries path does not reference an unlinked symbol. The
+// DacGlobals struct layout is unchanged on every platform because the field is still declared
+// (DacGlobals's #include uses DEFINE_DACVAR, which DEFINE_DACVAR_REQUIRES_DEBUG_EE forwards to
+// when caller leaves it unguarded).
+#ifndef DEFINE_DACVAR_REQUIRES_DEBUG_EE
+#define DEFINE_DACVAR_REQUIRES_DEBUG_EE(true_type, id, var) DEFINE_DACVAR(true_type, id, var)
+#endif
+
 #define UNKNOWN_POINTER_TYPE SIZE_T
 
 DEFINE_DACVAR(PTR_RangeSectionMap, ExecutionManager__g_codeRangeMap, ExecutionManager::g_codeRangeMap)
@@ -196,16 +209,16 @@ DEFINE_DACVAR(bool, dac__g_fProcessDetach, ::g_fProcessDetach)
 DEFINE_DACVAR_VOLATILE(DWORD, dac__g_fEEShutDown, ::g_fEEShutDown)
 
 DEFINE_DACVAR(ULONG, dac__g_CORDebuggerControlFlags, ::g_CORDebuggerControlFlags)
-DEFINE_DACVAR(UNKNOWN_POINTER_TYPE, dac__g_pDebugger, ::g_pDebugger)
+DEFINE_DACVAR_REQUIRES_DEBUG_EE(UNKNOWN_POINTER_TYPE, dac__g_pDebugger, ::g_pDebugger)
 DEFINE_DACVAR(UNKNOWN_POINTER_TYPE, dac__g_pDebugInterface, ::g_pDebugInterface)
 DEFINE_DACVAR(UNKNOWN_POINTER_TYPE, dac__g_pEEDbgInterfaceImpl, ::g_pEEDbgInterfaceImpl)
-DEFINE_DACVAR(UNKNOWN_POINTER_TYPE, dac__g_pEEInterface, ::g_pEEInterface)
-DEFINE_DACVAR(ULONG, dac__CLRJitAttachState, ::CLRJitAttachState)
+DEFINE_DACVAR_REQUIRES_DEBUG_EE(UNKNOWN_POINTER_TYPE, dac__g_pEEInterface, ::g_pEEInterface)
+DEFINE_DACVAR_REQUIRES_DEBUG_EE(ULONG, dac__CLRJitAttachState, ::CLRJitAttachState)
 
-DEFINE_DACVAR(BOOL, Debugger__s_fCanChangeNgenFlags, Debugger::s_fCanChangeNgenFlags)
+DEFINE_DACVAR_REQUIRES_DEBUG_EE(BOOL, Debugger__s_fCanChangeNgenFlags, Debugger::s_fCanChangeNgenFlags)
 
-DEFINE_DACVAR(PTR_DebuggerPatchTable, DebuggerController__g_patches, DebuggerController::g_patches)
-DEFINE_DACVAR(BOOL, DebuggerController__g_patchTableValid, DebuggerController::g_patchTableValid)
+DEFINE_DACVAR_REQUIRES_DEBUG_EE(PTR_DebuggerPatchTable, DebuggerController__g_patches, DebuggerController::g_patches)
+DEFINE_DACVAR_REQUIRES_DEBUG_EE(BOOL, DebuggerController__g_patchTableValid, DebuggerController::g_patchTableValid)
 
 DEFINE_DACVAR(PTR_SyncTableEntry, dac__g_pSyncTable, ::g_pSyncTable)
 #ifdef FEATURE_COMINTEROP
@@ -253,3 +266,12 @@ DEFINE_DACVAR(CDacPlatformMetadata, dac__g_cdacPlatformMetadata, ::g_cdacPlatfor
 
 #undef DEFINE_DACVAR
 #undef DEFINE_DACVAR_NO_DUMP
+// Note: DEFINE_DACVAR_REQUIRES_DEBUG_EE intentionally not undefined here.
+// Callers (e.g. dactable.cpp on wasm) define this macro once at the top of
+// the TU to override REQUIRES_DEBUG_EE entries (e.g. to skip them on wasm
+// where their backing symbols are not linked). dacvars.h is included
+// multiple times in dactable.cpp's InitializeEntries (once for the
+// static_assert pass, once for the assignment pass). Undefining the macro
+// here would break the override on the second include because the
+// `#ifndef DEFINE_DACVAR_REQUIRES_DEBUG_EE` guard at the top would then
+// re-define it as a forward to the unconditional DEFINE_DACVAR.

@@ -19,6 +19,7 @@
 #include "common.h"
 #include "threads.h"
 #include "../../interpreter/intops.h"
+#include <daccess.h>
 
 #include <emscripten.h>
 #include <stdio.h>
@@ -26,6 +27,11 @@
 #include <string.h>
 
 extern "C" int32_t CoreClrWasmDebugOnBreakpointHit(uint32_t eventAddress, uint32_t eventLength);
+
+// Forward declaration of g_dacTable defined in src/coreclr/debug/ee/dactable.cpp.
+// Used by CoreClrWasmDebugReadDacGlobalsProbe to expose well-known slot values
+// to the smoke harness for coverage validation.
+extern DacGlobals g_dacTable;
 
 struct WasmDbiDacTestData
 {
@@ -282,6 +288,52 @@ void ContinueWasmDebugBreakpointFromCommand(const char* command)
 extern "C" EMSCRIPTEN_KEEPALIVE void* GetWasmDbiDacTestData()
 {
     return &g_wasmDbiDacTestData;
+}
+
+// Smoke-only probe: write a small fixed-size block of well-known DacGlobals
+// slot values into the caller-supplied buffer. Returns the number of TADDR
+// slots written (currently 7). The smoke harness uses this after init to
+// verify that the dynamic InitializeEntries path (debug/ee/dactable.cpp on
+// wasm) actually populated the dac__g_pXxx / Class__member slots — before
+// the dactable migration these slots were all zero except ThreadStore.
+//
+// The slot ordering must match the smoke harness's reader:
+//   [0] = ThreadStore::s_pThreadStore   — single seed retained from the old
+//                                          hand-rolled init; non-zero proves
+//                                          ThreadStore class exists.
+//   [1] = AppDomain::m_pTheAppDomain    — non-zero proves AppDomain class
+//                                          symbol is now linked into the
+//                                          DAC table.
+//   [2] = SystemDomain::m_pSystemDomain — same for SystemDomain.
+//   [3] = g_pConfig                     — global EEConfig pointer var.
+//   [4] = g_pGCHeap                     — global GC heap pointer var.
+//   [5] = g_pObjectClass                — type-system globals.
+//   [6] = g_pStringClass
+//
+// Each TADDR is the *address of the variable*, not the variable's value.
+// PTR_TO_TADDR(&var) is what InitializeEntries stores. A zero address
+// means InitializeEntries skipped that slot (e.g. the REQUIRES_DEBUG_EE
+// no-op on wasm) or the var has no storage. The smoke asserts all 7 are
+// non-zero on wasm; that proves the dynamic init wired ~140 of the ~145
+// DacGlobals slots (the 5 wks-only ones stay zero, see vptr_list.h /
+// dacvars.h _REQUIRES_DEBUG_EE tags).
+extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReadDacGlobalsProbe(uint32_t* outBuffer, uint32_t bufferLengthBytes)
+{
+    constexpr uint32_t SlotCount = 7;
+    constexpr uint32_t RequiredBytes = SlotCount * sizeof(uint32_t);
+    if (outBuffer == nullptr || bufferLengthBytes < RequiredBytes)
+    {
+        return -1;
+    }
+
+    outBuffer[0] = static_cast<uint32_t>(g_dacTable.ThreadStore__s_pThreadStore);
+    outBuffer[1] = static_cast<uint32_t>(g_dacTable.AppDomain__m_pTheAppDomain);
+    outBuffer[2] = static_cast<uint32_t>(g_dacTable.SystemDomain__m_pSystemDomain);
+    outBuffer[3] = static_cast<uint32_t>(g_dacTable.dac__g_pConfig);
+    outBuffer[4] = static_cast<uint32_t>(g_dacTable.dac__g_pGCHeap);
+    outBuffer[5] = static_cast<uint32_t>(g_dacTable.dac__g_pObjectClass);
+    outBuffer[6] = static_cast<uint32_t>(g_dacTable.dac__g_pStringClass);
+    return static_cast<int32_t>(SlotCount);
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReceiveCommand(const uint8_t* command, uint32_t commandLength)

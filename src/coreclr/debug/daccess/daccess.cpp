@@ -5184,9 +5184,7 @@ ClrDataAccess::Initialize(void)
     // copy the same data into the globals and so
     // cannot interfere with each other.
     IfFailRet(GetDacGlobalValues());
-#ifndef TARGET_WASM
     IfFailRet(DacGetHostVtPtrs());
-#endif // !TARGET_WASM
 
     //
     // DAC is now setup and ready to use
@@ -6539,9 +6537,9 @@ CLRDataCreateInstance(REFIID iid,
     {
         return hr;
     }
-#if defined(LOGGING) && !defined(TARGET_WASM)
+#if defined(LOGGING)
     InitializeLogging();
-#endif // defined(LOGGING) && !defined(TARGET_WASM)
+#endif // defined(LOGGING)
 
     // TODO: [cdac] Remove when cDAC deploys with SOS - https://github.com/dotnet/runtime/issues/108720
     ReleaseHolder<IUnknown> cdacInterface = nullptr;

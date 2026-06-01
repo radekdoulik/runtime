@@ -210,6 +210,10 @@ async function main() {
         fail("runtime export GetWasmDbiDacTestData is missing");
     }
 
+    if (typeof runtimeExports.CoreClrWasmDebugReadDacGlobalsProbe !== "function") {
+        fail("runtime export CoreClrWasmDebugReadDacGlobalsProbe is missing");
+    }
+
     if (typeof runtimeExports.CoreClrWasmDebugReceiveCommand !== "function" ||
         typeof runtimeExports.CoreClrWasmDebugGetLastCommandLength !== "function" ||
         typeof runtimeExports.CoreClrWasmDebugCopyLastCommand !== "function") {
@@ -555,6 +559,49 @@ async function main() {
     const dataTargetQiFlags = new DataView(debuggerModule.HEAPU8.buffer, dataTargetQiFlagsAddress, 4).getUint32(0, true);
     debuggerExports.stackRestore(dataTargetQiStack);
 
+    // DAC-completeness probe: read 7 well-known DacGlobals slot addresses
+    // from the runtime via CoreClrWasmDebugReadDacGlobalsProbe. Before the
+    // dactable migration (debug/ee/dactable.cpp on wasm using the dynamic
+    // x-macro init path) every slot except ThreadStore was zero. With the
+    // migration in place, all 7 reported slots must be non-zero — which
+    // proves the dynamic InitializeEntries actually wired the ~140
+    // non-REQUIRES_DEBUG_EE DacGlobals slots. The 5 wks-only slots
+    // (g_pDebugger, Debugger::s_fCanChangeNgenFlags, ...) stay zero by
+    // design; this probe deliberately does not query them.
+    //
+    // Slot order matches CoreClrWasmDebugReadDacGlobalsProbe in
+    // src/coreclr/vm/wasm/dbi-control-plane.cpp: ThreadStore,
+    // AppDomain::m_pTheAppDomain, SystemDomain::m_pSystemDomain, g_pConfig,
+    // g_pGCHeap, g_pObjectClass, g_pStringClass.
+    const DacGlobalsProbeSlotCount = 7;
+    const dacGlobalsProbeStack = runtimeExports.stackAlloc
+        ? runtimeExports.stackAlloc(DacGlobalsProbeSlotCount * 4)
+        : null;
+    const dacGlobalsProbeBuffer = dacGlobalsProbeStack !== null
+        ? dacGlobalsProbeStack
+        : 0;
+    let dacGlobalsProbeResult = -1;
+    const dacGlobalsSlots = new Array(DacGlobalsProbeSlotCount).fill(0);
+    if (dacGlobalsProbeBuffer !== 0) {
+        dacGlobalsProbeResult = runtimeExports.CoreClrWasmDebugReadDacGlobalsProbe(
+            dacGlobalsProbeBuffer,
+            DacGlobalsProbeSlotCount * 4) | 0;
+        const view = new DataView(runtimeExports.memory.buffer, dacGlobalsProbeBuffer, DacGlobalsProbeSlotCount * 4);
+        for (let i = 0; i < DacGlobalsProbeSlotCount; i++) {
+            dacGlobalsSlots[i] = view.getUint32(i * 4, true);
+        }
+    }
+    const dacGlobals = {
+        threadStore: `0x${dacGlobalsSlots[0].toString(16)}`,
+        appDomain: `0x${dacGlobalsSlots[1].toString(16)}`,
+        systemDomain: `0x${dacGlobalsSlots[2].toString(16)}`,
+        pConfig: `0x${dacGlobalsSlots[3].toString(16)}`,
+        pGCHeap: `0x${dacGlobalsSlots[4].toString(16)}`,
+        pObjectClass: `0x${dacGlobalsSlots[5].toString(16)}`,
+        pStringClass: `0x${dacGlobalsSlots[6].toString(16)}`
+    };
+    const dacGlobalsAllNonZero = dacGlobalsSlots.every(v => v !== 0);
+
     // Memory-growth resilience: deliberately grow both wasm linear memories
     // and re-issue a positive copy_from_target. Growth invalidates every
     // previously-captured Uint8Array view; if the host bridge cached a
@@ -692,7 +739,10 @@ async function main() {
         dacConsistencyProbeResult,
         dacConsistencyHr: `0x${(dacConsistencyHr >>> 0).toString(16)}`,
         dataTargetQiResult,
-        dataTargetQiFlags: `0x${dataTargetQiFlags.toString(16)}`
+        dataTargetQiFlags: `0x${dataTargetQiFlags.toString(16)}`,
+        dacGlobalsProbeResult,
+        dacGlobalsAllNonZero,
+        dacGlobals
     };
 
     console.log(JSON.stringify(result, null, 2));
@@ -798,7 +848,9 @@ async function main() {
         dacConsistencyProbeResult !== 0 ||
         dacConsistencyHr !== 0 ||
         dataTargetQiResult !== 0 ||
-        dataTargetQiFlags !== 0x0f) {
+        dataTargetQiFlags !== 0x0f ||
+        dacGlobalsProbeResult !== DacGlobalsProbeSlotCount ||
+        !dacGlobalsAllNonZero) {
         fail("WASM DBI/DAC smoke test failed");
     }
 }

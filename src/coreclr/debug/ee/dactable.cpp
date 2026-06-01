@@ -9,61 +9,41 @@
 //
 //*****************************************************************************
 
-#ifdef TARGET_WASM
-
-// On wasm the debug EE WKS subdir is not built (see CMakeLists.txt in this
-// directory). This branch is the single source of truth for the g_dacTable
-// symbol and its initializer on wasm. The sidecar (coreclr-dbi-dac.wasm)
-// fetches g_dacTable via the Getg_dacTable() export below to bootstrap its
-// DAC view of the runtime.
-//
-// Today only ThreadStore::s_pThreadStore is wired up; every other DacGlobals
-// slot stays zero. As each VM subsystem lands on wasm (GC, AppDomain, type
-// system, debugger EE, ...), its DacGlobals entries will be progressively
-// re-populated here.
-//
-// The DacGlobals struct itself keeps its full non-wasm layout (driven by the
-// shared x-macro headers under src/coreclr/inc/{dacvars,gfunc_list,vptr_list}.h)
-// to avoid forcing TARGET_WASM ifdefs into every DAC consumer.
-
-#include "common.h"
-#include "threads.h"
-
-#include <emscripten.h>
-
-DLLEXPORT DacGlobals g_dacTable;
-
-void DacGlobals::InitializeEntries()
-{
-    memset(this, 0, sizeof(*this));
-    ThreadStore__s_pThreadStore = PTR_TO_TADDR(&ThreadStore::s_pThreadStore);
-}
-
-void DacGlobals::Initialize()
-{
-    g_dacTable.InitializeEntries();
-}
-
-// Wasm-only sidecar export. The sidecar reads g_dacTable through this entry
-// point rather than touching the symbol directly because wasm modules cannot
-// dereference each other's memory. EMSCRIPTEN_KEEPALIVE prevents wasm-ld from
-// dropping the symbol during dead-code elimination.
-extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_dacTable()
-{
-    static bool s_initialized = false;
-    if (!s_initialized)
-    {
-        DacGlobals::Initialize();
-        s_initialized = true;
-    }
-
-    return &g_dacTable;
-}
-
-#else // !TARGET_WASM
-
 #include "stdafx.h"
 #include <daccess.h>
+
+#ifdef TARGET_WASM
+// On wasm the debug EE WKS subdir is not built (see CMakeLists.txt in this
+// directory). Some entries in dacvars.h and vptr_list.h reference symbols
+// defined in debug/ee/wks/ (Debugger, DebuggerController, ...) that are
+// therefore not linkable here. Those entries are tagged with the
+// _REQUIRES_DEBUG_EE macros in the shared x-macro headers; overriding the
+// tag macros to no-op for the dynamic-init body below keeps the path from
+// emitting references to the unlinked symbols.
+//
+// IMPORTANT: this override block is placed AFTER `#include <daccess.h>` so
+// the DacGlobals struct is laid out with its full set of fields (using the
+// header's default forwarding form of the REQUIRES_DEBUG_EE macros) before
+// the override activates. Putting the override earlier would make the
+// struct layout in this TU silently depend on whatever PCH chain happened
+// to pull in daccess.h first; if that chain ever changed, this TU would
+// allocate g_dacTable at a smaller-than-expected size while every other
+// TU that consumes daccess.h continued to compute the full field offsets,
+// producing a silent ABI mismatch.
+//
+// The DacGlobals struct layout is unchanged on every platform because the
+// REQUIRES_DEBUG_EE tag macros default to their unrestricted counterparts
+// during struct-field generation; only the assignment phase below skips
+// the tagged entries on wasm.
+//
+// The undefs guard against the daccess.h #ifndef block re-defining the
+// macros to their default forwarding form before we install our no-op.
+#undef DEFINE_DACVAR_REQUIRES_DEBUG_EE
+#define DEFINE_DACVAR_REQUIRES_DEBUG_EE(true_type, id, var)
+#undef VPTR_CLASS_REQUIRES_DEBUG_EE
+#define VPTR_CLASS_REQUIRES_DEBUG_EE(name)
+#include <emscripten.h>
+#endif // TARGET_WASM
 
 #include "../../vm/virtualcallstub.h"
 #include "../../vm/codeman.h"
@@ -182,6 +162,22 @@ void DacGlobals::Initialize()
     g_dacTable.InitializeEntries();
 }
 #endif
-#endif // DEBUGGER_SUPPORTED
+#endif // DEBUGGING_SUPPORTED
 
-#endif // !TARGET_WASM
+#ifdef TARGET_WASM
+// Wasm-only sidecar export. The sidecar reads g_dacTable through this entry
+// point rather than touching the symbol directly because wasm modules cannot
+// dereference each other's memory. EMSCRIPTEN_KEEPALIVE prevents wasm-ld from
+// dropping the symbol during dead-code elimination.
+extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_dacTable()
+{
+    static bool s_initialized = false;
+    if (!s_initialized)
+    {
+        DacGlobals::Initialize();
+        s_initialized = true;
+    }
+
+    return &g_dacTable;
+}
+#endif // TARGET_WASM
