@@ -411,6 +411,23 @@ async function main() {
     let dbiProcessStateDuringCallback = { pollResult: -1, bytesWritten: 0, state: null };
     let testDataDuringCallback = { readResult: -1, testData: null };
     let continueDuringCallbackResult = -1;
+    // Phase 4 slice 2: structured DebuggerIPCEvent payload captured by
+    // CoreClrWasmDebugReadLastIpcEvent during the breakpoint callback.
+    // Asserts the runtime fills the 96-byte WasmDbgIpcEventBreakpoint
+    // shape with the expected magic, type, method-token, and a
+    // monotonically-incrementing BreakpointToken. The full sidecar
+    // end-to-end drain (resolve symbol, copy_from_target, clear flag)
+    // is the next slice; this one verifies the runtime side is wired.
+    let ipcEventDuringCallback = {
+        readBytes: -1,
+        magic: 0,
+        type: 0,
+        funcMetadataToken: 0,
+        breakpointToken: 0n,
+        isIL: 0,
+        offset: 0,
+        size: 0
+    };
 
     // Re-fetch typed-array views on every callback. WebAssembly.Memory can
     // grow at any time during real runtime execution (GC heap, stack
@@ -558,6 +575,43 @@ async function main() {
                     dbiFrameRecordDuringCallback = pollDbiFrameRecord(debuggerInstance);
                     dbiProcessStateDuringCallback = pollDbiProcessState(debuggerInstance);
                     testDataDuringCallback = readDbiTestData(debuggerInstance);
+                    // Phase 4 slice 2: drain the structured DebuggerIPCEvent
+                    // payload directly from the runtime via
+                    // CoreClrWasmDebugReadLastIpcEvent. This is the runtime
+                    // side of the wire-format the round-trip probe in
+                    // smoke-test.js validated; the future sidecar slice 3
+                    // will resolve the runtime symbol and drain via
+                    // copy_from_target instead.
+                    const ipcStack = runtimeExports.stackSave();
+                    const ipcSize = runtimeExports.CoreClrWasmDebugGetLastIpcEventSize() | 0;
+                    const ipcBuf = runtimeExports.stackAlloc(ipcSize);
+                    const ipcReadBytes = runtimeExports.CoreClrWasmDebugReadLastIpcEvent(ipcBuf, ipcSize) | 0;
+                    if (ipcReadBytes === 96) {
+                        const ipcView = new DataView(runtimeExports.memory.buffer, ipcBuf, ipcSize);
+                        // Layout (matches WasmDbgIpcEventBreakpointRuntime in
+                        // dbi-control-plane.cpp and WasmDbgIpcEventBreakpoint
+                        // in dbi_dac_wasm.cpp byte-for-byte):
+                        //   0:Magic 4:Type 8:ProcessId 12:ThreadId
+                        //   16:VmAppDomain(8) 24:VmThread(8)
+                        //   32:Hr 36:Flags 40:BreakpointToken(8)
+                        //   48:FuncMetadataToken 52:Reserved0
+                        //   56:VmAssembly(8) 64:IsIL 68:Offset 72:EncVersion
+                        //   76:Reserved1 80:NativeCodeMethodDescToken(8)
+                        //   88:CodeStartAddress(8)
+                        ipcEventDuringCallback = {
+                            readBytes: ipcReadBytes,
+                            magic: ipcView.getUint32(0, true),
+                            type: ipcView.getUint32(4, true),
+                            breakpointToken: ipcView.getBigUint64(40, true),
+                            funcMetadataToken: ipcView.getUint32(48, true),
+                            isIL: ipcView.getUint32(64, true),
+                            offset: ipcView.getUint32(68, true),
+                            size: ipcSize
+                        };
+                    } else {
+                        ipcEventDuringCallback = { readBytes: ipcReadBytes, magic: 0, type: 0, funcMetadataToken: 0, breakpointToken: 0n, isIL: 0, offset: 0, size: ipcSize };
+                    }
+                    runtimeExports.stackRestore(ipcStack);
                     continueDuringCallbackResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_continue();
                     sawBreakpointBeforeContinue = true;
                 }
@@ -622,6 +676,13 @@ async function main() {
         result.disconnectResult = disconnectResult;
         result.sessionDestroyResult = sessionDestroyResult;
         result.sawBreakpointBeforeContinue = sawBreakpointBeforeContinue;
+        result.ipcEventDuringCallback = {
+            ...ipcEventDuringCallback,
+            magic: `0x${ipcEventDuringCallback.magic.toString(16)}`,
+            type: `0x${ipcEventDuringCallback.type.toString(16)}`,
+            funcMetadataToken: `0x${ipcEventDuringCallback.funcMetadataToken.toString(16)}`,
+            breakpointToken: `0x${ipcEventDuringCallback.breakpointToken.toString(16)}`
+        };
         console.log(JSON.stringify(result, null, 2));
 
         if (result.hitCount !== 1 ||
@@ -662,7 +723,14 @@ async function main() {
             sessionDestroyResult !== 0 ||
             !sawBreakpointBeforeContinue ||
             fireEventToPauseCount !== 1 ||
-            !fireEventToPauseLastEvent.includes("breakpoint-hit:name=BreakHere")) {
+            !fireEventToPauseLastEvent.includes("breakpoint-hit:name=BreakHere") ||
+            ipcEventDuringCallback.readBytes !== 96 ||
+            ipcEventDuringCallback.magic !== 0x42435049 ||
+            ipcEventDuringCallback.type !== 0x100 ||
+            ipcEventDuringCallback.funcMetadataToken !== dbiEventRecordDuringCallback.record?.methodToken ||
+            ipcEventDuringCallback.breakpointToken === 0n ||
+            ipcEventDuringCallback.isIL !== 1 ||
+            ipcEventDuringCallback.offset !== 0) {
             fail("HelloWorld breakpoint was not reached");
         }
     } finally {

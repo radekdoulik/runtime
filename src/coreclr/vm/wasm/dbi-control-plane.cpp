@@ -95,6 +95,57 @@ struct WasmDebugEventRecord
     char Message[256];
 };
 
+// Phase 4 slice 2: structured DebuggerIPCEvent payload emitted on every
+// breakpoint hit. Mirrors the WasmDbgIpcEventBreakpoint layout in the
+// sidecar (src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:299-319) byte
+// for byte; the sidecar's poll_event drains this through the existing
+// copy_from_target bridge. Both sides static_assert the 96-byte size
+// to catch any drift. Layout — explicit Reserved padding ensures the
+// 8-byte fields are naturally aligned across Emscripten clang and
+// future wasm64:
+//   Magic              - 'IPCB' little-endian (0x42435049).
+//   Type               - DB_IPCE_BREAKPOINT (0x0100) from dbgipceventtypes.h.
+//   ProcessId/ThreadId - process + thread that hit the breakpoint.
+//   VmAppDomain        - AppDomain VMPTR; today always app domain handle 0.
+//   VmThread           - Thread VMPTR; today always 0 (no real Thread on wasm).
+//   Hr                 - hit-time HRESULT; 0 on success, populated by future
+//                        error paths (out-of-slot, etc.).
+//   Flags              - WasmDbgIpcEventFlag*. 0 today; the
+//                        ReplyRequired/AsyncSend bits exist for the future
+//                        DBI handshake when an actual mscordbi attaches.
+//   BreakpointToken    - per-fire monotonically-increasing token so DBI can
+//                        correlate hit notifications with continue commands.
+//   FuncMetadataToken  - the mdMethodDef of the method that hit (e.g.
+//                        0x06000042 for the smoke harness's BreakHere).
+//   VmAssembly         - VMPTR of the containing assembly; today 0.
+//   IsIL/Offset        - IsIL=1 for managed breakpoints; Offset is the IL
+//                        offset (0 today since we only patch IL[0]).
+//   EncVersion         - EnC version of the patched method; today 0.
+//   NativeCodeMethodDescToken / CodeStartAddress - reserved for the
+//                        future jitted-code path; today both 0 since
+//                        wasm-only breakpoints live in the interpreter.
+struct WasmDbgIpcEventBreakpointRuntime
+{
+    uint32_t Magic;
+    uint32_t Type;
+    uint32_t ProcessId;
+    uint32_t ThreadId;
+    uint64_t VmAppDomain;
+    uint64_t VmThread;
+    int32_t Hr;
+    uint32_t Flags;
+    uint64_t BreakpointToken;
+    uint32_t FuncMetadataToken;
+    uint32_t Reserved0;
+    uint64_t VmAssembly;
+    uint32_t IsIL;
+    uint32_t Offset;
+    uint32_t EncVersion;
+    uint32_t Reserved1;
+    uint64_t NativeCodeMethodDescToken;
+    uint64_t CodeStartAddress;
+};
+
 struct WasmDebugFrameRecord
 {
     uint32_t MethodToken;
@@ -109,6 +160,11 @@ struct WasmDebugFrameRecord
 static_assert(sizeof(WasmDebugCommandRecord) == 80);
 static_assert(sizeof(WasmDebugEventRecord) == 340);
 static_assert(sizeof(WasmDebugFrameRecord) == 88);
+static_assert(sizeof(WasmDbgIpcEventBreakpointRuntime) == 96,
+              "WasmDbgIpcEventBreakpointRuntime must mirror the sidecar's WasmDbgIpcEventBreakpoint byte-for-byte");
+
+constexpr uint32_t WasmDbgIpcEventBreakpointMagic = 0x42435049;
+constexpr uint32_t WasmDbgIpcEventTypeBreakpoint = 0x0100;
 
 WasmDbiDacTestData g_wasmDbiDacTestData =
 {
@@ -125,6 +181,15 @@ uint8_t g_wasmDebugLastEvent[WasmDebugMessageBufferSize];
 uint32_t g_wasmDebugLastEventLength;
 WasmDebugEventRecord g_wasmDebugLastEventRecord;
 WasmDebugFrameRecord g_wasmDebugLastFrameRecord;
+// Phase 4 slice 2: the structured DebuggerIPCEvent payload populated on
+// every breakpoint hit. g_wasmDebugLastIpcEventValid is set to 1 by
+// HandleInterpreterBreakpoint, cleared to 0 by CoreClrWasmDebugReadLastIpcEvent
+// once a consumer (sidecar poll_event) drains it. BreakpointToken is the
+// monotonic counter; future stepping/exception events will share the same
+// counter so DBI can totally-order all notifications.
+WasmDbgIpcEventBreakpointRuntime g_wasmDebugLastIpcEvent;
+uint32_t g_wasmDebugLastIpcEventValid;
+uint64_t g_wasmDebugBreakpointTokenCounter;
 // Phase 7 multi-breakpoint state. The single-slot facade was replaced
 // with a fixed-size array of slots so multiple managed breakpoints can
 // be armed concurrently. Single-threaded wasm means at most one slot
@@ -658,6 +723,36 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugCopyLastFrameRecord(uint
     return 0;
 }
 
+// Phase 4 slice 2: drain the most recently populated structured
+// DebuggerIPCEvent payload. Returns the number of bytes copied (96 on
+// success), 0 when no event is pending (g_wasmDebugLastIpcEventValid
+// is 0), or -1 on bad buffer arguments. The Valid flag is cleared on
+// successful drain so the next call returns 0 until the next
+// breakpoint fires. Single-threaded wasm makes the "set in
+// HandleInterpreterBreakpoint, read in drain" exchange a plain
+// load/store — no fencing needed.
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetLastIpcEventSize()
+{
+    return sizeof(WasmDbgIpcEventBreakpointRuntime);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReadLastIpcEvent(uint8_t* buffer, uint32_t bufferLength)
+{
+    if (buffer == nullptr || bufferLength < sizeof(WasmDbgIpcEventBreakpointRuntime))
+    {
+        return -1;
+    }
+
+    if (g_wasmDebugLastIpcEventValid == 0)
+    {
+        return 0;
+    }
+
+    memcpy(buffer, &g_wasmDebugLastIpcEvent, sizeof(g_wasmDebugLastIpcEvent));
+    g_wasmDebugLastIpcEventValid = 0;
+    return static_cast<int32_t>(sizeof(g_wasmDebugLastIpcEvent));
+}
+
 extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetBreakpointHitCount()
 {
     // Phase 7 multi-bp: aggregate hit count across all armed slots.
@@ -864,6 +959,29 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     SetWasmDebugEvent(event);
     SetWasmDebugBreakpointEventRecord(methodDesc, ilOffset);
     SetWasmDebugBreakpointFrameRecord(methodDesc, ilOffset, ip, frameAddress, stackAddress);
+
+    // Phase 4 slice 2: populate the structured DebuggerIPCEvent payload
+    // the sidecar can drain via CoreClrWasmDebugReadLastIpcEvent. This
+    // is the runtime-side counterpart to the round-trip probe at
+    // dbi_dac_wasm.cpp:1665 — same layout, same magic, same type. Once
+    // the sidecar exposes coreclr_wasm_dbi_dac_dbi_poll_event the
+    // future real mscordbi can stop reading the legacy text event and
+    // start consuming the structured payload. BreakpointToken is the
+    // monotonic counter so DBI can correlate hit -> continue across
+    // multiple in-flight breakpoints.
+    g_wasmDebugBreakpointTokenCounter++;
+    memset(&g_wasmDebugLastIpcEvent, 0, sizeof(g_wasmDebugLastIpcEvent));
+    g_wasmDebugLastIpcEvent.Magic = WasmDbgIpcEventBreakpointMagic;
+    g_wasmDebugLastIpcEvent.Type = WasmDbgIpcEventTypeBreakpoint;
+    g_wasmDebugLastIpcEvent.ProcessId = 1;
+    g_wasmDebugLastIpcEvent.ThreadId = 1;
+    g_wasmDebugLastIpcEvent.Hr = 0;
+    g_wasmDebugLastIpcEvent.Flags = 0;
+    g_wasmDebugLastIpcEvent.BreakpointToken = g_wasmDebugBreakpointTokenCounter;
+    g_wasmDebugLastIpcEvent.FuncMetadataToken = methodToken;
+    g_wasmDebugLastIpcEvent.IsIL = 1;
+    g_wasmDebugLastIpcEvent.Offset = ilOffset;
+    g_wasmDebugLastIpcEventValid = 1;
 
     // Phase 6: route the breakpoint event through coreClrDebugFireEventToPause
     // (Mono-pattern stop trigger). The JS-host body captures the payload and
