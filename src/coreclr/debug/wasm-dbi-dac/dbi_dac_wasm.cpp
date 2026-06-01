@@ -1538,6 +1538,98 @@ int32_t coreclr_wasm_dbi_dac_probe_clr_instance_id(uint32_t runtimeBase, uint32_
     return Success;
 }
 
+// Phase 3 onramp probe. Replicates the three unconditional
+// `CreateEvent` calls that `CordbProcess::Init`
+// (`src/coreclr/debug/di/process.cpp:1679-1695`) makes on every
+// supported target, validating that the browser-wasm PAL emulates the
+// CreateEvent / CloseHandle API surface CordbProcess depends on.
+//
+// The three events are:
+//   1. m_leftSideEventAvailable - CreateEvent(NULL, FALSE, FALSE, NULL)
+//      auto-reset, initial state not-signaled.
+//   2. m_leftSideEventRead      - CreateEvent(NULL, FALSE, FALSE, NULL)
+//      auto-reset, initial state not-signaled.
+//   3. m_stopWaitEvent          - CreateEvent(NULL, TRUE,  FALSE, NULL)
+//      manual-reset, initial state not-signaled.
+//
+// (m_detachSetThreadContextNeededEvent is gated on
+// OUT_OF_PROCESS_SETTHREADCONTEXT and is not relevant on wasm.)
+//
+// Outputs:
+//   *outFlagsAddress - bitmask: 0x1 = event 1 created, 0x2 = event 2,
+//                       0x4 = event 3. Expected value: 0x7 on success.
+//   *outHrAddress    - S_OK if all three succeeded, else the HRESULT from
+//                       the first failure (from GetLastError() wrapped via
+//                       HRESULT_FROM_WIN32). Subsequent events are still
+//                       attempted so the flags reflect the full surface.
+// Return: Success when outputs were written; an error otherwise.
+WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_probe_create_events)
+int32_t coreclr_wasm_dbi_dac_probe_create_events(uint32_t outFlagsAddress, uint32_t outHrAddress)
+{
+    if (outFlagsAddress == 0 || outHrAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    // Ensure the PAL is initialized before invoking sync primitives. The
+    // sidecar links the PAL but doesn't bootstrap g_pObjectManager (which
+    // CreateEventW needs) on its own — partial PAL usage works for DAC
+    // ReadVirtual etc., but the synchronization subsystem requires
+    // PAL_InitializeDLL. This call is idempotent (returns 0 if already
+    // initialized) and is the minimum PAL bootstrap needed to make
+    // CordbProcess::Init's three CreateEvent calls succeed.
+    int palInitResult = PAL_InitializeDLL();
+    if (palInitResult != 0)
+    {
+        uint32_t zero = 0;
+        int32_t initHr = static_cast<int32_t>(HRESULT_FROM_WIN32(static_cast<DWORD>(palInitResult)));
+        if (initHr == Success)
+        {
+            initHr = E_FAIL;
+        }
+        memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outFlagsAddress)), &zero, sizeof(zero));
+        memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outHrAddress)), &initHr, sizeof(initHr));
+        return Success;
+    }
+
+    struct EventShape
+    {
+        BOOL ManualReset;
+        BOOL InitialState;
+        uint32_t Bit;
+    };
+    const EventShape shapes[] = {
+        { FALSE, FALSE, 0x1u },
+        { FALSE, FALSE, 0x2u },
+        { TRUE,  FALSE, 0x4u },
+    };
+
+    uint32_t flags = 0;
+    int32_t firstFailureHr = Success;
+    for (const EventShape& shape : shapes)
+    {
+        HANDLE handle = CreateEventW(NULL, shape.ManualReset, shape.InitialState, NULL);
+        if (handle != NULL)
+        {
+            flags |= shape.Bit;
+            CloseHandle(handle);
+        }
+        else if (firstFailureHr == Success)
+        {
+            DWORD lastError = GetLastError();
+            firstFailureHr = static_cast<int32_t>(HRESULT_FROM_WIN32(lastError));
+            if (firstFailureHr == Success)
+            {
+                firstFailureHr = E_FAIL;
+            }
+        }
+    }
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outFlagsAddress)), &flags, sizeof(flags));
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outHrAddress)), &firstFailureHr, sizeof(firstFailureHr));
+    return Success;
+}
+
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_session_create)
 int32_t coreclr_wasm_dbi_dac_dbi_session_create()
 {

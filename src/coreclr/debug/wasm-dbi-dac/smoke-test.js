@@ -583,6 +583,24 @@ async function main() {
     const clrInstanceIdHr = new DataView(debuggerModule.HEAPU8.buffer, clrInstanceIdHrAddress, 4).getInt32(0, true);
     debuggerExports.stackRestore(clrInstanceIdStack);
 
+    // Phase 3 onramp probe: replicate the three unconditional CreateEvent
+    // calls CordbProcess::Init makes (process.cpp:1679-1695) and verify
+    // the browser-wasm PAL emulates the API surface. Expected: flags=0x7
+    // (all three created), HR=0 (no failures). Today the wasm PAL provides
+    // these via the single-threaded event implementation; the probe locks
+    // that contract in so that a future PAL change that breaks any of the
+    // three event shapes fails CI loud — before it would silently break
+    // real V3 attach.
+    const createEventsStack = debuggerExports.stackSave();
+    const createEventsFlagsAddress = debuggerExports.stackAlloc(4);
+    const createEventsHrAddress = debuggerExports.stackAlloc(4);
+    const createEventsProbeResult = debuggerModule._coreclr_wasm_dbi_dac_probe_create_events(
+        createEventsFlagsAddress,
+        createEventsHrAddress);
+    const createEventsFlags = new DataView(debuggerModule.HEAPU8.buffer, createEventsFlagsAddress, 4).getUint32(0, true);
+    const createEventsHr = new DataView(debuggerModule.HEAPU8.buffer, createEventsHrAddress, 4).getInt32(0, true);
+    debuggerExports.stackRestore(createEventsStack);
+
     // DAC-completeness probe: read 7 well-known DacGlobals slot addresses
     // from the runtime via CoreClrWasmDebugReadDacGlobalsProbe. Before the
     // dactable migration (debug/ee/dactable.cpp on wasm using the dynamic
@@ -770,6 +788,11 @@ async function main() {
             hr: `0x${(clrInstanceIdHr >>> 0).toString(16)}`,
             matchesHostDescriptor: clrInstanceIdValue === (runtimeDescriptorAddress >>> 0)
         },
+        createEventsProbe: {
+            result: createEventsProbeResult,
+            flags: `0x${createEventsFlags.toString(16)}`,
+            hr: `0x${(createEventsHr >>> 0).toString(16)}`
+        },
         dacGlobalsProbeResult,
         dacGlobalsAllNonZero,
         dacGlobals
@@ -883,6 +906,9 @@ async function main() {
         clrInstanceIdHr !== 0 ||
         clrInstanceIdValue === 0 ||
         clrInstanceIdValue !== (runtimeDescriptorAddress >>> 0) ||
+        createEventsProbeResult !== 0 ||
+        createEventsFlags !== 0x7 ||
+        createEventsHr !== 0 ||
         dacGlobalsProbeResult !== DacGlobalsProbeSlotCount ||
         !dacGlobalsAllNonZero) {
         fail("WASM DBI/DAC smoke test failed");
