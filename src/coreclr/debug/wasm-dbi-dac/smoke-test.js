@@ -559,6 +559,30 @@ async function main() {
     const dataTargetQiFlags = new DataView(debuggerModule.HEAPU8.buffer, dataTargetQiFlagsAddress, 4).getUint32(0, true);
     debuggerExports.stackRestore(dataTargetQiStack);
 
+    // Phase 3 onramp probe: resolve the runtime contract descriptor address
+    // via the same TryGetSymbol host callback that the V3 attach path
+    // (CordbProcess::OpenVirtualProcessImpl, EnsureClrInstanceIdSet) will
+    // pass as clrInstanceId. The expected value matches the host-side
+    // GetDotNetRuntimeContractDescriptor() export and must equal the
+    // existing `descriptorAddress` field this smoke already reads from
+    // probe_runtime_contract_descriptor — proving the same address flows
+    // through both probe paths and the eventual real attach call.
+    const clrInstanceIdStack = debuggerExports.stackSave();
+    const clrInstanceIdAddress = debuggerExports.stackAlloc(4);
+    const clrInstanceIdHrAddress = debuggerExports.stackAlloc(4);
+    // runtimeBase=1 matches the convention used by the other probes here
+    // (clrDataResult / dacDbiResult / dacConsistencyProbeResult). The
+    // TryGetSymbol callback resolves "DotNetRuntimeContractDescriptor" by
+    // host-side symbol lookup, so the runtime-base value is not actually
+    // dereferenced for the probe; the host bridge looks it up by name.
+    const clrInstanceIdProbeResult = debuggerModule._coreclr_wasm_dbi_dac_probe_clr_instance_id(
+        1,
+        clrInstanceIdAddress,
+        clrInstanceIdHrAddress);
+    const clrInstanceIdValue = new DataView(debuggerModule.HEAPU8.buffer, clrInstanceIdAddress, 4).getUint32(0, true);
+    const clrInstanceIdHr = new DataView(debuggerModule.HEAPU8.buffer, clrInstanceIdHrAddress, 4).getInt32(0, true);
+    debuggerExports.stackRestore(clrInstanceIdStack);
+
     // DAC-completeness probe: read 7 well-known DacGlobals slot addresses
     // from the runtime via CoreClrWasmDebugReadDacGlobalsProbe. Before the
     // dactable migration (debug/ee/dactable.cpp on wasm using the dynamic
@@ -740,6 +764,12 @@ async function main() {
         dacConsistencyHr: `0x${(dacConsistencyHr >>> 0).toString(16)}`,
         dataTargetQiResult,
         dataTargetQiFlags: `0x${dataTargetQiFlags.toString(16)}`,
+        clrInstanceIdProbe: {
+            result: clrInstanceIdProbeResult,
+            value: `0x${clrInstanceIdValue.toString(16)}`,
+            hr: `0x${(clrInstanceIdHr >>> 0).toString(16)}`,
+            matchesHostDescriptor: clrInstanceIdValue === (runtimeDescriptorAddress >>> 0)
+        },
         dacGlobalsProbeResult,
         dacGlobalsAllNonZero,
         dacGlobals
@@ -849,6 +879,10 @@ async function main() {
         dacConsistencyHr !== 0 ||
         dataTargetQiResult !== 0 ||
         dataTargetQiFlags !== 0x0f ||
+        clrInstanceIdProbeResult !== 0 ||
+        clrInstanceIdHr !== 0 ||
+        clrInstanceIdValue === 0 ||
+        clrInstanceIdValue !== (runtimeDescriptorAddress >>> 0) ||
         dacGlobalsProbeResult !== DacGlobalsProbeSlotCount ||
         !dacGlobalsAllNonZero) {
         fail("WASM DBI/DAC smoke test failed");

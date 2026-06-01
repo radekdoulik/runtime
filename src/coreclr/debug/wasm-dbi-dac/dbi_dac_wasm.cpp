@@ -1494,6 +1494,50 @@ int32_t coreclr_wasm_dbi_dac_probe_data_target_qi(uint32_t outFlagsAddress)
     return Success;
 }
 
+// Phase 3 onramp probe. Resolves the runtime's `DotNetRuntimeContractDescriptor`
+// host symbol via the same `TryGetSymbol` host callback that `WasmDacDataTarget`
+// uses, and writes its address as the value that V3 `OpenVirtualProcessImpl`
+// will pass as `clrInstanceId`. Also writes the symbol-resolution HRESULT.
+// This validates that `EnsureClrInstanceIdSet` (`src/coreclr/debug/di/process.cpp:9292`)
+// will see a non-zero, stable address before Phase 3 wires the real attach path.
+//
+// Outputs:
+//   *outClrInstanceIdAddress - resolved descriptor address (cast to uint32_t,
+//                              the wasm-side runtime is 32-bit so this fits
+//                              losslessly), or 0 on failure.
+//   *outHrAddress           - S_OK on success, else `HostSymbolLookupFailed`
+//                              (-3) or an InvalidArgument code.
+// Return: Success when the probe wrote both outputs; an error code otherwise.
+WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_probe_clr_instance_id)
+int32_t coreclr_wasm_dbi_dac_probe_clr_instance_id(uint32_t runtimeBase, uint32_t outClrInstanceIdAddress, uint32_t outHrAddress)
+{
+    if (outClrInstanceIdAddress == 0 || outHrAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    uint32_t clrInstanceId = 0;
+    int32_t resolutionHr = HostSymbolLookupFailed;
+
+    WasmDacDataTarget dataTarget(runtimeBase);
+    uint64_t descriptorAddress = 0;
+    if (TryGetSymbol(
+            static_cast<ICorDebugDataTarget*>(&dataTarget),
+            runtimeBase,
+            "DotNetRuntimeContractDescriptor",
+            &descriptorAddress) &&
+        descriptorAddress != 0 &&
+        descriptorAddress <= UINT32_MAX)
+    {
+        clrInstanceId = static_cast<uint32_t>(descriptorAddress);
+        resolutionHr = Success;
+    }
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outClrInstanceIdAddress)), &clrInstanceId, sizeof(clrInstanceId));
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outHrAddress)), &resolutionHr, sizeof(resolutionHr));
+    return Success;
+}
+
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_session_create)
 int32_t coreclr_wasm_dbi_dac_dbi_session_create()
 {
