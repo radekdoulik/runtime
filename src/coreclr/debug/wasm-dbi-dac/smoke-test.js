@@ -731,6 +731,62 @@ async function main() {
     };
     const dacGlobalsAllNonZero = dacGlobalsSlots.every(v => v !== 0);
 
+    // Phase 7 multi-bp probe: verify ArmWasmDebugBreakpoint slot allocation,
+    // CountActiveWasmDebugBreakpoints / GetActiveBreakpointCount, and the
+    // by-name / by-token clear paths. Uses runtime-side breakpoint helpers
+    // directly via the legacy text-command transport (ReceiveCommand path)
+    // so the probe is independent of the DBI session lifecycle and the
+    // hello-breakpoint smoke. The expected steady-state is "no armed
+    // breakpoints" at the end of the probe; the smoke fails loudly if any
+    // armed slot leaks into the rest of the test.
+    function sendCommand(text) {
+        const stack = runtimeExports.stackSave();
+        const buf = runtimeExports.stackAlloc(text.length + 1);
+        const view = new Uint8Array(runtimeExports.memory.buffer, buf, text.length + 1);
+        for (let i = 0; i < text.length; i++) view[i] = text.charCodeAt(i);
+        view[text.length] = 0;
+        const rc = runtimeExports.CoreClrWasmDebugReceiveCommand(buf, text.length) | 0;
+        runtimeExports.stackRestore(stack);
+        return rc;
+    }
+    function clearByName(name) {
+        const stack = runtimeExports.stackSave();
+        const buf = runtimeExports.stackAlloc(name.length);
+        const view = new Uint8Array(runtimeExports.memory.buffer, buf, name.length);
+        for (let i = 0; i < name.length; i++) view[i] = name.charCodeAt(i);
+        const rc = runtimeExports.CoreClrWasmDebugClearBreakpointByName(buf, name.length) | 0;
+        runtimeExports.stackRestore(stack);
+        return rc;
+    }
+
+    const multiBpInitialCount = runtimeExports.CoreClrWasmDebugGetActiveBreakpointCount() | 0;
+    const multiBpSendA = sendCommand("dbi-command:set-breakpoint:name=BpA");
+    const multiBpSendB = sendCommand("dbi-command:set-breakpoint:name=BpB");
+    const multiBpSendC = sendCommand("dbi-command:set-breakpoint:name=BpC");
+    const multiBpCountAfterThree = runtimeExports.CoreClrWasmDebugGetActiveBreakpointCount() | 0;
+    const multiBpClearedB = clearByName("BpB");
+    const multiBpCountAfterClearB = runtimeExports.CoreClrWasmDebugGetActiveBreakpointCount() | 0;
+    const multiBpClearedA = clearByName("BpA");
+    const multiBpClearedC = clearByName("BpC");
+    const multiBpCountFinal = runtimeExports.CoreClrWasmDebugGetActiveBreakpointCount() | 0;
+    // No-such-name clear must succeed and report 0 cleared. We use a
+    // distinct name that cannot match any existing slot to avoid wiping
+    // an unrelated bp that some future smoke section might have left.
+    const multiBpClearedMissing = clearByName("ThisBreakpointNameDoesNotExist");
+    const multiBpProbe = {
+        initialCount: multiBpInitialCount,
+        sendA: multiBpSendA,
+        sendB: multiBpSendB,
+        sendC: multiBpSendC,
+        countAfterThree: multiBpCountAfterThree,
+        clearedB: multiBpClearedB,
+        countAfterClearB: multiBpCountAfterClearB,
+        clearedA: multiBpClearedA,
+        clearedC: multiBpClearedC,
+        countFinal: multiBpCountFinal,
+        clearedMissing: multiBpClearedMissing
+    };
+
     // Memory-growth resilience: deliberately grow both wasm linear memories
     // and re-issue a positive copy_from_target. Growth invalidates every
     // previously-captured Uint8Array view; if the host bridge cached a
@@ -907,7 +963,8 @@ async function main() {
         },
         dacGlobalsProbeResult,
         dacGlobalsAllNonZero,
-        dacGlobals
+        dacGlobals,
+        multiBpProbe
     };
 
     console.log(JSON.stringify(result, null, 2));
@@ -1039,7 +1096,17 @@ async function main() {
         connectionPrevOnClear !== 1 ||
         connectionAfterClear !== 0 ||
         dacGlobalsProbeResult !== DacGlobalsProbeSlotCount ||
-        !dacGlobalsAllNonZero) {
+        !dacGlobalsAllNonZero ||
+        multiBpSendA !== 0 ||
+        multiBpSendB !== 0 ||
+        multiBpSendC !== 0 ||
+        multiBpCountAfterThree !== multiBpInitialCount + 3 ||
+        multiBpClearedB !== 1 ||
+        multiBpCountAfterClearB !== multiBpInitialCount + 2 ||
+        multiBpClearedA !== 1 ||
+        multiBpClearedC !== 1 ||
+        multiBpCountFinal !== multiBpInitialCount ||
+        multiBpClearedMissing !== 0) {
         fail("WASM DBI/DAC smoke test failed");
     }
 }

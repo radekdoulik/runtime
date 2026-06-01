@@ -125,16 +125,42 @@ uint8_t g_wasmDebugLastEvent[WasmDebugMessageBufferSize];
 uint32_t g_wasmDebugLastEventLength;
 WasmDebugEventRecord g_wasmDebugLastEventRecord;
 WasmDebugFrameRecord g_wasmDebugLastFrameRecord;
-char g_wasmDebugBreakpointMethodName[64];
-uint32_t g_wasmDebugBreakpointMethodToken;
-bool g_wasmDebugBreakpointArmed;
+// Phase 7 multi-breakpoint state. The single-slot facade was replaced
+// with a fixed-size array of slots so multiple managed breakpoints can
+// be armed concurrently. Single-threaded wasm means at most one slot
+// is "stopped" at any moment (only one interpreter thread); per-slot
+// bookkeeping covers identity + patch state + hit count, session-level
+// stopped/continue state stays shared.
+//
+// MaxBreakpoints is bounded (16 today) so the linear scans in the
+// interpreter hot path (MaybePatchInterpreterMethod, ResolveActiveBreakpointSlot)
+// stay cache-friendly. Mono's wasm debugger uses a similar bounded
+// pattern; bump this only if real workloads need more.
+constexpr uint32_t WasmDebugMaxBreakpoints = 16;
+
+struct WasmDebugBreakpointSlot
+{
+    bool Armed;
+    char MethodName[64];
+    uint32_t MethodToken;
+    int32_t* PatchAddress;
+    int32_t OriginalOpcode;
+    bool PatchActive;
+    uint32_t HitCount;
+};
+
+WasmDebugBreakpointSlot g_wasmDebugBreakpoints[WasmDebugMaxBreakpoints];
+
+// Session-level breakpoint state. Single-threaded wasm means only one
+// breakpoint can be "stopped" at a time; tracking which slot fired
+// last is per-stop, not per-slot.
 bool g_wasmDebugBreakpointStopped;
 bool g_wasmDebugContinueRequested;
-uint32_t g_wasmDebugBreakpointHitCount;
 uint32_t g_wasmDebugContinueCount;
-int32_t* g_wasmDebugBreakpointAddress;
-int32_t g_wasmDebugBreakpointOriginalOpcode;
-bool g_wasmDebugBreakpointPatchActive;
+// Index of the slot whose patch fired most recently (or
+// WasmDebugMaxBreakpoints when no slot has fired). Used by the event-
+// record builder to report the correct per-slot hit count.
+uint32_t g_wasmDebugLastFiredSlot = WasmDebugMaxBreakpoints;
 
 // Phase 6 connection-state gate. Mirrors Mono's
 // mono_wasm_set_is_debugger_attached (src/mono/mono/component/mini-wasm-debugger.c:38).
@@ -174,11 +200,15 @@ void CopyWasmDebugString(char* destination, size_t destinationLength, const char
 
 void SetWasmDebugBreakpointEventRecord(MethodDesc* methodDesc, uint32_t ilOffset)
 {
+    uint32_t hitCount = (g_wasmDebugLastFiredSlot < WasmDebugMaxBreakpoints)
+        ? g_wasmDebugBreakpoints[g_wasmDebugLastFiredSlot].HitCount
+        : 0;
+
     memset(&g_wasmDebugLastEventRecord, 0, sizeof(g_wasmDebugLastEventRecord));
     g_wasmDebugLastEventRecord.Kind = static_cast<uint32_t>(WasmDebugEventKind::Breakpoint);
     g_wasmDebugLastEventRecord.MethodToken = methodDesc->GetMemberDef();
     g_wasmDebugLastEventRecord.ILOffset = ilOffset;
-    g_wasmDebugLastEventRecord.HitCount = g_wasmDebugBreakpointHitCount;
+    g_wasmDebugLastEventRecord.HitCount = hitCount;
     g_wasmDebugLastEventRecord.ContinueCount = g_wasmDebugContinueCount;
     CopyWasmDebugString(g_wasmDebugLastEventRecord.MethodName, sizeof(g_wasmDebugLastEventRecord.MethodName), methodDesc->GetName());
     CopyWasmDebugString(g_wasmDebugLastEventRecord.Message, sizeof(g_wasmDebugLastEventRecord.Message), reinterpret_cast<const char*>(g_wasmDebugLastEvent));
@@ -199,44 +229,140 @@ void SetWasmDebugBreakpointFrameRecord(MethodDesc* methodDesc, uint32_t ilOffset
     CopyWasmDebugString(g_wasmDebugLastFrameRecord.MethodName, sizeof(g_wasmDebugLastFrameRecord.MethodName), methodDesc->GetName());
 }
 
-void RestoreWasmDebugBreakpointPatch()
+// Restore the original interpreter opcode at the patch site for a
+// specific breakpoint slot, then clear its patch-state. Safe to call
+// against an unarmed or unpatched slot (no-op).
+void RestoreWasmDebugBreakpointPatchSlot(WasmDebugBreakpointSlot& slot)
 {
-    if (g_wasmDebugBreakpointPatchActive && g_wasmDebugBreakpointAddress != nullptr)
+    if (slot.PatchActive && slot.PatchAddress != nullptr)
     {
-        *g_wasmDebugBreakpointAddress = g_wasmDebugBreakpointOriginalOpcode;
+        *slot.PatchAddress = slot.OriginalOpcode;
     }
 
-    g_wasmDebugBreakpointAddress = nullptr;
-    g_wasmDebugBreakpointOriginalOpcode = 0;
-    g_wasmDebugBreakpointPatchActive = false;
+    slot.PatchAddress = nullptr;
+    slot.OriginalOpcode = 0;
+    slot.PatchActive = false;
 }
 
-void ArmWasmDebugBreakpoint(uint32_t methodToken, const char* methodName)
+// Find a free slot to arm a new breakpoint into. Returns nullptr when
+// all WasmDebugMaxBreakpoints slots are in use; callers (e.g.
+// dbi_set_breakpoint_by_*) should surface that as a session-level error.
+WasmDebugBreakpointSlot* FindFreeWasmDebugBreakpointSlot(uint32_t* outIndex)
 {
-    RestoreWasmDebugBreakpointPatch();
-    g_wasmDebugBreakpointMethodToken = methodToken;
+    for (uint32_t i = 0; i < WasmDebugMaxBreakpoints; i++)
+    {
+        if (!g_wasmDebugBreakpoints[i].Armed)
+        {
+            if (outIndex != nullptr)
+            {
+                *outIndex = i;
+            }
+            return &g_wasmDebugBreakpoints[i];
+        }
+    }
+    return nullptr;
+}
+
+bool ArmWasmDebugBreakpoint(uint32_t methodToken, const char* methodName)
+{
+    uint32_t slotIndex = WasmDebugMaxBreakpoints;
+    WasmDebugBreakpointSlot* slot = FindFreeWasmDebugBreakpointSlot(&slotIndex);
+    if (slot == nullptr)
+    {
+        return false;
+    }
+
+    RestoreWasmDebugBreakpointPatchSlot(*slot);
+
     const char* name = methodName != nullptr ? methodName : "";
-
     size_t nameLength = strlen(name);
-    if (nameLength >= sizeof(g_wasmDebugBreakpointMethodName))
+    if (nameLength >= sizeof(slot->MethodName))
     {
-        nameLength = sizeof(g_wasmDebugBreakpointMethodName) - 1;
+        nameLength = sizeof(slot->MethodName) - 1;
+    }
+    memcpy(slot->MethodName, name, nameLength);
+    slot->MethodName[nameLength] = 0;
+    slot->MethodToken = (nameLength != 0) ? 0 : methodToken;
+    slot->HitCount = 0;
+    slot->Armed = true;
+
+    // Session-level state reset on first armed breakpoint of a session.
+    // Subsequent arms don't reset Stopped/ContinueRequested because the
+    // user might be arming additional breakpoints while one is already
+    // stopped (legal — they apply on the next continue).
+    if (g_wasmDebugLastFiredSlot >= WasmDebugMaxBreakpoints)
+    {
+        g_wasmDebugLastEventLength = 0;
+        memset(&g_wasmDebugLastEventRecord, 0, sizeof(g_wasmDebugLastEventRecord));
+        memset(&g_wasmDebugLastFrameRecord, 0, sizeof(g_wasmDebugLastFrameRecord));
+        g_wasmDebugBreakpointStopped = false;
+        g_wasmDebugContinueRequested = false;
+    }
+    return true;
+}
+
+// Clear a previously-armed breakpoint by name (substring match) or by
+// token. Returns the number of slots that were cleared (0 if no match,
+// 1+ if multiple slots had the same identity which the Arm protocol
+// today doesn't prevent). Restores any active patch as a side effect.
+uint32_t ClearWasmDebugBreakpointByName(const char* methodName)
+{
+    if (methodName == nullptr || methodName[0] == 0)
+    {
+        return 0;
     }
 
-    memcpy(g_wasmDebugBreakpointMethodName, name, nameLength);
-    g_wasmDebugBreakpointMethodName[nameLength] = 0;
-    if (nameLength != 0)
+    uint32_t cleared = 0;
+    for (auto& slot : g_wasmDebugBreakpoints)
     {
-        g_wasmDebugBreakpointMethodToken = 0;
+        if (slot.Armed &&
+            slot.MethodToken == 0 &&
+            strcmp(slot.MethodName, methodName) == 0)
+        {
+            RestoreWasmDebugBreakpointPatchSlot(slot);
+            slot.Armed = false;
+            slot.MethodName[0] = 0;
+            slot.HitCount = 0;
+            cleared++;
+        }
     }
-    g_wasmDebugBreakpointHitCount = 0;
-    g_wasmDebugLastEventLength = 0;
-    memset(&g_wasmDebugLastEventRecord, 0, sizeof(g_wasmDebugLastEventRecord));
-    memset(&g_wasmDebugLastFrameRecord, 0, sizeof(g_wasmDebugLastFrameRecord));
-    g_wasmDebugBreakpointStopped = false;
-    g_wasmDebugContinueRequested = false;
-    g_wasmDebugContinueCount = 0;
-    g_wasmDebugBreakpointArmed = true;
+    return cleared;
+}
+
+uint32_t ClearWasmDebugBreakpointByToken(uint32_t methodToken)
+{
+    if (methodToken == 0)
+    {
+        return 0;
+    }
+
+    uint32_t cleared = 0;
+    for (auto& slot : g_wasmDebugBreakpoints)
+    {
+        if (slot.Armed && slot.MethodToken == methodToken)
+        {
+            RestoreWasmDebugBreakpointPatchSlot(slot);
+            slot.Armed = false;
+            slot.MethodName[0] = 0;
+            slot.MethodToken = 0;
+            slot.HitCount = 0;
+            cleared++;
+        }
+    }
+    return cleared;
+}
+
+uint32_t CountActiveWasmDebugBreakpoints()
+{
+    uint32_t count = 0;
+    for (const auto& slot : g_wasmDebugBreakpoints)
+    {
+        if (slot.Armed)
+        {
+            count++;
+        }
+    }
+    return count;
 }
 
 void ArmWasmDebugBreakpointFromCommand(const char* command)
@@ -270,24 +396,23 @@ void ArmWasmDebugBreakpointFromCommand(const char* command)
     ArmWasmDebugBreakpoint(methodToken, name);
 }
 
-bool WasmDebugBreakpointMatches(MethodDesc* methodDesc, uint32_t ilOffset)
+bool WasmDebugBreakpointSlotMatches(const WasmDebugBreakpointSlot& slot, MethodDesc* methodDesc, uint32_t ilOffset)
 {
-    if (methodDesc == nullptr || ilOffset != 0)
+    if (methodDesc == nullptr || ilOffset != 0 || !slot.Armed)
     {
         return false;
     }
 
     LPCUTF8 methodName = methodDesc->GetName();
     mdMethodDef methodToken = methodDesc->GetMemberDef();
-    if (g_wasmDebugBreakpointMethodToken != 0 &&
-        g_wasmDebugBreakpointMethodToken != methodToken)
+    if (slot.MethodToken != 0 && slot.MethodToken != methodToken)
     {
         return false;
     }
 
-    if (g_wasmDebugBreakpointMethodToken == 0 &&
-        g_wasmDebugBreakpointMethodName[0] != 0 &&
-        strstr(methodName, g_wasmDebugBreakpointMethodName) == nullptr)
+    if (slot.MethodToken == 0 &&
+        slot.MethodName[0] != 0 &&
+        strstr(methodName, slot.MethodName) == nullptr)
     {
         return false;
     }
@@ -414,8 +539,10 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReceiveCommandRecord(con
     {
         case WasmDebugCommandKind::SetBreakpointByName:
             record.MethodName[sizeof(record.MethodName) - 1] = 0;
-            ArmWasmDebugBreakpoint(0, record.MethodName);
-            return 0;
+            // Returns false when all WasmDebugMaxBreakpoints slots are
+            // armed. Surface that as an error to the caller; the existing
+            // protocol uses -1 for all command-record failures.
+            return ArmWasmDebugBreakpoint(0, record.MethodName) ? 0 : -1;
 
         case WasmDebugCommandKind::SetBreakpointByToken:
             if (record.ILOffset != 0)
@@ -423,8 +550,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReceiveCommandRecord(con
                 return -1;
             }
 
-            ArmWasmDebugBreakpoint(record.MethodToken, "");
-            return 0;
+            return ArmWasmDebugBreakpoint(record.MethodToken, "") ? 0 : -1;
 
         case WasmDebugCommandKind::Continue:
             if (g_wasmDebugBreakpointStopped)
@@ -513,12 +639,48 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugCopyLastFrameRecord(uint
 
 extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetBreakpointHitCount()
 {
-    return g_wasmDebugBreakpointHitCount;
+    // Phase 7 multi-bp: aggregate hit count across all armed slots.
+    // Smoke harnesses with a single bp see exactly the slot's count;
+    // multi-bp callers get the total (which is what the existing API
+    // semantically meant — "how many times has any bp fired this
+    // session"). Per-slot counts are exposed separately via the
+    // breakpoint-slots probe and the BreakpointData event-record HitCount.
+    uint32_t total = 0;
+    for (const auto& slot : g_wasmDebugBreakpoints)
+    {
+        total += slot.HitCount;
+    }
+    return total;
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetContinueCount()
 {
     return g_wasmDebugContinueCount;
+}
+
+// Phase 7 multi-bp: expose the number of currently-armed breakpoint
+// slots. Used by the base-smoke multi-bp probe to verify slot-set/clear
+// bookkeeping. Bounded by WasmDebugMaxBreakpoints.
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetActiveBreakpointCount()
+{
+    return CountActiveWasmDebugBreakpoints();
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugClearBreakpointByName(const char* methodName, uint32_t methodNameLength)
+{
+    if (methodName == nullptr || methodNameLength == 0 || methodNameLength >= 64)
+    {
+        return -1;
+    }
+    char buf[64];
+    memcpy(buf, methodName, methodNameLength);
+    buf[methodNameLength] = 0;
+    return static_cast<int32_t>(ClearWasmDebugBreakpointByName(buf));
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugClearBreakpointByToken(uint32_t methodToken)
+{
+    return static_cast<int32_t>(ClearWasmDebugBreakpointByToken(methodToken));
 }
 
 // Phase 6 connection-state gate. The runtime debug adapter exposes these
@@ -543,21 +705,35 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugIsDebuggerConnected()
 extern "C" void CoreClrWasmDebugMaybePatchInterpreterMethod(MethodDesc* methodDesc, uint32_t ilOffset, int32_t* ip)
 {
     // Phase 6 gate: never patch interpreter opcodes when the debugger is
-    // not connected. ArmWasmDebugBreakpoint*() can still set the armed
-    // flag (the protocol is "set a breakpoint, connect, run"), but the
+    // not connected. Arming via ArmWasmDebugBreakpoint*() can still set
+    // a slot (the protocol is "set a breakpoint, connect, run"), but the
     // patch is only installed once a debugger is actually connected to
     // receive the resulting fire. Same gating point Mono uses: see
     // mini-wasm-debugger.c:88-91 (try_process_suspend returns FALSE).
-    if (!g_wasmDebuggerConnected || !g_wasmDebugBreakpointArmed || ip == nullptr || !WasmDebugBreakpointMatches(methodDesc, ilOffset))
+    if (!g_wasmDebuggerConnected || ip == nullptr)
     {
         return;
     }
 
-    g_wasmDebugBreakpointAddress = ip;
-    g_wasmDebugBreakpointOriginalOpcode = *ip;
-    g_wasmDebugBreakpointPatchActive = true;
-    g_wasmDebugBreakpointArmed = false;
-    *ip = INTOP_BREAKPOINT;
+    // Phase 7 multi-bp: scan all armed slots, patch every one whose
+    // identity matches the method being prepared. Each slot stores its
+    // own original opcode so the per-slot restore in
+    // HandleInterpreterBreakpoint can roll back exactly what it saw.
+    // It's legal for multiple slots to match (e.g. two name patterns
+    // both matching the same method) — each gets independently patched
+    // at the same IP. The breakpoint-hit handler resolves the first
+    // matching armed slot for that IP and the others stay patch-active
+    // until cleared.
+    for (auto& slot : g_wasmDebugBreakpoints)
+    {
+        if (!slot.PatchActive && WasmDebugBreakpointSlotMatches(slot, methodDesc, ilOffset))
+        {
+            slot.PatchAddress = ip;
+            slot.OriginalOpcode = *ip;
+            slot.PatchActive = true;
+            *ip = INTOP_BREAKPOINT;
+        }
+    }
 }
 
 extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
@@ -568,21 +744,45 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     uintptr_t stackAddress,
     int32_t* originalOpcode)
 {
-    if (!g_wasmDebugBreakpointPatchActive ||
-        ip == nullptr ||
-        originalOpcode == nullptr ||
-        ip != g_wasmDebugBreakpointAddress ||
-        !WasmDebugBreakpointMatches(methodDesc, ilOffset))
+    if (ip == nullptr || originalOpcode == nullptr)
     {
         return false;
     }
 
-    *originalOpcode = g_wasmDebugBreakpointOriginalOpcode;
-    RestoreWasmDebugBreakpointPatch();
+    // Phase 7 multi-bp: find the slot whose patch is at this IP.
+    // Single-threaded wasm guarantees at most one slot's patch can fire
+    // at a given IP at a given time (each Arm uses a free slot, so two
+    // armed slots never share the same PatchAddress unless they matched
+    // the same method+IL — handled below by firing the first match and
+    // leaving subsequent matches patch-active for future independent
+    // fires).
+    WasmDebugBreakpointSlot* firingSlot = nullptr;
+    uint32_t firingSlotIndex = WasmDebugMaxBreakpoints;
+    for (uint32_t i = 0; i < WasmDebugMaxBreakpoints; i++)
+    {
+        WasmDebugBreakpointSlot& slot = g_wasmDebugBreakpoints[i];
+        if (slot.PatchActive &&
+            slot.PatchAddress == ip &&
+            WasmDebugBreakpointSlotMatches(slot, methodDesc, ilOffset))
+        {
+            firingSlot = &slot;
+            firingSlotIndex = i;
+            break;
+        }
+    }
+
+    if (firingSlot == nullptr)
+    {
+        return false;
+    }
+
+    *originalOpcode = firingSlot->OriginalOpcode;
+    RestoreWasmDebugBreakpointPatchSlot(*firingSlot);
 
     g_wasmDebugBreakpointStopped = true;
     g_wasmDebugContinueRequested = false;
-    g_wasmDebugBreakpointHitCount++;
+    firingSlot->HitCount++;
+    g_wasmDebugLastFiredSlot = firingSlotIndex;
 
     LPCUTF8 methodName = methodDesc->GetName();
     mdMethodDef methodToken = methodDesc->GetMemberDef();
