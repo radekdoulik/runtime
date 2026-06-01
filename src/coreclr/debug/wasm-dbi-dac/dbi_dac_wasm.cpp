@@ -17,6 +17,20 @@ EXTERN_C const IID IID_IDacDbiAllocator;
 EXTERN_C const IID IID_IDacDbiMetaDataLookup;
 EXTERN_C bool TryGetSymbol(ICorDebugDataTarget* dataTarget, uint64_t baseAddress, const char* symbolName, uint64_t* symbolAddress);
 
+// V3 attach entry from src/coreclr/debug/di/process.cpp:61. Declared here
+// because the function is exported as DLLEXPORT from the DBI side without
+// a public header declaration. The wasm sidecar can call it directly
+// because cordbdi is statically linked into the same module.
+struct _CLR_DEBUGGING_VERSION;
+EXTERN_C HRESULT STDMETHODCALLTYPE OpenVirtualProcessImpl(
+    ULONG64 clrInstanceId,
+    IUnknown* pDataTarget,
+    HMODULE hDacModule,
+    _CLR_DEBUGGING_VERSION* pMaxDebuggerSupportedVersion,
+    REFIID riid,
+    IUnknown** ppInstance,
+    DWORD* pFlagsOut);
+
 // Minimal facade-side view of IDacDbiInterface, replicating just the leading
 // vtable slots so we can invoke DacSetTargetConsistencyChecks without pulling
 // in the full dacdbiinterface.h dependency chain (which transitively needs
@@ -1423,6 +1437,163 @@ int32_t coreclr_wasm_dbi_dac_probe_dac_consistency_checks(uint32_t runtimeBase, 
 
     memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(consistencyHrAddress)), &consistencyHr, sizeof(consistencyHr));
     return result;
+}
+
+// Phase 3 onramp probe: walk the in-sidecar static DAC binding path that
+// the real CordbProcess::CreateDacDbiInterface will use on wasm. The
+// desktop V3 attach (src/coreclr/debug/di/process.cpp:650-701) calls
+// GetProcAddress(m_hDacModule, "DacDbiInterfaceInstance") to bind the
+// DAC entry; on wasm there is no separate DAC module, so the wasm-
+// specialized branch must call DacDbiInterfaceInstance directly. This
+// probe runs that exact path so a future Phase 3 process.cpp change
+// can rely on the helper being green.
+//
+// The probe writes two HRESULTs:
+//   *outCreateHrAddress      - DacDbiInterfaceInstance result.
+//   *outConsistencyHrAddress - DacSetTargetConsistencyChecks(FALSE)
+//                              result if create succeeded, else E_FAIL.
+//
+// Both call shapes mirror process.cpp: pAllocator/pMetaDataLookup are
+// supplied, the resulting IDacDbiInterface is released after the
+// consistency call. The runtimeBase argument matches the clrInstanceId
+// the real attach will use (the descriptor address probed by
+// probe_clr_instance_id) so this probe and the real attach exercise
+// the same input shape.
+WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_probe_static_dac_binding)
+int32_t coreclr_wasm_dbi_dac_probe_static_dac_binding(uint32_t runtimeBase, uint32_t outCreateHrAddress, uint32_t outConsistencyHrAddress)
+{
+    if (outCreateHrAddress == 0 || outConsistencyHrAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    int32_t createHr = E_FAIL;
+    int32_t consistencyHr = E_FAIL;
+
+    WasmDacDataTarget* dataTarget = new (std::nothrow) WasmDacDataTarget(runtimeBase);
+    if (dataTarget == nullptr)
+    {
+        createHr = E_OUTOFMEMORY;
+        memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outCreateHrAddress)), &createHr, sizeof(createHr));
+        memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outConsistencyHrAddress)), &consistencyHr, sizeof(consistencyHr));
+        return Success;
+    }
+
+    WasmDbiAllocator allocator;
+    WasmMetaDataLookup metadataLookup;
+    void* dacDbi = nullptr;
+    createHr = static_cast<int32_t>(DacDbiInterfaceInstance(dataTarget, runtimeBase, &allocator, &metadataLookup, &dacDbi));
+    dataTarget->Release();
+
+    if (SUCCEEDED(createHr) && dacDbi != nullptr)
+    {
+        WasmIDacDbiInterfaceMinimal* dacDbiInterface = reinterpret_cast<WasmIDacDbiInterfaceMinimal*>(dacDbi);
+        consistencyHr = static_cast<int32_t>(dacDbiInterface->DacSetTargetConsistencyChecks(FALSE));
+        dacDbiInterface->Release();
+    }
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outCreateHrAddress)), &createHr, sizeof(createHr));
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outConsistencyHrAddress)), &consistencyHr, sizeof(consistencyHr));
+    return Success;
+}
+
+// Phase 3 acceptance probe: invoke the real V3 attach entry
+// `OpenVirtualProcessImpl` (src/coreclr/debug/di/process.cpp:61) against
+// our WasmDacDataTarget with the clrInstanceId resolved by
+// probe_clr_instance_id. This is the FINAL gate in the connect-doc
+// probe ladder; passing this proves real CordbProcess attach works on
+// wasm.
+//
+// Today the probe is EXPECTED TO FAIL because the desktop
+// CordbProcess::CreateDacDbiInterface (process.cpp:650-701) calls
+// `GetProcAddress(m_hDacModule, "DacDbiInterfaceInstance")`, which
+// requires a loaded DAC module — wasm has none. The probe captures the
+// failure HRESULT so a future process.cpp change that adds a
+// wasm-specialized branch (calling DacDbiInterfaceInstance directly via
+// the same path probe_static_dac_binding exercises) flips the result
+// from failure to S_OK, and the probe's smoke assertion (HR == 0, then
+// hasRealCordbProcess == 1) becomes the green light.
+//
+// Outputs:
+//   *outHrAddress                   - HRESULT from OpenVirtualProcessImpl.
+//   *outHasRealCordbProcessAddress  - 1 if the call returned a non-null
+//                                      ICorDebugProcess*, else 0. The
+//                                      returned process is released
+//                                      immediately by this probe.
+WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_probe_open_virtual_process)
+int32_t coreclr_wasm_dbi_dac_probe_open_virtual_process(
+    uint32_t runtimeBase,
+    uint32_t outHrAddress,
+    uint32_t outHasRealCordbProcessAddress)
+{
+    if (outHrAddress == 0 || outHasRealCordbProcessAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    int32_t openHr = E_FAIL;
+    uint32_t hasRealCordbProcess = 0;
+
+    WasmDacDataTarget* dataTarget = new (std::nothrow) WasmDacDataTarget(runtimeBase);
+    if (dataTarget == nullptr)
+    {
+        openHr = E_OUTOFMEMORY;
+        memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outHrAddress)), &openHr, sizeof(openHr));
+        memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outHasRealCordbProcessAddress)), &hasRealCordbProcess, sizeof(hasRealCordbProcess));
+        return Success;
+    }
+
+    // V3 attach requires PAL_InitializeDLL for the three CreateEvent calls
+    // CordbProcess::Init makes (process.cpp:1679-1695). probe_create_events
+    // already validates the bootstrap works; replicating it here keeps this
+    // probe self-contained.
+    int palInitResult = PAL_InitializeDLL();
+    if (palInitResult != 0)
+    {
+        dataTarget->Release();
+        openHr = static_cast<int32_t>(HRESULT_FROM_WIN32(static_cast<DWORD>(palInitResult)));
+        if (openHr == Success)
+        {
+            openHr = E_FAIL;
+        }
+        memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outHrAddress)), &openHr, sizeof(openHr));
+        memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outHasRealCordbProcessAddress)), &hasRealCordbProcess, sizeof(hasRealCordbProcess));
+        return Success;
+    }
+
+    // Match the version structure desktop ICorDebug hosts pass — major 4
+    // is the modern shipping CLR. Zero struct version (low byte) signals
+    // the legacy struct shape.
+    struct
+    {
+        WORD wStructVersion;
+        WORD wMajor;
+        WORD wMinor;
+        WORD wBuild;
+        WORD wRevision;
+    } maxDebuggerVersion = { 0, 4, 0, 0, 0 };
+
+    IUnknown* pInstance = nullptr;
+    DWORD flagsOut = 0;
+    openHr = static_cast<int32_t>(OpenVirtualProcessImpl(
+        static_cast<ULONG64>(runtimeBase),
+        static_cast<IUnknown*>(static_cast<ICorDebugDataTarget*>(dataTarget)),
+        nullptr,  // hDacModule: no separate DAC module on wasm
+        reinterpret_cast<_CLR_DEBUGGING_VERSION*>(&maxDebuggerVersion),
+        __uuidof(ICorDebugProcess),
+        &pInstance,
+        &flagsOut));
+
+    if (SUCCEEDED(openHr) && pInstance != nullptr)
+    {
+        hasRealCordbProcess = 1;
+        pInstance->Release();
+    }
+    dataTarget->Release();
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outHrAddress)), &openHr, sizeof(openHr));
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outHasRealCordbProcessAddress)), &hasRealCordbProcess, sizeof(hasRealCordbProcess));
+    return Success;
 }
 
 // Phase 3 onramp probe: surface which IIDs the sidecar's data target

@@ -601,6 +601,47 @@ async function main() {
     const createEventsHr = new DataView(debuggerModule.HEAPU8.buffer, createEventsHrAddress, 4).getInt32(0, true);
     debuggerExports.stackRestore(createEventsStack);
 
+    // Phase 3 onramp probe: walk the in-sidecar static DAC binding path
+    // that the real CordbProcess::CreateDacDbiInterface (process.cpp:
+    // 650-701) will use on wasm — bypasses GetProcAddress and calls
+    // DacDbiInterfaceInstance directly, then DacSetTargetConsistencyChecks.
+    // Expected: both HRs == 0. Uses the real clrInstanceId resolved by
+    // probe_clr_instance_id so we exercise the same input shape attach
+    // will use.
+    const staticDacBindingStack = debuggerExports.stackSave();
+    const staticDacBindingCreateHrAddress = debuggerExports.stackAlloc(4);
+    const staticDacBindingConsistencyHrAddress = debuggerExports.stackAlloc(4);
+    const staticDacBindingProbeResult = debuggerModule._coreclr_wasm_dbi_dac_probe_static_dac_binding(
+        clrInstanceIdValue,
+        staticDacBindingCreateHrAddress,
+        staticDacBindingConsistencyHrAddress);
+    const staticDacBindingCreateHr = new DataView(debuggerModule.HEAPU8.buffer, staticDacBindingCreateHrAddress, 4).getInt32(0, true);
+    const staticDacBindingConsistencyHr = new DataView(debuggerModule.HEAPU8.buffer, staticDacBindingConsistencyHrAddress, 4).getInt32(0, true);
+    debuggerExports.stackRestore(staticDacBindingStack);
+
+    // Phase 3 acceptance probe: invoke real V3 OpenVirtualProcessImpl.
+    // EXPECTED TO FAIL today — CordbProcess::CreateDacDbiInterface
+    // (process.cpp:687) calls GetProcAddress(m_hDacModule, ...) which
+    // requires a loaded DAC module, and wasm has none. The probe captures
+    // the HR so the failure is documented; once Phase 3 lands a
+    // wasm-specialized branch in process.cpp that uses the static-binding
+    // helper (the one probe_static_dac_binding exercises), hr flips to 0
+    // and hasRealCordbProcess flips to 1.
+    //
+    // The smoke records the result for diagnostics but does NOT assert
+    // success today. The assertion will be tightened in the implementation
+    // slice that wires the wasm-specialized branch.
+    const openVirtualProcessStack = debuggerExports.stackSave();
+    const openVirtualProcessHrAddress = debuggerExports.stackAlloc(4);
+    const openVirtualProcessHasRealAddress = debuggerExports.stackAlloc(4);
+    const openVirtualProcessProbeResult = debuggerModule._coreclr_wasm_dbi_dac_probe_open_virtual_process(
+        clrInstanceIdValue,
+        openVirtualProcessHrAddress,
+        openVirtualProcessHasRealAddress);
+    const openVirtualProcessHr = new DataView(debuggerModule.HEAPU8.buffer, openVirtualProcessHrAddress, 4).getInt32(0, true);
+    const openVirtualProcessHasReal = new DataView(debuggerModule.HEAPU8.buffer, openVirtualProcessHasRealAddress, 4).getUint32(0, true);
+    debuggerExports.stackRestore(openVirtualProcessStack);
+
     // DAC-completeness probe: read 7 well-known DacGlobals slot addresses
     // from the runtime via CoreClrWasmDebugReadDacGlobalsProbe. Before the
     // dactable migration (debug/ee/dactable.cpp on wasm using the dynamic
@@ -793,6 +834,16 @@ async function main() {
             flags: `0x${createEventsFlags.toString(16)}`,
             hr: `0x${(createEventsHr >>> 0).toString(16)}`
         },
+        staticDacBindingProbe: {
+            result: staticDacBindingProbeResult,
+            createHr: `0x${(staticDacBindingCreateHr >>> 0).toString(16)}`,
+            consistencyHr: `0x${(staticDacBindingConsistencyHr >>> 0).toString(16)}`
+        },
+        openVirtualProcessProbe: {
+            result: openVirtualProcessProbeResult,
+            hr: `0x${(openVirtualProcessHr >>> 0).toString(16)}`,
+            hasRealCordbProcess: openVirtualProcessHasReal
+        },
         dacGlobalsProbeResult,
         dacGlobalsAllNonZero,
         dacGlobals
@@ -909,6 +960,10 @@ async function main() {
         createEventsProbeResult !== 0 ||
         createEventsFlags !== 0x7 ||
         createEventsHr !== 0 ||
+        staticDacBindingProbeResult !== 0 ||
+        staticDacBindingCreateHr !== 0 ||
+        staticDacBindingConsistencyHr !== 0 ||
+        openVirtualProcessProbeResult !== 0 ||  // probe wrote outputs; HR/hasReal NOT yet asserted (Phase 3 gap)
         dacGlobalsProbeResult !== DacGlobalsProbeSlotCount ||
         !dacGlobalsAllNonZero) {
         fail("WASM DBI/DAC smoke test failed");
