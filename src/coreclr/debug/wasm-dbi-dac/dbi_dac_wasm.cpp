@@ -512,6 +512,29 @@ uint64_t g_cachedIpcEventValidAddress = 0;
 uint64_t g_cachedIpcEventAddress = 0;
 uint64_t g_cachedBreakpointSlotsAddress = 0;
 
+void ClearRuntimeConnectionState()
+{
+    if (g_realCordbProcess != nullptr)
+    {
+        g_realCordbProcess->Release();
+        g_realCordbProcess = nullptr;
+    }
+
+    g_connectedToRuntime = false;
+    g_connectedRuntimeBase = 0;
+    g_lastRuntimeEventLength = 0;
+    memset(&g_lastRuntimeEventRecord, 0, sizeof(g_lastRuntimeEventRecord));
+    memset(&g_lastRuntimeFrameRecord, 0, sizeof(g_lastRuntimeFrameRecord));
+    // Phase 4 slice 3 and Phase 7 slice 2: drop per-connection runtime
+    // symbol caches so a later reconnect to a runtime at a different base
+    // re-resolves via TryGetSymbol. Without this clear, cached absolute
+    // addresses survive teardown and ReadVirtual would hit garbage.
+    g_cachedIpcEventValidAddress = 0;
+    g_cachedIpcEventAddress = 0;
+    g_cachedBreakpointSlotsAddress = 0;
+    InvalidatePageCache();
+}
+
 // Defense-in-depth handshake flag. The host MUST call
 // coreclr_wasm_dbi_dac_acknowledge_protocol with the matching
 // (magic, abi, counter) triple before invoking any product-tier
@@ -2127,25 +2150,7 @@ int32_t coreclr_wasm_dbi_dac_dbi_disconnect_runtime()
         return gate;
     }
 
-    if (g_realCordbProcess != nullptr)
-    {
-        g_realCordbProcess->Release();
-        g_realCordbProcess = nullptr;
-    }
-    g_connectedToRuntime = false;
-    g_connectedRuntimeBase = 0;
-    g_lastRuntimeEventLength = 0;
-    memset(&g_lastRuntimeEventRecord, 0, sizeof(g_lastRuntimeEventRecord));
-    memset(&g_lastRuntimeFrameRecord, 0, sizeof(g_lastRuntimeFrameRecord));
-    // Phase 4 slice 3: drop the per-connection IPC-event symbol cache
-    // so a later reconnect to a runtime at a different base re-resolves
-    // via TryGetSymbol. Without this clear the cached absolute address
-    // would survive across runtime unload/reload and ReadVirtual would
-    // hit garbage.
-    g_cachedIpcEventValidAddress = 0;
-    g_cachedIpcEventAddress = 0;
-    g_cachedBreakpointSlotsAddress = 0;
-    InvalidatePageCache();
+    ClearRuntimeConnectionState();
     return S_OK;
 }
 
@@ -2552,17 +2557,14 @@ int32_t coreclr_wasm_dbi_dac_dbi_session_destroy()
 
     if (g_cordb == nullptr)
     {
+        ClearRuntimeConnectionState();
         g_protocolAcknowledged = false;
         return S_OK;
     }
 
     ICorDebug* cordb = g_cordb;
     g_cordb = nullptr;
-    g_connectedToRuntime = false;
-    g_connectedRuntimeBase = 0;
-    g_lastRuntimeEventLength = 0;
-    memset(&g_lastRuntimeEventRecord, 0, sizeof(g_lastRuntimeEventRecord));
-    memset(&g_lastRuntimeFrameRecord, 0, sizeof(g_lastRuntimeFrameRecord));
+    ClearRuntimeConnectionState();
 
     HRESULT result = cordb->Terminate();
     cordb->Release();
