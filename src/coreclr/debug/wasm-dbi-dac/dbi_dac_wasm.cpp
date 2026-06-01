@@ -267,6 +267,62 @@ struct WasmDebugFrameRecord
     char MethodName[64];
 };
 
+// Phase 4 first slice: a simplified wire-format mirror of
+// DebuggerIPCEvent::BreakpointData + the DebuggerIPCEvent header
+// (src/coreclr/debug/inc/dbgipcevents.h:1696-1761). The real
+// DebuggerIPCEvent is a heavy union with VMPTR/LSPTR internal types
+// that pulls the full VM internal header graph; the wasm sidecar
+// transports the same logical fields through this simpler, fixed-layout
+// struct that uses only plain integer types. Phase 4 expansion will
+// either replace this with the real DebuggerIPCEvent layout (and pull
+// in the headers) or keep a translation layer; today this is the wire
+// format the wasm sidecar emits and accepts for DB_IPCE_BREAKPOINT.
+//
+// Fields mirror DebuggerIPCEvent::BreakpointData and the event header:
+//   Magic              - 'IPCB' (0x42435049) sanity tag.
+//   Type               - DB_IPCE_BREAKPOINT (0x0100) from dbgipceventtypes.h.
+//   ProcessId/ThreadId - from DebuggerIPCEvent header.
+//   VmAppDomain/Thread - 64-bit slots matching Portable<VMPTR_*> layout
+//                         (DebuggerIPCEvent uses portable 64-bit ptrs
+//                         even on 32-bit hosts so cross-architecture
+//                         debugging works; we keep the same width).
+//   Hr                 - from DebuggerIPCEvent::hr.
+//   Flags              - bit 0: replyRequired, bit 1: asyncSend.
+//   BreakpointToken    - LSPTR_BREAKPOINT (left-side opaque token).
+//   FuncMetadataToken  - mdMethodDef (the patched method).
+//   VmAssembly         - Portable<VMPTR_Assembly>.
+//   IsIL               - 0/1.
+//   Offset             - IL offset (when IsIL) or native offset.
+//   EncVersion         - edit-and-continue version (0 today on wasm).
+//   NativeCodeMethodDescToken - LSPTR_METHODDESC (when !IsIL).
+//   CodeStartAddress   - CORDB_ADDRESS.
+struct WasmDbgIpcEventBreakpoint
+{
+    uint32_t Magic;
+    uint32_t Type;
+    uint32_t ProcessId;
+    uint32_t ThreadId;
+    uint64_t VmAppDomain;
+    uint64_t VmThread;
+    int32_t Hr;
+    uint32_t Flags;
+    uint64_t BreakpointToken;
+    uint32_t FuncMetadataToken;
+    uint32_t Reserved0;             // pad for 8-byte alignment of next field
+    uint64_t VmAssembly;
+    uint32_t IsIL;
+    uint32_t Offset;
+    uint32_t EncVersion;
+    uint32_t Reserved1;             // pad for 8-byte alignment of next field
+    uint64_t NativeCodeMethodDescToken;
+    uint64_t CodeStartAddress;
+};
+
+constexpr uint32_t WasmDbgIpcEventBreakpointMagic = 0x42435049;  // 'IPCB' little-endian
+constexpr uint32_t WasmDbgIpcEventTypeBreakpoint = 0x0100;       // DB_IPCE_BREAKPOINT
+constexpr uint32_t WasmDbgIpcEventFlagReplyRequired = 0x1;
+constexpr uint32_t WasmDbgIpcEventFlagAsyncSend = 0x2;
+
 struct WasmDbiProcessState
 {
     uint32_t SessionCreated;
@@ -289,6 +345,7 @@ static_assert(sizeof(WasmDbiDacVersionBlob) == 32);
 static_assert(sizeof(WasmDebugCommandRecord) == 80);
 static_assert(sizeof(WasmDebugEventRecord) == 340);
 static_assert(sizeof(WasmDebugFrameRecord) == 88);
+static_assert(sizeof(WasmDbgIpcEventBreakpoint) == 96);
 static_assert(sizeof(WasmDbiProcessState) == 40);
 static_assert(sizeof(void*) == sizeof(uint32_t));
 
@@ -1602,6 +1659,74 @@ int32_t coreclr_wasm_dbi_dac_probe_open_virtual_process(
 
     memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outHrAddress)), &openHr, sizeof(openHr));
     memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outHasRealCordbProcessAddress)), &hasRealCordbProcess, sizeof(hasRealCordbProcess));
+    return Success;
+}
+
+// Phase 4 first slice: DebuggerIPCEvent (DB_IPCE_BREAKPOINT) wire-format
+// round-trip probe.
+//
+// The probe constructs a synthetic WasmDbgIpcEventBreakpoint with
+// deterministic field values, serializes it to a caller-supplied buffer
+// via memcpy, deserializes back to a second struct, and writes both
+// the round-tripped struct and a boolean indicating field-by-field
+// equality. The smoke asserts the equality flag and individual fields.
+//
+// This validates the on-wire format (sizes, alignment, no implicit
+// padding tweaks across compilers) BEFORE the Phase 4 transport layer
+// starts sending real DebuggerIPCEvents. Once the runtime-side emit
+// path is wired (Option 5b adapter expansion per
+// docs/design/coreclr/wasm-debug-phase5-decision.md), this same probe
+// becomes the regression gate for the wire contract.
+//
+// Outputs:
+//   *outBuffer (88 bytes) - the round-tripped struct.
+//   *outEqualAddress      - 1 if every field round-tripped intact,
+//                            else 0.
+WASM_DBI_DAC_EXPORT_TESTS_ONLY(coreclr_wasm_dbi_dac_probe_dbg_ipc_event_breakpoint_roundtrip)
+int32_t coreclr_wasm_dbi_dac_probe_dbg_ipc_event_breakpoint_roundtrip(
+    uint32_t outBufferAddress,
+    uint32_t bufferLengthBytes,
+    uint32_t outEqualAddress)
+{
+    if (outBufferAddress == 0 || outEqualAddress == 0)
+    {
+        return InvalidArgument;
+    }
+    if (bufferLengthBytes < sizeof(WasmDbgIpcEventBreakpoint))
+    {
+        return BufferTooSmall;
+    }
+
+    WasmDbgIpcEventBreakpoint original{};
+    original.Magic = WasmDbgIpcEventBreakpointMagic;
+    original.Type = WasmDbgIpcEventTypeBreakpoint;
+    original.ProcessId = 0x12345678u;
+    original.ThreadId = 0x9abcdef0u;
+    original.VmAppDomain = 0x0123456789abcdefULL;
+    original.VmThread = 0xfedcba9876543210ULL;
+    original.Hr = static_cast<int32_t>(0x80131500);  // CORDBG_E base — arbitrary recognizable HR
+    original.Flags = WasmDbgIpcEventFlagReplyRequired;
+    original.BreakpointToken = 0xdeadbeefcafef00dULL;
+    original.FuncMetadataToken = 0x06000042u;  // mdMethodDef token shape
+    original.Reserved0 = 0;
+    original.VmAssembly = 0xabcdef0123456789ULL;
+    original.IsIL = 1;
+    original.Offset = 0x10;
+    original.EncVersion = 0;
+    original.Reserved1 = 0;
+    original.NativeCodeMethodDescToken = 0;
+    original.CodeStartAddress = 0x0000000000600000ULL;
+
+    // Serialize: copy struct → caller-supplied buffer.
+    void* bufferPtr = reinterpret_cast<void*>(static_cast<uintptr_t>(outBufferAddress));
+    memcpy(bufferPtr, &original, sizeof(original));
+
+    // Deserialize: copy buffer → roundtripped struct.
+    WasmDbgIpcEventBreakpoint roundtripped{};
+    memcpy(&roundtripped, bufferPtr, sizeof(roundtripped));
+
+    uint32_t equal = (memcmp(&original, &roundtripped, sizeof(original)) == 0) ? 1u : 0u;
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outEqualAddress)), &equal, sizeof(equal));
     return Success;
 }
 

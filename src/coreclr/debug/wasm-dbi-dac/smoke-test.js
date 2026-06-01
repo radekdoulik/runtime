@@ -642,6 +642,32 @@ async function main() {
     const openVirtualProcessHasReal = new DataView(debuggerModule.HEAPU8.buffer, openVirtualProcessHasRealAddress, 4).getUint32(0, true);
     debuggerExports.stackRestore(openVirtualProcessStack);
 
+    // Phase 4 first slice: DebuggerIPCEvent (DB_IPCE_BREAKPOINT) wire-
+    // format round-trip probe. Constructs a synthetic
+    // WasmDbgIpcEventBreakpoint with deterministic field values,
+    // serializes via memcpy, deserializes back, and asserts field-by-
+    // field equality. Validates the on-wire format before the Phase 4
+    // transport layer starts sending real DebuggerIPCEvents through
+    // the JSON-RPC + binary channels designed in
+    // docs/design/coreclr/wasm-debug-transport.md. Expected: probe
+    // result 0, equal=1, magic=0x42435049 ('IPCB'),
+    // type=0x100 (DB_IPCE_BREAKPOINT).
+    const dbgIpcEventStack = debuggerExports.stackSave();
+    const DbgIpcEventBreakpointBytes = 96;
+    const dbgIpcEventBufferAddress = debuggerExports.stackAlloc(DbgIpcEventBreakpointBytes);
+    const dbgIpcEventEqualAddress = debuggerExports.stackAlloc(4);
+    const dbgIpcEventProbeResult = debuggerModule._coreclr_wasm_dbi_dac_probe_dbg_ipc_event_breakpoint_roundtrip(
+        dbgIpcEventBufferAddress,
+        DbgIpcEventBreakpointBytes,
+        dbgIpcEventEqualAddress);
+    const dbgIpcEventEqual = new DataView(debuggerModule.HEAPU8.buffer, dbgIpcEventEqualAddress, 4).getUint32(0, true);
+    const dbgIpcEventBufferView = new DataView(debuggerModule.HEAPU8.buffer, dbgIpcEventBufferAddress, DbgIpcEventBreakpointBytes);
+    const dbgIpcEventMagic = dbgIpcEventBufferView.getUint32(0, true);
+    const dbgIpcEventType = dbgIpcEventBufferView.getUint32(4, true);
+    const dbgIpcEventFuncToken = dbgIpcEventBufferView.getUint32(48, true);
+    const dbgIpcEventOffset = dbgIpcEventBufferView.getUint32(68, true);
+    debuggerExports.stackRestore(dbgIpcEventStack);
+
     // DAC-completeness probe: read 7 well-known DacGlobals slot addresses
     // from the runtime via CoreClrWasmDebugReadDacGlobalsProbe. Before the
     // dactable migration (debug/ee/dactable.cpp on wasm using the dynamic
@@ -844,6 +870,14 @@ async function main() {
             hr: `0x${(openVirtualProcessHr >>> 0).toString(16)}`,
             hasRealCordbProcess: openVirtualProcessHasReal
         },
+        dbgIpcEventBreakpointRoundtrip: {
+            result: dbgIpcEventProbeResult,
+            equal: dbgIpcEventEqual,
+            magic: `0x${dbgIpcEventMagic.toString(16)}`,
+            type: `0x${dbgIpcEventType.toString(16)}`,
+            funcMetadataToken: `0x${dbgIpcEventFuncToken.toString(16)}`,
+            offset: `0x${dbgIpcEventOffset.toString(16)}`
+        },
         dacGlobalsProbeResult,
         dacGlobalsAllNonZero,
         dacGlobals
@@ -966,6 +1000,12 @@ async function main() {
         openVirtualProcessProbeResult !== 0 ||
         openVirtualProcessHr !== 0 ||
         openVirtualProcessHasReal !== 1 ||
+        dbgIpcEventProbeResult !== 0 ||
+        dbgIpcEventEqual !== 1 ||
+        dbgIpcEventMagic !== 0x42435049 ||
+        dbgIpcEventType !== 0x100 ||
+        dbgIpcEventFuncToken !== 0x06000042 ||
+        dbgIpcEventOffset !== 0x10 ||
         dacGlobalsProbeResult !== DacGlobalsProbeSlotCount ||
         !dacGlobalsAllNonZero) {
         fail("WASM DBI/DAC smoke test failed");
