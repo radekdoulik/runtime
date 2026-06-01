@@ -479,6 +479,15 @@ uint8_t g_lastRuntimeEvent[MaxTransportMessageBytes];
 uint32_t g_lastRuntimeEventLength = 0;
 WasmDebugEventRecord g_lastRuntimeEventRecord{};
 WasmDebugFrameRecord g_lastRuntimeFrameRecord{};
+// Phase 4 slice 3 per-connection cache of the runtime-side structured-
+// event symbol addresses. Resolved on first poll, retained across
+// subsequent polls. MUST be cleared on disconnect_runtime so a later
+// reconnect to a runtime at a different base re-resolves; the
+// addresses are not validated against the new base. Co-located with
+// the other per-connection globals so the disconnect handler sees
+// them.
+uint64_t g_cachedIpcEventValidAddress = 0;
+uint64_t g_cachedIpcEventAddress = 0;
 
 // Defense-in-depth handshake flag. The host MUST call
 // coreclr_wasm_dbi_dac_acknowledge_protocol with the matching
@@ -2105,6 +2114,13 @@ int32_t coreclr_wasm_dbi_dac_dbi_disconnect_runtime()
     g_lastRuntimeEventLength = 0;
     memset(&g_lastRuntimeEventRecord, 0, sizeof(g_lastRuntimeEventRecord));
     memset(&g_lastRuntimeFrameRecord, 0, sizeof(g_lastRuntimeFrameRecord));
+    // Phase 4 slice 3: drop the per-connection IPC-event symbol cache
+    // so a later reconnect to a runtime at a different base re-resolves
+    // via TryGetSymbol. Without this clear the cached absolute address
+    // would survive across runtime unload/reload and ReadVirtual would
+    // hit garbage.
+    g_cachedIpcEventValidAddress = 0;
+    g_cachedIpcEventAddress = 0;
     InvalidatePageCache();
     return S_OK;
 }
@@ -2258,40 +2274,43 @@ int32_t coreclr_wasm_dbi_dac_dbi_poll_ipc_event(uint32_t bufferAddress, uint32_t
     // to, this can move to that callback path.
     InvalidatePageCache();
 
-    static uint64_t s_cachedValidAddress = 0;
-    static uint64_t s_cachedEventAddress = 0;
-
     WasmDacDataTarget dataTarget(g_connectedRuntimeBase);
 
-    if (s_cachedValidAddress == 0)
+    if (g_cachedIpcEventValidAddress == 0)
     {
+        uint64_t resolved = 0;
         if (!TryGetSymbol(
                 static_cast<ICorDebugDataTarget*>(&dataTarget),
                 g_connectedRuntimeBase,
                 "g_wasmDebugLastIpcEventValid",
-                &s_cachedValidAddress) ||
-            s_cachedValidAddress == 0)
+                &resolved) ||
+            resolved == 0 ||
+            resolved > UINT32_MAX)
         {
             return HostSymbolLookupFailed;
         }
+        g_cachedIpcEventValidAddress = resolved;
     }
-    if (s_cachedEventAddress == 0)
+    if (g_cachedIpcEventAddress == 0)
     {
+        uint64_t resolved = 0;
         if (!TryGetSymbol(
                 static_cast<ICorDebugDataTarget*>(&dataTarget),
                 g_connectedRuntimeBase,
                 "g_wasmDebugLastIpcEvent",
-                &s_cachedEventAddress) ||
-            s_cachedEventAddress == 0)
+                &resolved) ||
+            resolved == 0 ||
+            resolved > UINT32_MAX)
         {
             return HostSymbolLookupFailed;
         }
+        g_cachedIpcEventAddress = resolved;
     }
 
     uint32_t valid = 0;
     ULONG32 bytesRead = 0;
     HRESULT hr = dataTarget.ReadVirtual(
-        s_cachedValidAddress,
+        g_cachedIpcEventValidAddress,
         reinterpret_cast<BYTE*>(&valid),
         sizeof(valid),
         &bytesRead);
@@ -2310,7 +2329,7 @@ int32_t coreclr_wasm_dbi_dac_dbi_poll_ipc_event(uint32_t bufferAddress, uint32_t
     WasmDbgIpcEventBreakpoint payload{};
     bytesRead = 0;
     hr = dataTarget.ReadVirtual(
-        s_cachedEventAddress,
+        g_cachedIpcEventAddress,
         reinterpret_cast<BYTE*>(&payload),
         sizeof(payload),
         &bytesRead);
