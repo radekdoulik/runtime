@@ -28,6 +28,20 @@
 
 extern "C" int32_t CoreClrWasmDebugOnBreakpointHit(uint32_t eventAddress, uint32_t eventLength);
 
+// Phase 6 stop-trigger JS import. Mirrors Mono
+// mono_wasm_fire_debugger_agent_message_with_data_to_pause
+// (src/mono/mono/component/mini-wasm-debugger.c:455-near).
+// Synchronously called from the runtime when a managed event (breakpoint,
+// step, exception) needs the IDE to stop. The JS-host body in
+// src/coreclr/hosts/corerun/wasm/libCorerun.js captures the event payload
+// and executes `debugger;`. V8/SpiderMonkey/JavaScriptCore all halt at
+// `debugger;` when an inspector is attached; Node without --inspect
+// simply skips the statement, so smoke tests run cleanly. The future
+// browser proxy recognizes the function name in the CDP Debugger.paused
+// callFrames (the Mono parallel pattern is BrowserDebugProxy's filter
+// for mono_wasm_fire_debugger_agent_message*).
+extern "C" int32_t coreClrDebugFireEventToPause(uint32_t eventAddress, uint32_t eventLength);
+
 // Forward declaration of g_dacTable defined in src/coreclr/debug/ee/dactable.cpp.
 // Used by CoreClrWasmDebugReadDacGlobalsProbe to expose well-known slot values
 // to the smoke harness for coverage validation.
@@ -584,6 +598,16 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     SetWasmDebugBreakpointEventRecord(methodDesc, ilOffset);
     SetWasmDebugBreakpointFrameRecord(methodDesc, ilOffset, ip, frameAddress, stackAddress);
 
+    // Phase 6: route the breakpoint event through coreClrDebugFireEventToPause
+    // (Mono-pattern stop trigger). The JS-host body captures the payload and
+    // executes `debugger;` to halt V8 in browser context; in Node smoke
+    // context the `debugger;` is a no-op when no inspector is attached.
+    // The legacy CoreClrWasmDebugOnBreakpointHit import is still called for
+    // compatibility with the existing smoke harness; it can be retired once
+    // every consumer (smoke + future proxy) migrates to the Mono-pattern name.
+    coreClrDebugFireEventToPause(
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(g_wasmDebugLastEvent)),
+        g_wasmDebugLastEventLength);
     CoreClrWasmDebugOnBreakpointHit(
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(g_wasmDebugLastEvent)),
         g_wasmDebugLastEventLength);

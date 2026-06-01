@@ -398,6 +398,13 @@ async function main() {
     let debuggerInstance;
     let sawBreakpointBeforeContinue = false;
     let callbackEvent = "";
+    // Phase 6 stop-trigger counter: incremented every time the runtime
+    // calls coreClrDebugFireEventToPause (the Mono-pattern JS import that
+    // executes `debugger;`). In Node smoke context the `debugger;` is a
+    // no-op when no inspector is attached; we only verify the import is
+    // actually being invoked with the expected payload.
+    let fireEventToPauseCount = 0;
+    let fireEventToPauseLastEvent = "";
     let dbiEventDuringCallback = { pollResult: -1, event: "", bytesWritten: 0 };
     let dbiEventRecordDuringCallback = { pollResult: -1, bytesWritten: 0, record: null };
     let dbiFrameRecordDuringCallback = { pollResult: -1, bytesWritten: 0, record: null };
@@ -490,6 +497,11 @@ async function main() {
                 }
 
                 writeUint64(debuggerHeap, addressOutAddress, 1);
+                return 0;
+            };
+            globalThis.coreClrDebugFireEventToPause = (eventAddress, eventLength) => {
+                fireEventToPauseCount++;
+                fireEventToPauseLastEvent = readAscii(getRuntimeHeap(), eventAddress >>> 0, eventLength >>> 0);
                 return 0;
             };
             globalThis.CoreClrWasmDebugOnBreakpointHit = (eventAddress, eventLength) => {
@@ -598,6 +610,8 @@ async function main() {
         const disconnectResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_disconnect_runtime();
         const sessionDestroyResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_session_destroy();
         result.callbackEvent = callbackEvent;
+        result.fireEventToPauseCount = fireEventToPauseCount;
+        result.fireEventToPauseLastEvent = fireEventToPauseLastEvent;
         result.dbiEvent = dbiEventDuringCallback;
         result.dbiEventRecord = dbiEventRecordDuringCallback;
         result.dbiFrameRecord = dbiFrameRecordDuringCallback;
@@ -646,11 +660,14 @@ async function main() {
             continueCount !== 1 ||
             disconnectResult !== 0 ||
             sessionDestroyResult !== 0 ||
-            !sawBreakpointBeforeContinue) {
+            !sawBreakpointBeforeContinue ||
+            fireEventToPauseCount !== 1 ||
+            !fireEventToPauseLastEvent.includes("breakpoint-hit:name=BreakHere")) {
             fail("HelloWorld breakpoint was not reached");
         }
     } finally {
         delete globalThis.CoreClrWasmDebugOnBreakpointHit;
+        delete globalThis.coreClrDebugFireEventToPause;
         delete globalThis.CoreClrWasmDebugGetTargetModuleBase;
         delete globalThis.CoreClrWasmDebugGetSymbolAddress;
         delete globalThis.CoreClrWasmDebugReadTargetMemory;
