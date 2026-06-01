@@ -95,6 +95,15 @@ DataTargetAdapter::GetPlatform(
 {
     SUPPORTS_DAC_HOST_ONLY;
 
+#ifdef TARGET_WASM
+    // The wasm runtime has no PE-style machine identifier, so the
+    // adapter cannot route through GetMachineType the way it does on
+    // Windows/Posix. On wasm there is only one platform, so report it
+    // directly.
+    *pPlatform = CORDB_PLATFORM_WASM32;
+    return S_OK;
+#else
+
     // Get the target machine type, and assume it's Windows
     HRESULT hr;
 
@@ -175,6 +184,7 @@ DataTargetAdapter::GetPlatform(
     // Found a match
     *pPlatform = platform;
     return S_OK;
+#endif // TARGET_WASM
 }
 
 // impl of interface method ICorDebugDataTarget::ReadVirtual

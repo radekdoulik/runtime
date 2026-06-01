@@ -69,23 +69,6 @@ constexpr uint32_t WasmDbiDacSidecarBuildVersionLS = 0;
 // public corerror.h contract.
 constexpr int32_t HrIncompatibleProtocol = static_cast<int32_t>(0x8013134bu);
 
-// Sidecar-internal synthetic CorDebugPlatform value. The public enum
-// in src/coreclr/pal/prebuilt/inc/cordebug.h:1479 currently tops out
-// at CORDB_PLATFORM_POSIX_RISCV64 (= 14) and has no value for
-// WebAssembly. Adding one is a public-API change that requires API
-// review, so until then GetPlatform reports this sentinel.
-//
-// The value is intentionally far outside the public range so it cannot
-// be confused with a real platform if dotnet later extends the enum.
-// The bytes spell 'wAS1' in big-endian (low byte '1' = sidecar synthetic
-// platform protocol v1), giving us room to rev (0x77415332 = 'wAS2')
-// if the wasm sidecar's notion of "platform" ever needs to change.
-//
-// Public hosts that compare against the published CorDebugPlatform
-// enum will see an unknown value and can refuse to attach. Hosts that
-// recognize the sentinel can opt in to wasm sidecar behaviour.
-constexpr int32_t WasmSidecarSyntheticPlatform = static_cast<int32_t>(0x77415331u);
-
 enum ComponentMask : uint32_t
 {
     ComponentScaffold = 0x1,
@@ -634,28 +617,7 @@ public:
             return E_POINTER;
         }
 
-        // No public CorDebugPlatform value exists for WebAssembly today.
-        // Until one is approved, report the sidecar's synthetic sentinel
-        // (see WasmSidecarSyntheticPlatform above) so a cooperating host
-        // can distinguish "wasm sidecar" from any real platform and a
-        // strict host that only understands the public enum will see an
-        // unknown value rather than a stale POSIX_X86 impersonation or
-        // the prior E_NOTIMPL that left the out parameter zeroed.
-        //
-        // The bit pattern is copied via memcpy instead of
-        // static_cast<CorDebugPlatform>(sentinel) because the sentinel is
-        // intentionally outside the named-enumerator range and a direct
-        // static_cast on an unscoped enum without a fixed underlying type
-        // is undefined behavior per [dcl.enum]/8 when the value exceeds
-        // the enumeration's implementation-defined value range. The
-        // memcpy reproduces the desired bit pattern without invoking UB,
-        // assuming the underlying type is exactly 32 bits wide (asserted
-        // below). Every supported compiler picks int as the underlying
-        // type for this enum.
-        static_assert(sizeof(CorDebugPlatform) == sizeof(int32_t),
-                      "CorDebugPlatform underlying type must be 32 bits wide");
-        int32_t sentinel = WasmSidecarSyntheticPlatform;
-        memcpy(targetPlatform, &sentinel, sizeof(sentinel));
+        *targetPlatform = CORDB_PLATFORM_WASM32;
         return S_OK;
     }
 

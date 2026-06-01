@@ -219,7 +219,7 @@ offset  size  field
 | `coreclr_wasm_dbi_dac_probe_runtime_contract_descriptor` | Read and validate the cDAC `DotNetRuntimeContractDescriptor` from the connected runtime. |
 | `coreclr_wasm_dbi_dac_probe_contract_pointer_data`     | Read one entry of the cDAC pointer-data array by index. |
 | `coreclr_wasm_dbi_dac_probe_test_data`                 | Read the `WasmDbiDacTestData` block exposed by the runtime under `CLR_CMAKE_ENABLE_WASM_DBI_DAC`. |
-| `coreclr_wasm_dbi_dac_probe_get_platform`              | Probe `ICorDebugDataTarget::GetPlatform()`; today returns the synthetic `WasmSidecarSyntheticPlatform` sentinel. |
+| `coreclr_wasm_dbi_dac_probe_get_platform`              | Probe `ICorDebugDataTarget::GetPlatform()`; returns `CORDB_PLATFORM_WASM32` (= 14). |
 | `coreclr_wasm_dbi_dac_create_clr_data_instance`        | Direct `CLRDataCreateInstance` smoke (legacy DAC). |
 | `coreclr_wasm_dbi_dac_create_dac_dbi_interface`        | Direct `DacDbiInterfaceInstance` smoke (DBI-facing DAC). |
 | `coreclr_wasm_dbi_dac_probe_dac_consistency_checks`    | Phase 3 onramp: creates `IDacDbiInterface` then calls `DacSetTargetConsistencyChecks(FALSE)` and writes the HRESULT to the supplied address. Guards the desktop V3-attach call site (`CordbProcess::CreateDacDbiInterface`) against silent regressions. |

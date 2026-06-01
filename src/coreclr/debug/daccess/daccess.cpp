@@ -5112,10 +5112,9 @@ ClrDataAccess::Initialize(void)
     //
 
     // Determine our platform based on the pre-processor macros set when we were built.
-    // The legacy CorDebugPlatform enum does not have a wasm value yet.
-#ifndef TARGET_WASM
-
-#ifdef TARGET_UNIX
+#if defined(TARGET_WASM)
+    CorDebugPlatform hostPlatform = CORDB_PLATFORM_WASM32;
+#elif defined(TARGET_UNIX)
     #if defined(TARGET_X86)
         CorDebugPlatform hostPlatform = CORDB_PLATFORM_POSIX_X86;
     #elif defined(TARGET_AMD64)
@@ -5154,7 +5153,6 @@ ClrDataAccess::Initialize(void)
         // is not what this version of mscordacwks.dll was built for.
         return CORDBG_E_INCOMPATIBLE_PLATFORMS;
     }
-#endif // !TARGET_WASM
 
     //
     // Get the current DLL base for mscorwks globals.

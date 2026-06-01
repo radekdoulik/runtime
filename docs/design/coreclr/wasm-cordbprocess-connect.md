@@ -121,9 +121,9 @@ The data target reports `IMAGE_FILE_MACHINE_UNKNOWN` from `GetMachineType` and r
 `GetRuntimeBase` returns the runtime base captured by the sidecar and fails when that base is zero
 (`src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:619-627`).
 
-`GetPlatform` returns the synthetic sentinel `0x77415331` rather than a published `CorDebugPlatform` value
-(`src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:72-87`,
-`src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:630-660`).
+`GetPlatform` returns the public `CORDB_PLATFORM_WASM32` value (= 14, added at the next free slot after
+`CORDB_PLATFORM_POSIX_RISCV64`) (`src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:613-622`,
+`src/coreclr/pal/prebuilt/inc/cordebug.h:1494`).
 
 ### Existing DAC/DBI probes
 
@@ -358,24 +358,21 @@ The generated PAL header assigns explicit arithmetic values and confirms `CORDB_
 after POSIX_AMD64, POSIX_ARM64 is after POSIX_ARM, and POSIX_RISCV64 is the current last value
 (`src/coreclr/pal/prebuilt/inc/cordebug.h:1479-1495`).
 
-The sidecar must not impersonate `CORDB_PLATFORM_POSIX_X86` or `CORDB_PLATFORM_POSIX_ARM64`. The current
-sentinel is intentionally outside the public enum range and spells `wAS1`
-(`src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:72-87`).
-
-The product fix should add a real `CORDB_PLATFORM_WASM32` at the next free public slot after
-`CORDB_PLATFORM_POSIX_RISCV64`, not at the stale plan-suggested value 12. On the generated header observed here,
-the next slot is 14 (`src/coreclr/pal/prebuilt/inc/cordebug.h:1479-1495`).
+The sidecar reports `CORDB_PLATFORM_WASM32` (= 14), the public enum value added at the next free slot after
+`CORDB_PLATFORM_POSIX_RISCV64` (`src/coreclr/pal/prebuilt/inc/cordebug.h:1494`, source in
+`src/coreclr/inc/cordebug.idl:290`). The historical sentinel approach used by the prototype has been removed
+(`src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp` `WasmDacDataTarget::GetPlatform`).
 
 The platform audit sites under `src/coreclr/debug/` are:
 
-- `DataTargetAdapter::GetPlatform`, which maps PE machine type to
-`CorDebugPlatform` and returns `E_NOTIMPL` for unknown machines
-(`src/coreclr/debug/daccess/datatargetadapter.cpp:91-164`).
-- `ClrDataAccess` platform compatibility, which currently skips its
-host-vs-target check under `TARGET_WASM` (`src/coreclr/debug/daccess/daccess.cpp:5114-5158`).
+- `DataTargetAdapter::GetPlatform`, which short-circuits to `CORDB_PLATFORM_WASM32` on wasm under a
+`#ifdef TARGET_WASM` branch (`src/coreclr/debug/daccess/datatargetadapter.cpp:91-105`); on other targets it
+still maps PE machine type to `CorDebugPlatform` and returns `E_NOTIMPL` for unknown machines.
+- `ClrDataAccess` platform compatibility, which now runs its host-vs-target check on wasm (since both report
+`CORDB_PLATFORM_WASM32`) (`src/coreclr/debug/daccess/daccess.cpp:5108-5155`).
 - `ShimLocalDataTarget::GetPlatform`, which is Windows-only and assigns
 Windows platform values (`src/coreclr/debug/di/shimlocaldatatarget.cpp:276-294`).
-- `ShimRemoteDataTarget::GetPlatform`, which currently returns zero under
+- `ShimRemoteDataTarget::GetPlatform`, which returns `CORDB_PLATFORM_WASM32` under
 `TARGET_WASM` and otherwise maps target architecture macros
 (`src/coreclr/debug/di/shimremotedatatarget.cpp:244-280`).
 - `ReadOnlyDataTargetFacade::GetPlatform`, which asserts unexpected use
@@ -575,9 +572,9 @@ copy; all target reads continue through `read_target_memory` (`src/coreclr/debug
 
 ## Open questions
 
-- Should product code add a true public `CORDB_PLATFORM_WASM32` enum value
+- ~~Should product code add a true public `CORDB_PLATFORM_WASM32` enum value
 after `CORDB_PLATFORM_POSIX_RISCV64`, or keep the current sentinel behind a sidecar-local mapping until API
-review? The IDL currently has no WASM member (`src/coreclr/inc/cordebug.idl:274-291`).
+review?~~ **Resolved (2026-06-01):** added `CORDB_PLATFORM_WASM32 = 14` in `cordebug.idl` + `pal/prebuilt/inc/cordebug.h`.
 - Should `WasmDacDataTarget` continue returning `E_NOINTERFACE` for
 `ICorDebugMutableDataTarget` during Phase 3, or should it implement the interface with write methods returning
 `CORDBG_E_TARGET_READONLY`? The desktop connect path tolerates QI failure

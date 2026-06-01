@@ -18,11 +18,9 @@ const TestDataMagic = 0x43445744;
 const E_NOTIMPL = -2147467263;
 const TransportMessage = "dbi-command:set-breakpoint";
 
-// Sidecar synthetic CorDebugPlatform sentinel; must match
-// WasmSidecarSyntheticPlatform in dbi_dac_wasm.cpp. The public
-// CorDebugPlatform enum has no value for WebAssembly, so the sidecar
-// reports this value from ICorDebugDataTarget::GetPlatform.
-const WasmSidecarSyntheticPlatform = 0x77415331 | 0;
+// CorDebugPlatform value the wasm sidecar reports. Matches
+// CORDB_PLATFORM_WASM32 = 14 in src/coreclr/pal/prebuilt/inc/cordebug.h.
+const CORDB_PLATFORM_WASM32 = 14;
 
 function fail(message) {
     throw new Error(message);
@@ -636,7 +634,7 @@ async function main() {
         platform: {
             result: platformResult,
             value: `0x${(platformValue >>> 0).toString(16)}`,
-            matchesSyntheticSentinel: platformValue === WasmSidecarSyntheticPlatform,
+            isWasm32: platformValue === CORDB_PLATFORM_WASM32,
             nullOutResult: platformNullOutResult
         },
         session: {
@@ -747,7 +745,7 @@ async function main() {
         controlProbe.createProcessResult !== E_NOTIMPL ||
         controlProbe.breakpointResult !== E_NOTIMPL ||
         platformResult !== 0 ||
-        platformValue !== WasmSidecarSyntheticPlatform ||
+        platformValue !== CORDB_PLATFORM_WASM32 ||
         platformNullOutResult !== -1 ||
         sessionCreateResult !== 0 ||
         sessionCreateProcessResult !== E_NOTIMPL ||

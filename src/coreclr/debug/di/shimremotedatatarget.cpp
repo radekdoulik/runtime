@@ -247,7 +247,7 @@ ShimRemoteDataTarget::GetPlatform(
         CorDebugPlatform *pPlatform)
 {
 #if defined(TARGET_WASM)
-     *pPlatform = static_cast<CorDebugPlatform>(0);
+     *pPlatform = CORDB_PLATFORM_WASM32;
 #elif defined(TARGET_UNIX)
      #if defined(TARGET_X86)
          *pPlatform = CORDB_PLATFORM_POSIX_X86;
