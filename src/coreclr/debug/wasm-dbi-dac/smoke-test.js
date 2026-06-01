@@ -963,7 +963,9 @@ async function main() {
         staticDacBindingProbeResult !== 0 ||
         staticDacBindingCreateHr !== 0 ||
         staticDacBindingConsistencyHr !== 0 ||
-        openVirtualProcessProbeResult !== 0 ||  // probe wrote outputs; HR/hasReal NOT yet asserted (Phase 3 gap)
+        openVirtualProcessProbeResult !== 0 ||
+        openVirtualProcessHr !== 0 ||
+        openVirtualProcessHasReal !== 1 ||
         dacGlobalsProbeResult !== DacGlobalsProbeSlotCount ||
         !dacGlobalsAllNonZero) {
         fail("WASM DBI/DAC smoke test failed");

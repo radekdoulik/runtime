@@ -34,6 +34,21 @@
 struct RSDebuggingInfo;
 extern RSDebuggingInfo * g_pRSDebuggingInfo;
 
+#ifdef TARGET_WASM
+// On wasm, DAC and DBI are statically linked into the same sidecar module
+// (coreclr-dbi-dac.wasm). There is no separate DAC dll to GetProcAddress();
+// CreateDacDbiInterface calls this factory directly. The factory is a
+// DLLEXPORT in src/coreclr/debug/daccess/dacdbiimpl.cpp without a public
+// header declaration, so we forward-declare it here at file scope (an
+// extern "C" linkage spec cannot live inside a function body).
+extern "C" HRESULT STDAPICALLTYPE DacDbiInterfaceInstance(
+    ICorDebugDataTarget * pTarget,
+    CORDB_ADDRESS baseAddress,
+    IDacDbiInterface::IAllocator * pAllocator,
+    IDacDbiInterface::IMetaDataLookup * pMetaDataLookup,
+    IDacDbiInterface ** ppInterface);
+#endif // TARGET_WASM
+
 //---------------------------------------------------------------------------------------
 //
 // OpenVirtualProcessImpl method called by the shim to get an ICorDebugProcess4 instance
@@ -659,15 +674,6 @@ CordbProcess::CreateDacDbiInterface()
 
     HRESULT hrStatus = S_OK;
 
-    // Non-marshalling path for live local dac.
-    // in the new arch we can get the module from OpenVirtualProcess2 but in the shim case
-    // and the deprecated OpenVirtualProcess case we must assume it comes from DAC in the
-    // same directory as DBI
-    if (m_hDacModule == NULL)
-    {
-        m_hDacModule = ShimProcess::GetDacModule(m_cordb->GetDacModulePath());
-    }
-
     //
     // Get the access interface, passing our callback interfaces (data target, allocator and metadata lookup)
     //
@@ -684,11 +690,30 @@ CordbProcess::CreateDacDbiInterface()
         IDacDbiInterface **);
 
     IDacDbiInterface* pInterfacePtr = NULL;
+
+#ifdef TARGET_WASM
+    // On wasm, DAC and DBI are statically linked into the same sidecar
+    // module (coreclr-dbi-dac.wasm). There is no separate DAC dll to
+    // GetProcAddress(); call DacDbiInterfaceInstance directly. This path
+    // is exercised by coreclr_wasm_dbi_dac_probe_static_dac_binding.
+    // The factory is forward-declared at file scope above.
+    PFN_DacDbiInterfaceInstance pfnEntry = &DacDbiInterfaceInstance;
+#else
+    // Non-marshalling path for live local dac.
+    // in the new arch we can get the module from OpenVirtualProcess2 but in the shim case
+    // and the deprecated OpenVirtualProcess case we must assume it comes from DAC in the
+    // same directory as DBI
+    if (m_hDacModule == NULL)
+    {
+        m_hDacModule = ShimProcess::GetDacModule(m_cordb->GetDacModulePath());
+    }
+
     PFN_DacDbiInterfaceInstance pfnEntry = (PFN_DacDbiInterfaceInstance)GetProcAddress(m_hDacModule, "DacDbiInterfaceInstance");
     if (!pfnEntry)
     {
         ThrowLastError();
     }
+#endif // TARGET_WASM
 
     hrStatus = pfnEntry(m_pDACDataTarget, m_clrInstanceId, pAllocator, pMetaDataLookup, &pInterfacePtr);
     IfFailThrow(hrStatus);
