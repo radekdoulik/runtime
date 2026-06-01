@@ -519,6 +519,23 @@ extern "C" EMSCRIPTEN_KEEPALIVE void* GetWasmDbiDacTestData()
     return &g_wasmDbiDacTestData;
 }
 
+// Phase 4 slice 3: address-of getters so the sidecar's TryGetSymbol
+// host bridge can resolve the structured-event globals and drain via
+// the DAC ReadVirtual path (no JS-side runtime call needed at fire
+// time). Follow the same naming convention as Getg_dacTable /
+// GetWasmDbiDacTestData; the JS bridge maps the symbol-name string
+// "g_wasmDebugLastIpcEvent" / "g_wasmDebugLastIpcEventValid" to a
+// call into the matching getter.
+extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcEvent()
+{
+    return &g_wasmDebugLastIpcEvent;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcEventValid()
+{
+    return &g_wasmDebugLastIpcEventValid;
+}
+
 // Smoke-only probe: write a small fixed-size block of well-known DacGlobals
 // slot values into the caller-supplied buffer. Returns the number of TADDR
 // slots written (currently 13). The smoke harness uses this after init to

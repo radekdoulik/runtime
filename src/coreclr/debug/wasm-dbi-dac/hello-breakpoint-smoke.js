@@ -306,6 +306,47 @@ function pollDbiEventRecord(debuggerInstance) {
     return { pollResult, bytesWritten, record };
 }
 
+// Phase 4 slice 3: poll the structured DebuggerIPCEvent payload via
+// the sidecar's coreclr_wasm_dbi_dac_dbi_poll_ipc_event export. The
+// sidecar resolves the runtime symbols (g_wasmDebugLastIpcEventValid,
+// g_wasmDebugLastIpcEvent) once and drains via WasmDacDataTarget
+// ReadVirtual — the same DAC path real mscordbi would use. Field
+// offsets match WasmDbgIpcEventBreakpointRuntime in
+// src/coreclr/vm/wasm/dbi-control-plane.cpp:
+//   0:Magic 4:Type 8:ProcessId 12:ThreadId
+//   16:VmAppDomain(8) 24:VmThread(8)
+//   32:Hr 36:Flags 40:BreakpointToken(8)
+//   48:FuncMetadataToken 52:Reserved0
+//   56:VmAssembly(8) 64:IsIL 68:Offset 72:EncVersion
+//   76:Reserved1 80:NativeCodeMethodDescToken(8) 88:CodeStartAddress(8)
+function pollDbiIpcEvent(debuggerInstance) {
+    const stack = debuggerInstance.exports.stackSave();
+    const eventAddress = debuggerInstance.exports.stackAlloc(96);
+    const bytesWrittenAddress = debuggerInstance.exports.stackAlloc(4);
+    const pollResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_poll_ipc_event(eventAddress, 96, bytesWrittenAddress);
+    const bytesWritten = new DataView(debuggerInstance.module.HEAPU8.buffer, bytesWrittenAddress, 4).getUint32(0, true);
+    let payload = null;
+    if (pollResult === 0 && bytesWritten === 96) {
+        const view = new DataView(debuggerInstance.module.HEAPU8.buffer, eventAddress, 96);
+        payload = {
+            magic: view.getUint32(0, true),
+            type: view.getUint32(4, true),
+            processId: view.getUint32(8, true),
+            threadId: view.getUint32(12, true),
+            hr: view.getInt32(32, true),
+            flags: view.getUint32(36, true),
+            breakpointToken: view.getBigUint64(40, true),
+            funcMetadataToken: view.getUint32(48, true),
+            isIL: view.getUint32(64, true),
+            offset: view.getUint32(68, true),
+            encVersion: view.getUint32(72, true)
+        };
+    }
+    debuggerInstance.exports.stackRestore(stack);
+
+    return { pollResult, bytesWritten, payload };
+}
+
 function readFrameRecord(memory, address) {
     const view = new DataView(memory.buffer, address, 88);
     return {
@@ -410,6 +451,7 @@ async function main() {
     let dbiFrameRecordDuringCallback = { pollResult: -1, bytesWritten: 0, record: null };
     let dbiProcessStateDuringCallback = { pollResult: -1, bytesWritten: 0, state: null };
     let testDataDuringCallback = { readResult: -1, testData: null };
+    let dbiIpcEventDuringCallback = { pollResult: -1, bytesWritten: 0, payload: null };
     let continueDuringCallbackResult = -1;
     // Phase 4 slice 2: structured DebuggerIPCEvent payload captured by
     // CoreClrWasmDebugReadLastIpcEvent during the breakpoint callback.
@@ -499,6 +541,8 @@ async function main() {
                     symbolName === "DotNetRuntimeContractDescriptor" ? runtimeExports.GetDotNetRuntimeContractDescriptor() >>> 0 :
                     symbolName === "g_dacTable" ? runtimeExports.Getg_dacTable() >>> 0 :
                     symbolName === "WasmDbiDacTestData" ? runtimeExports.GetWasmDbiDacTestData() >>> 0 :
+                    symbolName === "g_wasmDebugLastIpcEvent" ? runtimeExports.Getg_wasmDebugLastIpcEvent() >>> 0 :
+                    symbolName === "g_wasmDebugLastIpcEventValid" ? runtimeExports.Getg_wasmDebugLastIpcEventValid() >>> 0 :
                     0;
                 if (symbolAddress === 0 || addressOutAddress + 8 > debuggerHeap.length) {
                     return -1;
@@ -575,6 +619,15 @@ async function main() {
                     dbiFrameRecordDuringCallback = pollDbiFrameRecord(debuggerInstance);
                     dbiProcessStateDuringCallback = pollDbiProcessState(debuggerInstance);
                     testDataDuringCallback = readDbiTestData(debuggerInstance);
+                    // Phase 4 slice 3: drain the structured DebuggerIPCEvent
+                    // payload via the sidecar's poll_ipc_event export. This
+                    // is the real DAC path — sidecar resolves runtime
+                    // symbols and copies via WasmDacDataTarget ReadVirtual,
+                    // no JS-side runtime call. Must run BEFORE the
+                    // runtime-side CoreClrWasmDebugReadLastIpcEvent drain
+                    // below or the Valid flag will already be 0 when the
+                    // sidecar reads it.
+                    dbiIpcEventDuringCallback = pollDbiIpcEvent(debuggerInstance);
                     // Phase 4 slice 2: drain the structured DebuggerIPCEvent
                     // payload directly from the runtime via
                     // CoreClrWasmDebugReadLastIpcEvent. This is the runtime
@@ -683,6 +736,23 @@ async function main() {
             funcMetadataToken: `0x${ipcEventDuringCallback.funcMetadataToken.toString(16)}`,
             breakpointToken: `0x${ipcEventDuringCallback.breakpointToken.toString(16)}`
         };
+        result.dbiIpcEventDuringCallback = dbiIpcEventDuringCallback.payload
+            ? {
+                pollResult: dbiIpcEventDuringCallback.pollResult,
+                bytesWritten: dbiIpcEventDuringCallback.bytesWritten,
+                magic: `0x${dbiIpcEventDuringCallback.payload.magic.toString(16)}`,
+                type: `0x${dbiIpcEventDuringCallback.payload.type.toString(16)}`,
+                processId: dbiIpcEventDuringCallback.payload.processId,
+                threadId: dbiIpcEventDuringCallback.payload.threadId,
+                hr: dbiIpcEventDuringCallback.payload.hr,
+                flags: dbiIpcEventDuringCallback.payload.flags,
+                breakpointToken: `0x${dbiIpcEventDuringCallback.payload.breakpointToken.toString(16)}`,
+                funcMetadataToken: `0x${dbiIpcEventDuringCallback.payload.funcMetadataToken.toString(16)}`,
+                isIL: dbiIpcEventDuringCallback.payload.isIL,
+                offset: dbiIpcEventDuringCallback.payload.offset,
+                encVersion: dbiIpcEventDuringCallback.payload.encVersion
+            }
+            : dbiIpcEventDuringCallback;
         console.log(JSON.stringify(result, null, 2));
 
         if (result.hitCount !== 1 ||
@@ -730,7 +800,15 @@ async function main() {
             ipcEventDuringCallback.funcMetadataToken !== dbiEventRecordDuringCallback.record?.methodToken ||
             ipcEventDuringCallback.breakpointToken === 0n ||
             ipcEventDuringCallback.isIL !== 1 ||
-            ipcEventDuringCallback.offset !== 0) {
+            ipcEventDuringCallback.offset !== 0 ||
+            dbiIpcEventDuringCallback.pollResult !== 0 ||
+            dbiIpcEventDuringCallback.bytesWritten !== 96 ||
+            dbiIpcEventDuringCallback.payload?.magic !== 0x42435049 ||
+            dbiIpcEventDuringCallback.payload?.type !== 0x100 ||
+            dbiIpcEventDuringCallback.payload?.funcMetadataToken !== ipcEventDuringCallback.funcMetadataToken ||
+            dbiIpcEventDuringCallback.payload?.breakpointToken !== ipcEventDuringCallback.breakpointToken ||
+            dbiIpcEventDuringCallback.payload?.isIL !== 1 ||
+            dbiIpcEventDuringCallback.payload?.offset !== 0) {
             fail("HelloWorld breakpoint was not reached");
         }
     } finally {

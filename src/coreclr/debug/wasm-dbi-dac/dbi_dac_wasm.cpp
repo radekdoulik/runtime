@@ -2211,6 +2211,120 @@ int32_t coreclr_wasm_dbi_dac_dbi_poll_event(uint32_t bufferAddress, uint32_t buf
     return coreclr_wasm_dbi_dac_transport_get_last_event(bufferAddress, bufferLength, bytesWrittenAddress);
 }
 
+// Phase 4 slice 3: end-to-end DebuggerIPCEvent drain from the sidecar
+// without a JS-side runtime export call. Resolves the runtime symbols
+// `g_wasmDebugLastIpcEventValid` and `g_wasmDebugLastIpcEvent` once
+// (cached on first call), then uses the WasmDacDataTarget ReadVirtual
+// path to peek the Valid flag and (when set) copy the 96-byte payload
+// into the caller's sidecar-side buffer. Returns:
+//   S_OK + bytesWritten = 96 when an event was drained;
+//   S_OK + bytesWritten = 0  when no event is pending;
+//   E_FAIL on cross-module read failure or symbol lookup failure.
+// Note: this peek does NOT clear the runtime's Valid flag — clearing
+// would require a write-back to runtime memory which we don't have a
+// bridge for yet. Future slices will either add a JS bridge to call
+// CoreClrWasmDebugReadLastIpcEvent on the runtime side, or extend
+// copy_from_target with a write-side companion.
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_poll_ipc_event)
+int32_t coreclr_wasm_dbi_dac_dbi_poll_ipc_event(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
+{
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
+    if (g_cordb == nullptr || !g_connectedToRuntime)
+    {
+        return E_FAIL;
+    }
+
+    if (bytesWrittenAddress == 0 || bufferAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    if (bufferLength < sizeof(WasmDbgIpcEventBreakpoint))
+    {
+        return BufferTooSmall;
+    }
+
+    // The runtime mutates g_wasmDebugLastIpcEventValid on every fire
+    // (and CoreClrWasmDebugReadLastIpcEvent on every drain). The page
+    // cache snapshots whatever pre-fire value it captured on the
+    // previous read, so a poll after a fire would otherwise serve
+    // stale 0s. Invalidate before every poll. Once the runtime has a
+    // proper "memory has changed" event hook the sidecar can subscribe
+    // to, this can move to that callback path.
+    InvalidatePageCache();
+
+    static uint64_t s_cachedValidAddress = 0;
+    static uint64_t s_cachedEventAddress = 0;
+
+    WasmDacDataTarget dataTarget(g_connectedRuntimeBase);
+
+    if (s_cachedValidAddress == 0)
+    {
+        if (!TryGetSymbol(
+                static_cast<ICorDebugDataTarget*>(&dataTarget),
+                g_connectedRuntimeBase,
+                "g_wasmDebugLastIpcEventValid",
+                &s_cachedValidAddress) ||
+            s_cachedValidAddress == 0)
+        {
+            return HostSymbolLookupFailed;
+        }
+    }
+    if (s_cachedEventAddress == 0)
+    {
+        if (!TryGetSymbol(
+                static_cast<ICorDebugDataTarget*>(&dataTarget),
+                g_connectedRuntimeBase,
+                "g_wasmDebugLastIpcEvent",
+                &s_cachedEventAddress) ||
+            s_cachedEventAddress == 0)
+        {
+            return HostSymbolLookupFailed;
+        }
+    }
+
+    uint32_t valid = 0;
+    ULONG32 bytesRead = 0;
+    HRESULT hr = dataTarget.ReadVirtual(
+        s_cachedValidAddress,
+        reinterpret_cast<BYTE*>(&valid),
+        sizeof(valid),
+        &bytesRead);
+    if (FAILED(hr) || bytesRead != sizeof(valid))
+    {
+        return HostReadFailed;
+    }
+
+    uint32_t zeroBytes = 0;
+    if (valid == 0)
+    {
+        memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &zeroBytes, sizeof(zeroBytes));
+        return S_OK;
+    }
+
+    WasmDbgIpcEventBreakpoint payload{};
+    bytesRead = 0;
+    hr = dataTarget.ReadVirtual(
+        s_cachedEventAddress,
+        reinterpret_cast<BYTE*>(&payload),
+        sizeof(payload),
+        &bytesRead);
+    if (FAILED(hr) || bytesRead != sizeof(payload))
+    {
+        return HostReadFailed;
+    }
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bufferAddress)), &payload, sizeof(payload));
+    uint32_t written = static_cast<uint32_t>(sizeof(payload));
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &written, sizeof(written));
+    return S_OK;
+}
+
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_poll_event_record)
 int32_t coreclr_wasm_dbi_dac_dbi_poll_event_record(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
 {
