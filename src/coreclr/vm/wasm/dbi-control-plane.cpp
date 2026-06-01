@@ -214,6 +214,8 @@ struct WasmDebugBreakpointSlot
     uint32_t HitCount;
 };
 
+static_assert(sizeof(WasmDebugBreakpointSlot) == 88);
+
 WasmDebugBreakpointSlot g_wasmDebugBreakpoints[WasmDebugMaxBreakpoints];
 
 // Session-level breakpoint state. Single-threaded wasm means only one
@@ -534,6 +536,21 @@ extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcEvent()
 extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcEventValid()
 {
     return &g_wasmDebugLastIpcEventValid;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugBreakpoints()
+{
+    return &g_wasmDebugBreakpoints[0];
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetBreakpointSlotSize()
+{
+    return static_cast<uint32_t>(sizeof(WasmDebugBreakpointSlot));
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetBreakpointSlotCapacity()
+{
+    return WasmDebugMaxBreakpoints;
 }
 
 // Smoke-only probe: write a small fixed-size block of well-known DacGlobals

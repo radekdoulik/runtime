@@ -11,7 +11,7 @@ const ExpectedAbiVersion = 1;
 const ExpectedComponentMask = 0xf;
 const ExpectedVersionBlobMagic = 0x42564457;
 const ExpectedVersionBlobSize = 32;
-const ExpectedProtocolBreakingChangeCounter = 1;
+const ExpectedProtocolBreakingChangeCounter = 2;
 const HrIncompatibleProtocol = 0x8013134b | 0;
 const ContractDescriptorMagic = 0x0043414443434e44n;
 const TestDataMagic = 0x43445744;
@@ -170,6 +170,29 @@ function readNullTerminatedAscii(memory, address, byteCount) {
     return result;
 }
 
+function readBreakpointEnumeration(memory, address, capacity, slotSize) {
+    const view = new DataView(memory.buffer);
+    const slots = [];
+    for (let index = 0; index < capacity; index++) {
+        const slotAddress = address + 8 + (index * slotSize);
+        slots.push({
+            armed: memory[slotAddress] !== 0,
+            methodName: readNullTerminatedAscii(memory, slotAddress + 1, 64),
+            methodToken: view.getUint32(slotAddress + 68, true),
+            patchAddress: view.getUint32(slotAddress + 72, true),
+            originalOpcode: view.getInt32(slotAddress + 76, true),
+            patchActive: memory[slotAddress + 80] !== 0,
+            hitCount: view.getUint32(slotAddress + 84, true)
+        });
+    }
+
+    return {
+        capacity: view.getUint32(address, true),
+        activeCount: view.getUint32(address + 4, true),
+        slots
+    };
+}
+
 function readPageCacheStats(memory, address) {
     const view = new DataView(memory.buffer, address, 24);
     return {
@@ -280,6 +303,7 @@ async function main() {
             symbolName === "DotNetRuntimeContractDescriptor" ? runtimeExports.GetDotNetRuntimeContractDescriptor() >>> 0 :
             symbolName === "g_dacTable" ? runtimeExports.Getg_dacTable() >>> 0 :
             symbolName === "WasmDbiDacTestData" ? runtimeExports.GetWasmDbiDacTestData() >>> 0 :
+            symbolName === "g_wasmDebugBreakpoints" ? runtimeExports.Getg_wasmDebugBreakpoints() >>> 0 :
             0;
 
         if (symbolAddress === 0) {
@@ -764,11 +788,69 @@ async function main() {
     const multiBpSendB = sendCommand("dbi-command:set-breakpoint:name=BpB");
     const multiBpSendC = sendCommand("dbi-command:set-breakpoint:name=BpC");
     const multiBpCountAfterThree = runtimeExports.CoreClrWasmDebugGetActiveBreakpointCount() | 0;
+    const ExpectedBreakpointSlotSize = 88;
+    const BreakpointEnumerationHeaderSize = 8;
+    const multiBpSlotSize = runtimeExports.CoreClrWasmDebugGetBreakpointSlotSize() >>> 0;
+    const multiBpSlotCapacity = runtimeExports.CoreClrWasmDebugGetBreakpointSlotCapacity() >>> 0;
+    const multiBpEnumerationLength = BreakpointEnumerationHeaderSize + (multiBpSlotCapacity * multiBpSlotSize);
+    const multiBpEnumerationStack = debuggerExports.stackSave();
+    const multiBpEnumerationAddress = debuggerExports.stackAlloc(multiBpEnumerationLength);
+    const multiBpEnumerationBytesWrittenAddress = debuggerExports.stackAlloc(4);
+    const multiBpAckResult = debuggerModule._coreclr_wasm_dbi_dac_acknowledge_protocol(
+        ExpectedVersionBlobMagic, ExpectedAbiVersion, ExpectedProtocolBreakingChangeCounter) | 0;
+    const multiBpSessionCreateResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_session_create() | 0;
+    const multiBpSessionConnectResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_connect_runtime(1) | 0;
+    const multiBpEnumerateResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints(
+        multiBpEnumerationAddress,
+        multiBpEnumerationLength,
+        multiBpEnumerationBytesWrittenAddress) | 0;
+    const multiBpEnumerateBytesWritten = new DataView(
+        getDebuggerHeap().buffer,
+        multiBpEnumerationBytesWrittenAddress,
+        4).getUint32(0, true);
+    const multiBpEnumeration = readBreakpointEnumeration(
+        getDebuggerHeap(),
+        multiBpEnumerationAddress,
+        multiBpSlotCapacity,
+        multiBpSlotSize);
+    const multiBpArmedSlots = multiBpEnumeration.slots.filter(slot => slot.armed);
+    const multiBpArmedNames = multiBpArmedSlots.map(slot => slot.methodName);
+    const multiBpExpectedNames = ["BpA", "BpB", "BpC"];
+    const multiBpExpectedNamesPresent = multiBpExpectedNames.every(name => multiBpArmedNames.includes(name));
+    const multiBpNamedSlotsHaveExpectedFields = multiBpExpectedNames.every(name => {
+        const slot = multiBpArmedSlots.find(armedSlot => armedSlot.methodName === name);
+        return slot !== undefined &&
+            slot.methodToken === 0 &&
+            slot.patchAddress === 0 &&
+            slot.originalOpcode === 0 &&
+            !slot.patchActive &&
+            slot.hitCount === 0;
+    });
     const multiBpClearedB = clearByName("BpB");
     const multiBpCountAfterClearB = runtimeExports.CoreClrWasmDebugGetActiveBreakpointCount() | 0;
     const multiBpClearedA = clearByName("BpA");
     const multiBpClearedC = clearByName("BpC");
     const multiBpCountFinal = runtimeExports.CoreClrWasmDebugGetActiveBreakpointCount() | 0;
+    const multiBpEnumerateAfterClearResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints(
+        multiBpEnumerationAddress,
+        multiBpEnumerationLength,
+        multiBpEnumerationBytesWrittenAddress) | 0;
+    const multiBpEnumerateAfterClearBytesWritten = new DataView(
+        getDebuggerHeap().buffer,
+        multiBpEnumerationBytesWrittenAddress,
+        4).getUint32(0, true);
+    const multiBpEnumerationAfterClear = readBreakpointEnumeration(
+        getDebuggerHeap(),
+        multiBpEnumerationAddress,
+        multiBpSlotCapacity,
+        multiBpSlotSize);
+    const multiBpAfterClearArmedNames = multiBpEnumerationAfterClear.slots
+        .filter(slot => slot.armed)
+        .map(slot => slot.methodName);
+    const multiBpExpectedNamesCleared = multiBpExpectedNames.every(name => !multiBpAfterClearArmedNames.includes(name));
+    const multiBpDisconnectResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_disconnect_runtime() | 0;
+    const multiBpSessionDestroyResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_session_destroy() | 0;
+    debuggerExports.stackRestore(multiBpEnumerationStack);
     // No-such-name clear must succeed and report 0 cleared. We use a
     // distinct name that cannot match any existing slot to avoid wiping
     // an unrelated bp that some future smoke section might have left.
@@ -802,11 +884,30 @@ async function main() {
         sendB: multiBpSendB,
         sendC: multiBpSendC,
         countAfterThree: multiBpCountAfterThree,
+        slotSize: multiBpSlotSize,
+        slotCapacityFromRuntime: multiBpSlotCapacity,
+        enumerateLength: multiBpEnumerationLength,
+        enumerateResult: multiBpEnumerateResult,
+        enumerateBytesWritten: multiBpEnumerateBytesWritten,
+        enumerateCapacity: multiBpEnumeration.capacity,
+        enumerateActiveCount: multiBpEnumeration.activeCount,
+        enumerateArmedNames: multiBpArmedNames,
+        expectedNamesPresent: multiBpExpectedNamesPresent,
+        namedSlotsHaveExpectedFields: multiBpNamedSlotsHaveExpectedFields,
         clearedB: multiBpClearedB,
         countAfterClearB: multiBpCountAfterClearB,
         clearedA: multiBpClearedA,
         clearedC: multiBpClearedC,
         countFinal: multiBpCountFinal,
+        enumerateAfterClearResult: multiBpEnumerateAfterClearResult,
+        enumerateAfterClearBytesWritten: multiBpEnumerateAfterClearBytesWritten,
+        enumerateAfterClearActiveCount: multiBpEnumerationAfterClear.activeCount,
+        expectedNamesCleared: multiBpExpectedNamesCleared,
+        ackResult: multiBpAckResult,
+        sessionCreateResult: multiBpSessionCreateResult,
+        sessionConnectResult: multiBpSessionConnectResult,
+        disconnectResult: multiBpDisconnectResult,
+        sessionDestroyResult: multiBpSessionDestroyResult,
         clearedMissing: multiBpClearedMissing,
         slotCapacity,
         fillerCount: fillerNames.length,
@@ -1131,11 +1232,29 @@ async function main() {
         multiBpSendB !== 0 ||
         multiBpSendC !== 0 ||
         multiBpCountAfterThree !== multiBpInitialCount + 3 ||
+        multiBpSlotSize !== ExpectedBreakpointSlotSize ||
+        multiBpSlotCapacity !== 16 ||
+        multiBpAckResult !== 0 ||
+        multiBpSessionCreateResult !== 0 ||
+        multiBpSessionConnectResult !== 0 ||
+        multiBpEnumerateResult !== 0 ||
+        multiBpEnumerateBytesWritten !== multiBpEnumerationLength ||
+        multiBpEnumeration.capacity !== 16 ||
+        multiBpEnumeration.activeCount !== multiBpInitialCount + 3 ||
+        !multiBpExpectedNamesPresent ||
+        !multiBpNamedSlotsHaveExpectedFields ||
         multiBpClearedB !== 1 ||
         multiBpCountAfterClearB !== multiBpInitialCount + 2 ||
         multiBpClearedA !== 1 ||
         multiBpClearedC !== 1 ||
         multiBpCountFinal !== multiBpInitialCount ||
+        multiBpEnumerateAfterClearResult !== 0 ||
+        multiBpEnumerateAfterClearBytesWritten !== multiBpEnumerationLength ||
+        multiBpEnumerationAfterClear.capacity !== 16 ||
+        multiBpEnumerationAfterClear.activeCount !== multiBpInitialCount ||
+        !multiBpExpectedNamesCleared ||
+        multiBpDisconnectResult !== 0 ||
+        multiBpSessionDestroyResult !== 0 ||
         multiBpClearedMissing !== 0 ||
         fillerSendNonZero !== 0 ||
         exhaustionOverflowRc !== -1 ||

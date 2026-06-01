@@ -56,6 +56,8 @@ constexpr uint64_t ContractDescriptorMagic = 0x0043414443434e44;
 constexpr uint32_t TestDataMagic = 0x43445744;
 constexpr uint32_t MaxTransportMessageBytes = 256;
 constexpr uint32_t WasmDebugCommandRecordMagic = 0x434d4457;
+constexpr uint32_t WasmDebugBreakpointSlotCapacity = 16;
+constexpr uint32_t WasmDebugBreakpointEnumerationHeaderSize = 8;
 
 // 'WDVB' (Wasm DAC/DBI Version Blob) - stored little-endian so the bytes
 // 'W','D','V','B' appear in that order on every wasm host.
@@ -69,7 +71,8 @@ constexpr uint32_t WasmDbiDacVersionBlobMagic = 0x42564457;
 //
 // Bumping log:
 //   1 - initial value; matches the export set captured at this commit.
-constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 1;
+//   2 - add dbi_enumerate_breakpoints sidecar export + slot-table payload.
+constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 2;
 
 // Sidecar build version - encoded VS_FIXEDFILEINFO-style as two 32-bit
 // words. Reserved for future use; today's PoC sidecar reports 0/0 so
@@ -245,6 +248,19 @@ struct WasmDebugCommandRecord
     char MethodName[64];
 };
 
+struct WasmDebugBreakpointSlotMirror
+{
+    uint8_t Armed;
+    char MethodName[64];
+    uint8_t Pad0[3];
+    uint32_t MethodToken;
+    uint32_t PatchAddress;
+    int32_t OriginalOpcode;
+    uint8_t PatchActive;
+    uint8_t Pad1[3];
+    uint32_t HitCount;
+};
+
 struct WasmDebugEventRecord
 {
     uint32_t Kind;
@@ -337,12 +353,18 @@ struct WasmDbiProcessState
     uint32_t ContinueCount;
 };
 
+constexpr uint32_t WasmDebugBreakpointSlotMirrorSize = static_cast<uint32_t>(sizeof(WasmDebugBreakpointSlotMirror));
+constexpr uint32_t WasmDebugBreakpointEnumerationSize =
+    WasmDebugBreakpointEnumerationHeaderSize +
+    (WasmDebugBreakpointSlotCapacity * WasmDebugBreakpointSlotMirrorSize);
+
 static_assert(sizeof(ContractDescriptorLayout) == 32);
 static_assert(sizeof(ContractPointerDataProbe) == 8);
 static_assert(sizeof(TestDataProbe) == 48);
 static_assert(sizeof(DbiControlProbe) == 16);
 static_assert(sizeof(WasmDbiDacVersionBlob) == 32);
 static_assert(sizeof(WasmDebugCommandRecord) == 80);
+static_assert(sizeof(WasmDebugBreakpointSlotMirror) == 88);
 static_assert(sizeof(WasmDebugEventRecord) == 340);
 static_assert(sizeof(WasmDebugFrameRecord) == 88);
 static_assert(sizeof(WasmDbgIpcEventBreakpoint) == 96);
@@ -488,6 +510,7 @@ WasmDebugFrameRecord g_lastRuntimeFrameRecord{};
 // them.
 uint64_t g_cachedIpcEventValidAddress = 0;
 uint64_t g_cachedIpcEventAddress = 0;
+uint64_t g_cachedBreakpointSlotsAddress = 0;
 
 // Defense-in-depth handshake flag. The host MUST call
 // coreclr_wasm_dbi_dac_acknowledge_protocol with the matching
@@ -2121,6 +2144,7 @@ int32_t coreclr_wasm_dbi_dac_dbi_disconnect_runtime()
     // hit garbage.
     g_cachedIpcEventValidAddress = 0;
     g_cachedIpcEventAddress = 0;
+    g_cachedBreakpointSlotsAddress = 0;
     InvalidatePageCache();
     return S_OK;
 }
@@ -2340,6 +2364,83 @@ int32_t coreclr_wasm_dbi_dac_dbi_poll_ipc_event(uint32_t bufferAddress, uint32_t
 
     memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bufferAddress)), &payload, sizeof(payload));
     uint32_t written = static_cast<uint32_t>(sizeof(payload));
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &written, sizeof(written));
+    return S_OK;
+}
+
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints)
+int32_t coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
+{
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
+    if (g_cordb == nullptr || !g_connectedToRuntime)
+    {
+        return E_FAIL;
+    }
+
+    if (bytesWrittenAddress == 0 || bufferAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    if (bufferLength < WasmDebugBreakpointEnumerationSize)
+    {
+        return BufferTooSmall;
+    }
+
+    // The slot table mutates on every arm/clear and when interpreter patches
+    // are installed/restored, so every enumeration must force fresh target
+    // memory through ReadVirtual instead of reusing a cached page snapshot.
+    InvalidatePageCache();
+
+    WasmDacDataTarget dataTarget(g_connectedRuntimeBase);
+    if (g_cachedBreakpointSlotsAddress == 0)
+    {
+        uint64_t resolved = 0;
+        if (!TryGetSymbol(
+                static_cast<ICorDebugDataTarget*>(&dataTarget),
+                g_connectedRuntimeBase,
+                "g_wasmDebugBreakpoints",
+                &resolved) ||
+            resolved == 0 ||
+            resolved > UINT32_MAX)
+        {
+            return HostSymbolLookupFailed;
+        }
+        g_cachedBreakpointSlotsAddress = resolved;
+    }
+
+    WasmDebugBreakpointSlotMirror slots[WasmDebugBreakpointSlotCapacity]{};
+    ULONG32 bytesRead = 0;
+    HRESULT hr = dataTarget.ReadVirtual(
+        g_cachedBreakpointSlotsAddress,
+        reinterpret_cast<BYTE*>(slots),
+        sizeof(slots),
+        &bytesRead);
+    if (FAILED(hr) || bytesRead != sizeof(slots))
+    {
+        return HostReadFailed;
+    }
+
+    uint32_t activeCount = 0;
+    for (const WasmDebugBreakpointSlotMirror& slot : slots)
+    {
+        if (slot.Armed != 0)
+        {
+            activeCount++;
+        }
+    }
+
+    uint32_t header[2] = { WasmDebugBreakpointSlotCapacity, activeCount };
+    uint8_t* out = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(bufferAddress));
+    memcpy(out, header, sizeof(header));
+    memcpy(out + sizeof(header), slots, sizeof(slots));
+
+    uint32_t written = WasmDebugBreakpointEnumerationSize;
     memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &written, sizeof(written));
     return S_OK;
 }

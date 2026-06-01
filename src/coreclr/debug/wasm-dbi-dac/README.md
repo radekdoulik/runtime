@@ -178,6 +178,7 @@ acknowledged handshake returns `HrIncompatibleProtocol`.
 | `coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_token`  | Send `SetBreakpointByToken` command record to runtime. |
 | `coreclr_wasm_dbi_dac_dbi_continue`                 | Send `Continue` command record; invalidates the page cache. |
 | `coreclr_wasm_dbi_dac_dbi_poll_event`               | Drain queued runtime event text into the supplied buffer. |
+| `coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints`    | Drain the runtime breakpoint slot table (`8 + 16 * 88` bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_poll_event_record`        | Drain queued runtime event record (`WasmDebugEventRecord`, 340 bytes). |
 | `coreclr_wasm_dbi_dac_dbi_poll_frame_record`        | Drain frame record (`WasmDebugFrameRecord`, 88 bytes). |
 | `coreclr_wasm_dbi_dac_dbi_poll_process_state`       | Drain process state snapshot (`WasmDbiProcessState`, 40 bytes). |
