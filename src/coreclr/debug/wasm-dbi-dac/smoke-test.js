@@ -668,6 +668,21 @@ async function main() {
     const dbgIpcEventOffset = dbgIpcEventBufferView.getUint32(68, true);
     debuggerExports.stackRestore(dbgIpcEventStack);
 
+    // Phase 6 connection-state gate probe. Verifies the
+    // CoreClrWasmDebugSetDebuggerConnected / IsDebuggerConnected exports
+    // exist, default to disconnected (= 0), accept the round-trip set
+    // (1 → was 0, isConnected → 1), and accept the round-trip clear
+    // (0 → was 1, isConnected → 0). Mirrors Mono
+    // mono_wasm_set_is_debugger_attached (mini-wasm-debugger.c:38-373).
+    // The actual gating behavior (no patch when disconnected) is
+    // validated end-to-end by the hello-breakpoint smoke, which
+    // explicitly flips the flag on before triggering the breakpoint.
+    const connectionInitial = runtimeExports.CoreClrWasmDebugIsDebuggerConnected() | 0;
+    const connectionPrevOnSet = runtimeExports.CoreClrWasmDebugSetDebuggerConnected(1) | 0;
+    const connectionAfterSet = runtimeExports.CoreClrWasmDebugIsDebuggerConnected() | 0;
+    const connectionPrevOnClear = runtimeExports.CoreClrWasmDebugSetDebuggerConnected(0) | 0;
+    const connectionAfterClear = runtimeExports.CoreClrWasmDebugIsDebuggerConnected() | 0;
+
     // DAC-completeness probe: read 13 well-known DacGlobals slot addresses
     // from the runtime via CoreClrWasmDebugReadDacGlobalsProbe. With the
     // dactable migration + wasm-debuggee-stubs in place, ALL ~145
@@ -883,6 +898,13 @@ async function main() {
             funcMetadataToken: `0x${dbgIpcEventFuncToken.toString(16)}`,
             offset: `0x${dbgIpcEventOffset.toString(16)}`
         },
+        connectionStateGate: {
+            initial: connectionInitial,
+            prevOnSet: connectionPrevOnSet,
+            afterSet: connectionAfterSet,
+            prevOnClear: connectionPrevOnClear,
+            afterClear: connectionAfterClear
+        },
         dacGlobalsProbeResult,
         dacGlobalsAllNonZero,
         dacGlobals
@@ -1011,6 +1033,11 @@ async function main() {
         dbgIpcEventType !== 0x100 ||
         dbgIpcEventFuncToken !== 0x06000042 ||
         dbgIpcEventOffset !== 0x10 ||
+        connectionInitial !== 0 ||
+        connectionPrevOnSet !== 0 ||
+        connectionAfterSet !== 1 ||
+        connectionPrevOnClear !== 1 ||
+        connectionAfterClear !== 0 ||
         dacGlobalsProbeResult !== DacGlobalsProbeSlotCount ||
         !dacGlobalsAllNonZero) {
         fail("WASM DBI/DAC smoke test failed");

@@ -569,6 +569,19 @@ async function main() {
                 fail(`failed to connect DBI session to runtime: ${connectResult}`);
             }
 
+            // Phase 6 gate: the runtime must not patch interpreter opcodes
+            // unless a debugger is connected. The smoke is acting as the
+            // debugger here, so flip the connected flag on. Returns the
+            // previous value (0 = was disconnected) for sanity-check.
+            const prevConnected = runtimeExports.CoreClrWasmDebugSetDebuggerConnected(1);
+            if (prevConnected !== 0) {
+                fail(`expected CoreClrWasmDebugSetDebuggerConnected to return 0 (was disconnected), got ${prevConnected}`);
+            }
+            const isConnected = runtimeExports.CoreClrWasmDebugIsDebuggerConnected();
+            if (isConnected !== 1) {
+                fail(`expected CoreClrWasmDebugIsDebuggerConnected to return 1 after flip, got ${isConnected}`);
+            }
+
             const methodName = new TextEncoder().encode(BreakpointMethodName);
             const stack = debuggerInstance.exports.stackSave();
             const methodNameAddress = debuggerInstance.exports.stackAlloc(methodName.length);

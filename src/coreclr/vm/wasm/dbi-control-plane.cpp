@@ -122,6 +122,17 @@ int32_t* g_wasmDebugBreakpointAddress;
 int32_t g_wasmDebugBreakpointOriginalOpcode;
 bool g_wasmDebugBreakpointPatchActive;
 
+// Phase 6 connection-state gate. Mirrors Mono's
+// mono_wasm_set_is_debugger_attached (src/mono/mono/component/mini-wasm-debugger.c:38).
+// The runtime debug adapter MUST NOT arm breakpoints or fire to-pause
+// events when no debugger is connected — otherwise the runtime would
+// patch interpreter opcodes or invoke `debugger;` JS imports that go
+// nowhere, wasting work and (in the browser) being a no-op anyway when
+// no V8 inspector is attached. Set to true via
+// CoreClrWasmDebugSetDebuggerConnected once the host (browser proxy /
+// debug-adapter) completes its handshake; cleared on disconnect.
+bool g_wasmDebuggerConnected;
+
 void SetWasmDebugEvent(const char* event)
 {
     size_t eventLength = strlen(event);
@@ -496,9 +507,34 @@ extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetContinueCount()
     return g_wasmDebugContinueCount;
 }
 
+// Phase 6 connection-state gate. The runtime debug adapter exposes these
+// two exports so the host (browser proxy, debug-adapter, smoke harness)
+// can flip the connected flag once the actual debugger handshake
+// completes. Returns the previous value to make smoke assertions
+// simpler. Mirrors Mono mono_wasm_set_is_debugger_attached
+// (src/mono/mono/component/mini-wasm-debugger.c:38-373) and the
+// gate-check pattern used by mono_wasm_send_dbg_command.
+extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugSetDebuggerConnected(int32_t connected)
+{
+    int32_t previous = g_wasmDebuggerConnected ? 1 : 0;
+    g_wasmDebuggerConnected = (connected != 0);
+    return previous;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugIsDebuggerConnected()
+{
+    return g_wasmDebuggerConnected ? 1 : 0;
+}
+
 extern "C" void CoreClrWasmDebugMaybePatchInterpreterMethod(MethodDesc* methodDesc, uint32_t ilOffset, int32_t* ip)
 {
-    if (!g_wasmDebugBreakpointArmed || ip == nullptr || !WasmDebugBreakpointMatches(methodDesc, ilOffset))
+    // Phase 6 gate: never patch interpreter opcodes when the debugger is
+    // not connected. ArmWasmDebugBreakpoint*() can still set the armed
+    // flag (the protocol is "set a breakpoint, connect, run"), but the
+    // patch is only installed once a debugger is actually connected to
+    // receive the resulting fire. Same gating point Mono uses: see
+    // mini-wasm-debugger.c:88-91 (try_process_suspend returns FALSE).
+    if (!g_wasmDebuggerConnected || !g_wasmDebugBreakpointArmed || ip == nullptr || !WasmDebugBreakpointMatches(methodDesc, ilOffset))
     {
         return;
     }
