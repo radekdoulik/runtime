@@ -953,7 +953,13 @@ elseif(CLR_CMAKE_TARGET_ARCH_WASM)
         ${ARCH_SOURCES_DIR}/helpers.cpp
         exceptionhandling.cpp
         gcinfodecoder.cpp
-        ${ARCH_SOURCES_DIR}/dactable.cpp
+        # debug/ee/dactable.cpp provides g_dacTable + the Getg_dacTable
+        # sidecar export under its TARGET_WASM branch. We pull the shared
+        # file into the wasm VM library here because debug/ee/CMakeLists.txt
+        # skips add_subdirectory(wks) on wasm, so the file would otherwise
+        # not be compiled into any target on this platform.
+        ${CLR_DIR}/debug/ee/dactable.cpp
+        ${ARCH_SOURCES_DIR}/dbi-control-plane.cpp
     )
     set(VM_SOURCES_WKS_GEN
         ${ARCH_SOURCES_DIR}/callhelpers-interp-to-managed.cpp

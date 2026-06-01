@@ -61,9 +61,9 @@ and event payloads rather than full desktop IPC events
 
 | Record | Fixed size | Layout evidence |
 |---|---:|---|
-| `WasmDebugCommandRecord` | 80 bytes | `Magic`, `Kind`, `MethodToken`, `ILOffset`, and `MethodName[64]` are defined in `src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:242-249`; the size assertion is `src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:292`; the runtime mirror is `src/coreclr/vm/wasm/dactable.cpp:45-52` and `src/coreclr/vm/wasm/dactable.cpp:76`. |
-| `WasmDebugEventRecord` | 340 bytes | `Kind`, `MethodToken`, `ILOffset`, `HitCount`, `ContinueCount`, `MethodName[64]`, and `Message[256]` are defined in `src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:251-260`; the size assertion is `src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:293`; the runtime mirror is `src/coreclr/vm/wasm/dactable.cpp:54-63` and `src/coreclr/vm/wasm/dactable.cpp:77`. |
-| `WasmDebugFrameRecord` | 88 bytes | `MethodToken`, `ILOffset`, `InterpreterIP`, `FrameAddress`, `StackAddress`, `FirstStackSlotI32`, and `MethodName[64]` are defined in `src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:262-271`; the size assertion is `src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:294`; the runtime mirror is `src/coreclr/vm/wasm/dactable.cpp:65-74` and `src/coreclr/vm/wasm/dactable.cpp:78`. |
+| `WasmDebugCommandRecord` | 80 bytes | `Magic`, `Kind`, `MethodToken`, `ILOffset`, and `MethodName[64]` are defined in `src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:242-249`; the size assertion is `src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:292`; the runtime mirror is `src/coreclr/vm/wasm/dbi-control-plane.cpp:58-65` and `src/coreclr/vm/wasm/dbi-control-plane.cpp:89`. |
+| `WasmDebugEventRecord` | 340 bytes | `Kind`, `MethodToken`, `ILOffset`, `HitCount`, `ContinueCount`, `MethodName[64]`, and `Message[256]` are defined in `src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:251-260`; the size assertion is `src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:293`; the runtime mirror is `src/coreclr/vm/wasm/dbi-control-plane.cpp:67-76` and `src/coreclr/vm/wasm/dbi-control-plane.cpp:90`. |
+| `WasmDebugFrameRecord` | 88 bytes | `MethodToken`, `ILOffset`, `InterpreterIP`, `FrameAddress`, `StackAddress`, `FirstStackSlotI32`, and `MethodName[64]` are defined in `src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:262-271`; the size assertion is `src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:294`; the runtime mirror is `src/coreclr/vm/wasm/dbi-control-plane.cpp:78-86` and `src/coreclr/vm/wasm/dbi-control-plane.cpp:91`. |
 | `WasmDbiProcessState` | 40 bytes | Session/runtime/process/event counters are defined in `src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:273-285`; the size assertion is `src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:295`. |
 
 ### Host imports and protocol gate
@@ -277,7 +277,7 @@ Phase 4 should standardize `0`/success, `BufferTooSmall` (`-7`), and a new
 negative `QueueFull` added with the protocol bump. `send_ipc_to_runtime` must
 never block JS. The current byte limit is 256 bytes
 (`src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:43`), mirrored on the runtime
-side (`src/coreclr/vm/wasm/dactable.cpp:28`); raising it is a wire change.
+side (`src/coreclr/vm/wasm/dbi-control-plane.cpp:41`); raising it is a wire change.
 
 ### Migration from prototype records
 
@@ -285,7 +285,7 @@ The migration order should be:
 
 1. Add serializer/deserializer helpers for one event type: `DB_IPCE_BREAKPOINT`
    first, because the current HelloWorld smoke already proves the breakpoint
-   callback path end to end (`src/coreclr/vm/wasm/dactable.cpp:480-496`,
+   callback path end to end (`src/coreclr/vm/wasm/dbi-control-plane.cpp:446-500`,
    `src/coreclr/debug/wasm-dbi-dac/hello-breakpoint-smoke.js:600-638`).
 2. Send a serialized `DebuggerIPCEvent` for the breakpoint-hit round trip while
    leaving the existing text event and prototype record path available in the
@@ -535,7 +535,7 @@ mirror of the high-rate binary channel: the sidecar import asks the host for
 runtime memory (`src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:758-759`), and
 the host satisfies that request from the binary channel when it is remote. The
 runtime-side endpoint continues to receive serialized IPC bytes through
-`CoreClrWasmDebugReceiveCommand*`, not JSON (`src/coreclr/vm/wasm/dactable.cpp:297-358`).
+`CoreClrWasmDebugReceiveCommand*`, not JSON (`src/coreclr/vm/wasm/dbi-control-plane.cpp:287-345`).
 
 ## Connection-state gate
 
@@ -662,8 +662,8 @@ Phase 4 closes only when all gates pass:
 | Sidecar smoke targets | `src/coreclr/debug/wasm-dbi-dac/CMakeLists.txt:62-80` |
 | Smoke host command routing | `src/coreclr/debug/wasm-dbi-dac/smoke-test.js:296-326`, `src/coreclr/debug/wasm-dbi-dac/hello-breakpoint-smoke.js:430-455` |
 | HelloWorld event forwarding and validation | `src/coreclr/debug/wasm-dbi-dac/hello-breakpoint-smoke.js:495-553`, `src/coreclr/debug/wasm-dbi-dac/hello-breakpoint-smoke.js:600-638` |
-| Runtime prototype record mirrors and exports | `src/coreclr/vm/wasm/dactable.cpp:28-78`, `src/coreclr/vm/wasm/dactable.cpp:297-358` |
-| Runtime breakpoint callback path | `src/coreclr/vm/wasm/dactable.cpp:456-500` |
+| Runtime prototype record mirrors and exports | `src/coreclr/vm/wasm/dbi-control-plane.cpp:30-115`, `src/coreclr/vm/wasm/dbi-control-plane.cpp:282-345` |
+| Runtime breakpoint callback path | `src/coreclr/vm/wasm/dbi-control-plane.cpp:432-500` |
 | Corerun breakpoint JS import | `src/coreclr/hosts/corerun/wasm/libCorerun.js:37-43` |
 | cDAC descriptor export generation | `src/coreclr/vm/datadescriptor/CMakeLists.txt:15-19` |
 | cDAC little-endian/32-bit flags | `src/coreclr/debug/datadescriptor-shared/datadescriptor.cpp:312-345` |

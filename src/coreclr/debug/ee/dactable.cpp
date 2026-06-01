@@ -9,6 +9,59 @@
 //
 //*****************************************************************************
 
+#ifdef TARGET_WASM
+
+// On wasm the debug EE WKS subdir is not built (see CMakeLists.txt in this
+// directory). This branch is the single source of truth for the g_dacTable
+// symbol and its initializer on wasm. The sidecar (coreclr-dbi-dac.wasm)
+// fetches g_dacTable via the Getg_dacTable() export below to bootstrap its
+// DAC view of the runtime.
+//
+// Today only ThreadStore::s_pThreadStore is wired up; every other DacGlobals
+// slot stays zero. As each VM subsystem lands on wasm (GC, AppDomain, type
+// system, debugger EE, ...), its DacGlobals entries will be progressively
+// re-populated here.
+//
+// The DacGlobals struct itself keeps its full non-wasm layout (driven by the
+// shared x-macro headers under src/coreclr/inc/{dacvars,gfunc_list,vptr_list}.h)
+// to avoid forcing TARGET_WASM ifdefs into every DAC consumer.
+
+#include "common.h"
+#include "threads.h"
+
+#include <emscripten.h>
+
+DLLEXPORT DacGlobals g_dacTable;
+
+void DacGlobals::InitializeEntries()
+{
+    memset(this, 0, sizeof(*this));
+    ThreadStore__s_pThreadStore = PTR_TO_TADDR(&ThreadStore::s_pThreadStore);
+}
+
+void DacGlobals::Initialize()
+{
+    g_dacTable.InitializeEntries();
+}
+
+// Wasm-only sidecar export. The sidecar reads g_dacTable through this entry
+// point rather than touching the symbol directly because wasm modules cannot
+// dereference each other's memory. EMSCRIPTEN_KEEPALIVE prevents wasm-ld from
+// dropping the symbol during dead-code elimination.
+extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_dacTable()
+{
+    static bool s_initialized = false;
+    if (!s_initialized)
+    {
+        DacGlobals::Initialize();
+        s_initialized = true;
+    }
+
+    return &g_dacTable;
+}
+
+#else // !TARGET_WASM
+
 #include "stdafx.h"
 #include <daccess.h>
 
@@ -130,3 +183,5 @@ void DacGlobals::Initialize()
 }
 #endif
 #endif // DEBUGGER_SUPPORTED
+
+#endif // !TARGET_WASM

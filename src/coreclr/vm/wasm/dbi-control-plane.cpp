@@ -1,6 +1,21 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+// Wasm-only MVP debugger control plane.
+//
+// This file holds the prototype command/event protocol the wasm DBI/DAC
+// sidecar uses to interact with the runtime while the proper
+// DebuggerIPCEvent-based wire transport (Phase 4) is being designed. It is
+// intentionally minimal: a single breakpoint slot, command/event/frame
+// record marshalling, and interpreter integration hooks. None of this
+// belongs in the DAC table itself; it used to share src/coreclr/vm/wasm/
+// dactable.cpp purely as an accident of "this was the only wasm-only VM TU
+// at the time".
+//
+// The g_dacTable / DacGlobals::InitializeEntries / Getg_dacTable surface
+// now lives in the shared src/coreclr/debug/ee/dactable.cpp under its
+// TARGET_WASM branch, so this file no longer duplicates DAC-table logic.
+
 #include "common.h"
 #include "threads.h"
 #include "../../interpreter/intops.h"
@@ -9,8 +24,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-DLLEXPORT DacGlobals g_dacTable;
 
 extern "C" int32_t CoreClrWasmDebugOnBreakpointHit(uint32_t eventAddress, uint32_t eventLength);
 
@@ -264,29 +277,6 @@ void ContinueWasmDebugBreakpointFromCommand(const char* command)
         g_wasmDebugContinueRequested = true;
         g_wasmDebugContinueCount++;
     }
-}
-
-void DacGlobals::InitializeEntries()
-{
-    memset(this, 0, sizeof(*this));
-    ThreadStore__s_pThreadStore = PTR_TO_TADDR(&ThreadStore::s_pThreadStore);
-}
-
-void DacGlobals::Initialize()
-{
-    g_dacTable.InitializeEntries();
-}
-
-extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_dacTable()
-{
-    static bool s_initialized = false;
-    if (!s_initialized)
-    {
-        DacGlobals::Initialize();
-        s_initialized = true;
-    }
-
-    return &g_dacTable;
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE void* GetWasmDbiDacTestData()

@@ -151,12 +151,12 @@ magic, ABI version, protocol breaking counter, component mask, sidecar build ver
 The generated runtime contract descriptor is named `DotNetRuntimeContractDescriptor` by the CoreCLR
 data-descriptor CMake rule (`src/coreclr/vm/datadescriptor/CMakeLists.txt:15-19`).
 
-The current WASM runtime debug file defines `g_dacTable` and the PoC debug state globals, but it does not define
-a checked-in symbol named `g_wasmDebugContractDescriptorAddress` (`src/coreclr/vm/wasm/dactable.cpp:13-15`,
-`src/coreclr/vm/wasm/dactable.cpp:80-104`).
+The current WASM runtime debug files define `g_dacTable` and the PoC debug state globals, but they do not define
+a checked-in symbol named `g_wasmDebugContractDescriptorAddress` (`src/coreclr/debug/ee/dactable.cpp:34` for the wasm `g_dacTable`,
+`src/coreclr/vm/wasm/dbi-control-plane.cpp:101-115` for the breakpoint state globals).
 
-The WASM debug file exposes `GetWasmDbiDacTestData` and command receive entry points, not a descriptor-address
-export with the plan's name (`src/coreclr/vm/wasm/dactable.cpp:292-320`).
+The WASM debug control plane exposes `GetWasmDbiDacTestData` and command receive entry points, not a descriptor-address
+export with the plan's name (`src/coreclr/vm/wasm/dbi-control-plane.cpp:282-345`).
 
 The smoke host already requires `GetDotNetRuntimeContractDescriptor`, maps the symbol name
 `DotNetRuntimeContractDescriptor` to that function, and uses the resulting address for a direct target-memory
@@ -582,11 +582,11 @@ review? The IDL currently has no WASM member (`src/coreclr/inc/cordebug.idl:274-
 `ICorDebugMutableDataTarget` during Phase 3, or should it implement the interface with write methods returning
 `CORDBG_E_TARGET_READONLY`? The desktop connect path tolerates QI failure
 (`src/coreclr/debug/di/process.cpp:1635-1643`).
-- Does runtime-side `dactable.cpp` need to add an explicit
+- Does the wasm runtime need to add an explicit
 `g_wasmDebugContractDescriptorAddress` export, or is the existing `GetDotNetRuntimeContractDescriptor` export
-the stable source of the descriptor address? The current WASM debug file does not define the named
-`g_wasmDebugContractDescriptorAddress` symbol in the ranges read (`src/coreclr/vm/wasm/dactable.cpp:13-15`,
-`src/coreclr/vm/wasm/dactable.cpp:292-320`).
+the stable source of the descriptor address? The current WASM debug files do not define the named
+`g_wasmDebugContractDescriptorAddress` symbol in the ranges read (`src/coreclr/debug/ee/dactable.cpp:34` for the wasm `g_dacTable`,
+`src/coreclr/vm/wasm/dbi-control-plane.cpp:282-345` for the debug exports).
 - Should Phase 3 expose `OpenVirtualProcessImpl` directly from the sidecar
 product ABI, or wrap it in a sidecar-specific probe/product function that owns `CLR_DEBUGGING_VERSION`, `riid`,
 process release, and flags? The deprecated wrappers still exist (`src/coreclr/debug/di/process.cpp:158-223`).
@@ -680,9 +680,9 @@ destroy terminates the `ICorDebug` object and clears facade state
 | Session destroy | `src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:1779-1805` | Current teardown. |
 | Receive events | `src/coreclr/debug/wasm-dbi-dac/dbi_dac_wasm.cpp:1819-1868` | Current event receive overwrite path. |
 | Runtime descriptor rule | `src/coreclr/vm/datadescriptor/CMakeLists.txt:15-19` | Generates `DotNetRuntimeContractDescriptor`. |
-| WASM debug globals | `src/coreclr/vm/wasm/dactable.cpp:13-15` | `g_dacTable` and breakpoint callback declaration. |
-| WASM debug state | `src/coreclr/vm/wasm/dactable.cpp:80-104` | Current debug globals. |
-| WASM debug exports | `src/coreclr/vm/wasm/dactable.cpp:292-320` | Test-data and command receive exports. |
+| WASM debug globals | `src/coreclr/debug/ee/dactable.cpp:34`, `src/coreclr/vm/wasm/dbi-control-plane.cpp:28` | `g_dacTable` (under `TARGET_WASM` branch of shared dactable file) and `CoreClrWasmDebugOnBreakpointHit` callback declaration. |
+| WASM debug state | `src/coreclr/vm/wasm/dbi-control-plane.cpp:101-115` | Current debug globals. |
+| WASM debug exports | `src/coreclr/vm/wasm/dbi-control-plane.cpp:282-345` | Test-data and command receive exports. |
 | Smoke descriptor requirement | `src/coreclr/debug/wasm-dbi-dac/smoke-test.js:203-205` | Requires `GetDotNetRuntimeContractDescriptor`. |
 | Smoke symbol mapping | `src/coreclr/debug/wasm-dbi-dac/smoke-test.js:276-280` | Maps descriptor and DAC symbols. |
 | Smoke descriptor copy | `src/coreclr/debug/wasm-dbi-dac/smoke-test.js:473-474` | Uses descriptor address for target-memory copy. |
