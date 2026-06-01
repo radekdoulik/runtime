@@ -773,6 +773,29 @@ async function main() {
     // distinct name that cannot match any existing slot to avoid wiping
     // an unrelated bp that some future smoke section might have left.
     const multiBpClearedMissing = clearByName("ThisBreakpointNameDoesNotExist");
+
+    // Slot-exhaustion error path: fill every remaining slot, then
+    // verify the next set-breakpoint command returns -1 (was 0 before
+    // the code-review-driven fix made the text transport surface
+    // ArmWasmDebugBreakpoint's bool failure). Clean up after by
+    // clearing each filler. WasmDebugMaxBreakpoints is 16.
+    const slotCapacity = 16;
+    const remainingSlots = slotCapacity - (runtimeExports.CoreClrWasmDebugGetActiveBreakpointCount() | 0);
+    const fillerNames = [];
+    let fillerSendNonZero = 0;
+    for (let i = 0; i < remainingSlots; i++) {
+        const n = `Filler${i}`;
+        fillerNames.push(n);
+        const rc = sendCommand(`dbi-command:set-breakpoint:name=${n}`);
+        if (rc !== 0) fillerSendNonZero++;
+    }
+    const exhaustionOverflowRc = sendCommand("dbi-command:set-breakpoint:name=Overflow");
+    const exhaustionCountAtCap = runtimeExports.CoreClrWasmDebugGetActiveBreakpointCount() | 0;
+    let fillerClearedTotal = 0;
+    for (const n of fillerNames) {
+        fillerClearedTotal += clearByName(n);
+    }
+    const exhaustionCountAfterCleanup = runtimeExports.CoreClrWasmDebugGetActiveBreakpointCount() | 0;
     const multiBpProbe = {
         initialCount: multiBpInitialCount,
         sendA: multiBpSendA,
@@ -784,7 +807,14 @@ async function main() {
         clearedA: multiBpClearedA,
         clearedC: multiBpClearedC,
         countFinal: multiBpCountFinal,
-        clearedMissing: multiBpClearedMissing
+        clearedMissing: multiBpClearedMissing,
+        slotCapacity,
+        fillerCount: fillerNames.length,
+        fillerSendNonZero,
+        exhaustionOverflowRc,
+        exhaustionCountAtCap,
+        fillerClearedTotal,
+        exhaustionCountAfterCleanup
     };
 
     // Memory-growth resilience: deliberately grow both wasm linear memories
@@ -1106,7 +1136,12 @@ async function main() {
         multiBpClearedA !== 1 ||
         multiBpClearedC !== 1 ||
         multiBpCountFinal !== multiBpInitialCount ||
-        multiBpClearedMissing !== 0) {
+        multiBpClearedMissing !== 0 ||
+        fillerSendNonZero !== 0 ||
+        exhaustionOverflowRc !== -1 ||
+        exhaustionCountAtCap !== 16 ||
+        fillerClearedTotal !== remainingSlots ||
+        exhaustionCountAfterCleanup !== multiBpInitialCount) {
         fail("WASM DBI/DAC smoke test failed");
     }
 }

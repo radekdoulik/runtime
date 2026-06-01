@@ -365,7 +365,7 @@ uint32_t CountActiveWasmDebugBreakpoints()
     return count;
 }
 
-void ArmWasmDebugBreakpointFromCommand(const char* command)
+bool ArmWasmDebugBreakpointFromCommand(const char* command)
 {
     static constexpr char Prefix[] = "dbi-command:set-breakpoint";
     static constexpr char NamePrefix[] = ":name=";
@@ -373,7 +373,10 @@ void ArmWasmDebugBreakpointFromCommand(const char* command)
 
     if (strncmp(command, Prefix, sizeof(Prefix) - 1) != 0)
     {
-        return;
+        // Not a set-breakpoint command — treat as "did not arm, but
+        // not an error" so the text transport reports success for
+        // unrelated commands (continue, future commands, etc.).
+        return true;
     }
 
     const char* name = command + sizeof(Prefix) - 1;
@@ -393,12 +396,25 @@ void ArmWasmDebugBreakpointFromCommand(const char* command)
         name = "";
     }
 
-    ArmWasmDebugBreakpoint(methodToken, name);
+    return ArmWasmDebugBreakpoint(methodToken, name);
 }
 
 bool WasmDebugBreakpointSlotMatches(const WasmDebugBreakpointSlot& slot, MethodDesc* methodDesc, uint32_t ilOffset)
 {
     if (methodDesc == nullptr || ilOffset != 0 || !slot.Armed)
+    {
+        return false;
+    }
+
+    // A slot with neither a token nor a name is a degenerate "wildcard"
+    // that would match every interpreted method's first IL instruction;
+    // refuse to fire it. Such slots are still legal in the table (they
+    // can be allocated by the legacy text-command transport when the
+    // command lacks both qualifiers) but the interpreter hot path treats
+    // them as inert. The slot still counts toward
+    // CountActiveWasmDebugBreakpoints so the user sees it and can clear
+    // it via ClearWasmDebugBreakpointByName("") or by clearing every slot.
+    if (slot.MethodToken == 0 && slot.MethodName[0] == 0)
     {
         return false;
     }
@@ -410,9 +426,7 @@ bool WasmDebugBreakpointSlotMatches(const WasmDebugBreakpointSlot& slot, MethodD
         return false;
     }
 
-    if (slot.MethodToken == 0 &&
-        slot.MethodName[0] != 0 &&
-        strstr(methodName, slot.MethodName) == nullptr)
+    if (slot.MethodToken == 0 && strstr(methodName, slot.MethodName) == nullptr)
     {
         return false;
     }
@@ -516,7 +530,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReceiveCommand(const uin
     g_wasmDebugLastCommand[commandLength] = 0;
 
     ContinueWasmDebugBreakpointFromCommand(reinterpret_cast<const char*>(g_wasmDebugLastCommand));
-    ArmWasmDebugBreakpointFromCommand(reinterpret_cast<const char*>(g_wasmDebugLastCommand));
+    // Surface ArmWasmDebugBreakpoint's "all 16 slots full" failure to
+    // the text-transport caller. The CommandRecord path already does
+    // this; making both paths return -1 on slot exhaustion keeps the
+    // text protocol from silently dropping set-breakpoint commands.
+    if (!ArmWasmDebugBreakpointFromCommand(reinterpret_cast<const char*>(g_wasmDebugLastCommand)))
+    {
+        return -1;
+    }
 
     return 0;
 }
@@ -715,24 +736,40 @@ extern "C" void CoreClrWasmDebugMaybePatchInterpreterMethod(MethodDesc* methodDe
         return;
     }
 
-    // Phase 7 multi-bp: scan all armed slots, patch every one whose
-    // identity matches the method being prepared. Each slot stores its
-    // own original opcode so the per-slot restore in
-    // HandleInterpreterBreakpoint can roll back exactly what it saw.
-    // It's legal for multiple slots to match (e.g. two name patterns
-    // both matching the same method) — each gets independently patched
-    // at the same IP. The breakpoint-hit handler resolves the first
-    // matching armed slot for that IP and the others stay patch-active
-    // until cleared.
+    // Phase 7 multi-bp: scan all armed slots. Patch the IP once for
+    // the first matching un-patched slot; subsequent matching slots
+    // "ride along" by sharing the same PatchAddress + OriginalOpcode
+    // so the IP holds INTOP_BREAKPOINT exactly once. When the patch
+    // fires, HandleInterpreterBreakpoint identifies every PatchActive
+    // slot at this IP, bumps each one's HitCount, and clears each
+    // one's PatchActive — so cleanup via Clear* never tries to write
+    // a stale opcode back into the interpreter stream.
+    //
+    // Correctness invariant: every slot that is PatchActive at a given
+    // IP holds the *same* OriginalOpcode (captured BEFORE any patch is
+    // installed). The code below guarantees that by capturing *ip
+    // exactly once per call, before any write.
+    int32_t originalOpcode = 0;
+    bool patched = false;
     for (auto& slot : g_wasmDebugBreakpoints)
     {
-        if (!slot.PatchActive && WasmDebugBreakpointSlotMatches(slot, methodDesc, ilOffset))
+        if (slot.PatchActive)
         {
-            slot.PatchAddress = ip;
-            slot.OriginalOpcode = *ip;
-            slot.PatchActive = true;
-            *ip = INTOP_BREAKPOINT;
+            continue;
         }
+        if (!WasmDebugBreakpointSlotMatches(slot, methodDesc, ilOffset))
+        {
+            continue;
+        }
+        if (!patched)
+        {
+            originalOpcode = *ip;
+            *ip = INTOP_BREAKPOINT;
+            patched = true;
+        }
+        slot.PatchAddress = ip;
+        slot.OriginalOpcode = originalOpcode;
+        slot.PatchActive = true;
     }
 }
 
@@ -749,13 +786,15 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
         return false;
     }
 
-    // Phase 7 multi-bp: find the slot whose patch is at this IP.
-    // Single-threaded wasm guarantees at most one slot's patch can fire
-    // at a given IP at a given time (each Arm uses a free slot, so two
-    // armed slots never share the same PatchAddress unless they matched
-    // the same method+IL — handled below by firing the first match and
-    // leaving subsequent matches patch-active for future independent
-    // fires).
+    // Phase 7 multi-bp: find every slot whose patch is at this IP.
+    // MaybePatchInterpreterMethod guarantees all such slots share the
+    // same OriginalOpcode, so restoration is a single write. Bump
+    // every co-located slot's HitCount (matches user expectation that
+    // arming the same breakpoint N times causes N hit notifications
+    // per fire). g_wasmDebugLastFiredSlot points at the first match —
+    // event-record consumers that only want one identity per stop see
+    // the lowest slot index, which is also what the smoke harness
+    // asserts against.
     WasmDebugBreakpointSlot* firingSlot = nullptr;
     uint32_t firingSlotIndex = WasmDebugMaxBreakpoints;
     for (uint32_t i = 0; i < WasmDebugMaxBreakpoints; i++)
@@ -765,9 +804,12 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
             slot.PatchAddress == ip &&
             WasmDebugBreakpointSlotMatches(slot, methodDesc, ilOffset))
         {
-            firingSlot = &slot;
-            firingSlotIndex = i;
-            break;
+            if (firingSlot == nullptr)
+            {
+                firingSlot = &slot;
+                firingSlotIndex = i;
+            }
+            slot.HitCount++;
         }
     }
 
@@ -777,11 +819,36 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     }
 
     *originalOpcode = firingSlot->OriginalOpcode;
+
+    // Restore the patched opcode and clear PatchActive for every slot
+    // that was pointing at this IP — the INTOP_BREAKPOINT is gone, so
+    // leaving any slot PatchActive would be a stale lie that would
+    // cause a future Clear* call to write a wrong opcode back into the
+    // interpreter stream. Each slot remains Armed; the next interpreter
+    // entry into the matching method will re-patch via
+    // MaybePatchInterpreterMethod. We use the firing slot for the
+    // actual *ip write (via RestoreWasmDebugBreakpointPatchSlot) so the
+    // helper-defined invariant "patched IP holds OriginalOpcode after
+    // restore" lives in one place; the loop below only clears state on
+    // the other piggy-backing slots since their PatchAddress already
+    // points at the same IP we just rewrote.
     RestoreWasmDebugBreakpointPatchSlot(*firingSlot);
+    for (auto& slot : g_wasmDebugBreakpoints)
+    {
+        if (&slot == firingSlot)
+        {
+            continue;
+        }
+        if (slot.PatchActive && slot.PatchAddress == ip)
+        {
+            slot.PatchAddress = nullptr;
+            slot.OriginalOpcode = 0;
+            slot.PatchActive = false;
+        }
+    }
 
     g_wasmDebugBreakpointStopped = true;
     g_wasmDebugContinueRequested = false;
-    firingSlot->HitCount++;
     g_wasmDebugLastFiredSlot = firingSlotIndex;
 
     LPCUTF8 methodName = methodDesc->GetName();
