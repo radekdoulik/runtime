@@ -2387,12 +2387,20 @@ int32_t coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints(uint32_t bufferAddress, u
         return E_FAIL;
     }
 
-    if (bytesWrittenAddress == 0 || bufferAddress == 0)
+    if (bytesWrittenAddress == 0)
     {
         return InvalidArgument;
     }
 
-    if (bufferLength < WasmDebugBreakpointEnumerationSize)
+    uint32_t written = WasmDebugBreakpointEnumerationSize;
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &written, sizeof(written));
+
+    if (bufferAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    if (bufferLength < written)
     {
         return BufferTooSmall;
     }
@@ -2445,8 +2453,6 @@ int32_t coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints(uint32_t bufferAddress, u
     memcpy(out, header, sizeof(header));
     memcpy(out + sizeof(header), slots, sizeof(slots));
 
-    uint32_t written = WasmDebugBreakpointEnumerationSize;
-    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &written, sizeof(written));
     return S_OK;
 }
 

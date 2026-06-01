@@ -504,6 +504,7 @@ async function main() {
     // to the host callback. All four cases should fail-fast inside the
     // sidecar without ever touching JS.
     const InvalidArgument = -1;
+    const BufferTooSmall = -7;
     const InvalidReadRange = -8;
     const copyZeroBytesResult = debuggerModule._coreclr_wasm_dbi_dac_copy_from_target(0, 0, 0) | 0;
     const copyNullDebuggerDestResult = debuggerModule._coreclr_wasm_dbi_dac_copy_from_target(runtimeDescriptorAddress, 0, 8) | 0;
@@ -800,6 +801,14 @@ async function main() {
         ExpectedVersionBlobMagic, ExpectedAbiVersion, ExpectedProtocolBreakingChangeCounter) | 0;
     const multiBpSessionCreateResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_session_create() | 0;
     const multiBpSessionConnectResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_connect_runtime(1) | 0;
+    const multiBpEnumerateSmallResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints(
+        multiBpEnumerationAddress,
+        multiBpEnumerationLength - 1,
+        multiBpEnumerationBytesWrittenAddress) | 0;
+    const multiBpEnumerateSmallBytesWritten = new DataView(
+        getDebuggerHeap().buffer,
+        multiBpEnumerationBytesWrittenAddress,
+        4).getUint32(0, true);
     const multiBpEnumerateResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints(
         multiBpEnumerationAddress,
         multiBpEnumerationLength,
@@ -887,6 +896,8 @@ async function main() {
         slotSize: multiBpSlotSize,
         slotCapacityFromRuntime: multiBpSlotCapacity,
         enumerateLength: multiBpEnumerationLength,
+        enumerateSmallResult: multiBpEnumerateSmallResult,
+        enumerateSmallBytesWritten: multiBpEnumerateSmallBytesWritten,
         enumerateResult: multiBpEnumerateResult,
         enumerateBytesWritten: multiBpEnumerateBytesWritten,
         enumerateCapacity: multiBpEnumeration.capacity,
@@ -1237,6 +1248,8 @@ async function main() {
         multiBpAckResult !== 0 ||
         multiBpSessionCreateResult !== 0 ||
         multiBpSessionConnectResult !== 0 ||
+        multiBpEnumerateSmallResult !== BufferTooSmall ||
+        multiBpEnumerateSmallBytesWritten !== multiBpEnumerationLength ||
         multiBpEnumerateResult !== 0 ||
         multiBpEnumerateBytesWritten !== multiBpEnumerationLength ||
         multiBpEnumeration.capacity !== 16 ||
