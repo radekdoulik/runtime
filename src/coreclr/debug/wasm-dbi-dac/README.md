@@ -161,8 +161,8 @@ export synchronously.
 **Required semantics**:
 
 - `requestBytesLength` must equal 32 (`sizeof(WasmDbgIpcEventStepIntoRequest)`).
-- The payload magic is `'IPCS'` (`0x53435049`) and type is
-  `DB_IPCE_STEP_INTO` (`0x0102`).
+- The payload magic is `'IPCS'` (`0x53435049`) and type is the
+  wasm-private StepInto request value `0x0102`.
 - Returns `0` on success, non-zero on validation or transport failure.
 
 ## Sidecar exports (sidecar → JS)
@@ -211,7 +211,7 @@ acknowledged handshake returns `HrIncompatibleProtocol`.
 | `coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_token`  | Send `SetBreakpointByToken` command record to runtime. |
 | `coreclr_wasm_dbi_dac_dbi_continue`                 | Send `Continue` command record; invalidates the page cache. |
 | `coreclr_wasm_dbi_dac_dbi_send_ipc_continue_request` | Send structured `DB_IPCE_CONTINUE` request; invalidates the page cache on success. |
-| `coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request` | Send structured `DB_IPCE_STEP_INTO` request; invalidates the page cache on success. |
+| `coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request` | Send structured wasm-private StepInto request; invalidates the page cache on success. |
 | `coreclr_wasm_dbi_dac_dbi_poll_event`               | Drain queued runtime event text into the supplied buffer. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints`    | Drain the runtime breakpoint slot table (`8 + 16 * 88` bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_locals`         | Drain the stopped-frame locals record (`16 + 32 * 48` bytes) via DAC `ReadVirtual`. |

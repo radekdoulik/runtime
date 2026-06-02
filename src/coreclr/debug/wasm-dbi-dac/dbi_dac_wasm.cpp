@@ -385,7 +385,7 @@ constexpr uint32_t WasmDbgIpcEventTypeBreakpoint = 0x0100;       // DB_IPCE_BREA
 constexpr uint32_t WasmDbgIpcEventContinueRequestMagic = 0x43435049; // 'IPCC' little-endian
 constexpr uint32_t WasmDbgIpcEventTypeContinueRequest = 0x0201;      // DB_IPCE_CONTINUE
 constexpr uint32_t WasmDbgIpcEventStepIntoRequestMagic = 0x53435049; // 'IPCS' little-endian
-constexpr uint32_t WasmDbgIpcEventTypeStepIntoRequest = 0x0102;      // DB_IPCE_STEP_INTO
+constexpr uint32_t WasmDbgIpcEventTypeStepIntoRequest = 0x0102;      // wasm-private StepInto request
 constexpr uint32_t WasmDbgIpcEventFlagReplyRequired = 0x1;
 constexpr uint32_t WasmDbgIpcEventFlagAsyncSend = 0x2;
 

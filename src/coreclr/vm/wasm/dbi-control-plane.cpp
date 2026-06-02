@@ -222,6 +222,8 @@ constexpr uint32_t WasmDbgIpcEventTypeBreakpoint = 0x0100;
 constexpr uint32_t WasmDbgIpcEventContinueRequestMagic = 0x43435049;
 constexpr uint32_t WasmDbgIpcEventTypeContinueRequest = 0x0201;
 constexpr uint32_t WasmDbgIpcEventStepIntoRequestMagic = 0x53435049;
+// Wasm-private request type carried under the IPCS magic; this is not a
+// canonical DebuggerIPCEventType value.
 constexpr uint32_t WasmDbgIpcEventTypeStepIntoRequest = 0x0102;
 
 WasmDbiDacTestData g_wasmDbiDacTestData =
@@ -1317,6 +1319,7 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     WasmDebugBreakpointSlot* firingSlot = nullptr;
     uint32_t firingSlotIndex = WasmDebugMaxBreakpoints;
     uint32_t effectiveILOffset = ilOffset;
+    bool firedOneShot = false;
     TryGetWasmDebugInterpreterIPOffset(methodDesc, ip, &effectiveILOffset);
     for (uint32_t i = 0; i < WasmDebugMaxBreakpoints; i++)
     {
@@ -1333,6 +1336,7 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
             slot.HitCount++;
             if (slot.IsOneShot)
             {
+                firedOneShot = true;
                 slot.Armed = false;
                 slot.IsOneShot = false;
                 slot.MethodName[0] = 0;
@@ -1372,6 +1376,22 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
             slot.PatchAddress = nullptr;
             slot.OriginalOpcode = 0;
             slot.PatchActive = false;
+        }
+    }
+
+    if (firedOneShot)
+    {
+        for (auto& slot : g_wasmDebugBreakpoints)
+        {
+            if (slot.IsOneShot)
+            {
+                RestoreWasmDebugBreakpointPatchSlot(slot);
+                slot.Armed = false;
+                slot.IsOneShot = false;
+                slot.MethodName[0] = 0;
+                slot.MethodToken = 0;
+                slot.HitCount = 0;
+            }
         }
     }
 
@@ -1416,7 +1436,10 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     g_wasmDebugLastIpcEvent.Flags = 0;
     g_wasmDebugLastIpcEvent.BreakpointToken = g_wasmDebugBreakpointTokenCounter;
     g_wasmDebugLastIpcEvent.FuncMetadataToken = methodToken;
-    g_wasmDebugLastIpcEvent.IsIL = 1;
+    // Regular named/token breakpoints keep the existing IsIL=1 contract.
+    // Slice-6 one-shot step landings report the interpreter slot offset with
+    // IsIL=0 until a future slice wires native/interpreter-to-IL mapping here.
+    g_wasmDebugLastIpcEvent.IsIL = firedOneShot ? 0 : 1;
     g_wasmDebugLastIpcEvent.Offset = effectiveILOffset;
     g_wasmDebugLastIpcEventValid = 1;
 

@@ -886,7 +886,9 @@ async function main() {
             callbackEvent,
             breakpointEventCount: breakpointEvents.length,
             firstOffset: firstEvent?.ipc?.offset,
+            firstIsIL: firstEvent?.ipc?.isIL,
             stepOffset: stepEvent?.ipc?.offset,
+            stepIsIL: stepEvent?.ipc?.isIL,
             firstToken: firstEvent?.ipc?.breakpointToken !== undefined ? `0x${firstEvent.ipc.breakpointToken.toString(16)}` : null,
             stepToken: stepEvent?.ipc?.breakpointToken !== undefined ? `0x${stepEvent.ipc.breakpointToken.toString(16)}` : null,
             stepRequestDuringCallbackResult,
@@ -911,7 +913,7 @@ async function main() {
             firstEvent?.ipc?.type !== 0x100 ||
             stepEvent?.ipc?.type !== 0x100 ||
             firstEvent?.ipc?.isIL !== 1 ||
-            stepEvent?.ipc?.isIL !== 1 ||
+            stepEvent?.ipc?.isIL !== 0 ||
             firstEvent?.ipc?.offset !== 0 ||
             stepEvent?.ipc?.offset <= firstEvent?.ipc?.offset ||
             firstEvent?.ipc?.breakpointToken === 0n ||
