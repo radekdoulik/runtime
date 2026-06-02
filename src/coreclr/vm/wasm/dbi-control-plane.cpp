@@ -956,16 +956,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugSetDebuggerConnected(int
 
     int32_t previous = g_wasmDebuggerConnected ? 1 : 0;
     g_wasmDebuggerConnected = (connected != 0);
-    if (g_wasmDebuggerConnected)
-    {
-        g_CORDebuggerControlFlags |= DBCF_ATTACHED;
-        g_CORDebuggerControlFlags &= ~DBCF_PENDING_ATTACH;
-    }
-    else
-    {
-        g_CORDebuggerControlFlags &= ~(DBCF_ATTACHED | DBCF_PENDING_ATTACH);
-    }
     return previous;
+}
+
+extern "C" bool CoreClrWasmDebugIsDebuggerConnectedForHooks()
+{
+    LIMITED_METHOD_CONTRACT;
+    return g_wasmDebuggerConnected;
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugIsDebuggerConnected()

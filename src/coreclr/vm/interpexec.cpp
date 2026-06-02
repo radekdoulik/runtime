@@ -25,6 +25,7 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     uintptr_t frameAddress,
     uintptr_t stackAddress,
     int32_t* originalOpcode);
+extern "C" bool CoreClrWasmDebugIsDebuggerConnectedForHooks();
 #endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
 
 struct InterpDispatchCacheEntry
@@ -1464,7 +1465,12 @@ SWITCH_OPCODE:
                 }
                 case INTOP_DEBUG_METHOD_ENTER:
                 {
-                    if (CORDebuggerAttached() && g_pDebugInterface != NULL && g_pDebugInterface->IsMethodEnterEnabled())
+#if defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
+                    bool debuggerAttachedForMethodEnter = CoreClrWasmDebugIsDebuggerConnectedForHooks();
+#else
+                    bool debuggerAttachedForMethodEnter = CORDebuggerAttached();
+#endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
+                    if (debuggerAttachedForMethodEnter && g_pDebugInterface != NULL && g_pDebugInterface->IsMethodEnterEnabled())
                     {
                         // ip[1] holds the native offset of the first INTOP_DEBUG_SEQ_POINT,
                         // or -1 if none. This is patched by the compiler during code emission.
