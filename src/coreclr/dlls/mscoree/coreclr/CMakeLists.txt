@@ -59,6 +59,13 @@ if (NOT CLR_CMAKE_HOST_ARCH_WASM)
     set(LIB_INTEROP interop)
 endif(NOT CLR_CMAKE_HOST_ARCH_WASM)
 
+if (CLR_CMAKE_HOST_ARCH_WASM)
+    # Path A-lite slice 1: wasm gets a slim sibling of cordbee_wks.
+    # See src/coreclr/debug/ee/wks_wasm_lite/CMakeLists.txt for the
+    # set of debug-EE files that have been brought online.
+    set(LIB_CORDBEE cordbee_wks_wasm_lite)
+endif(CLR_CMAKE_HOST_ARCH_WASM)
+
 if (CLR_CMAKE_HOST_UNIX AND NOT CLR_CMAKE_TARGET_ARCH_WASM)
     set(LIB_UNWINDER unwinder_wks)
 endif (CLR_CMAKE_HOST_UNIX AND NOT CLR_CMAKE_TARGET_ARCH_WASM)

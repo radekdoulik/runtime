@@ -70,6 +70,11 @@ endif (CLR_CMAKE_TARGET_WIN32)
 set(CORDBEE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_subdirectory(dac)
-if (NOT CLR_CMAKE_TARGET_ARCH_WASM)
+if (CLR_CMAKE_TARGET_ARCH_WASM)
+  # Path A-lite: a wasm-only sibling of debug/ee/wks. See
+  # wks_wasm_lite/CMakeLists.txt for the rationale and the running list
+  # of which wks files have been brought online so far.
+  add_subdirectory(wks_wasm_lite)
+else()
   add_subdirectory(wks)
 endif()
