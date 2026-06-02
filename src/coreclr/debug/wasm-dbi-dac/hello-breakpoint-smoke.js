@@ -18,7 +18,7 @@ const CommandRecordSize = 80;
 // point will run (CORDBG_E_INCOMPATIBLE_PROTOCOL otherwise).
 const ExpectedVersionBlobMagic = 0x42564457; // 'WDVB' little-endian
 const ExpectedAbiVersion = 1;
-const ExpectedProtocolBreakingChangeCounter = 2;
+const ExpectedProtocolBreakingChangeCounter = 3;
 
 function fail(message) {
     throw new Error(message);
@@ -124,6 +124,15 @@ async function loadDebugger(debuggerJsPath, sendToRuntime) {
                 },
                 send_ipc_to_runtime(messageAddress, messageLength) {
                     return sendToRuntime(messageAddress >>> 0, messageLength >>> 0);
+                },
+                submit_continue_request(requestBytesAddress, requestBytesLength) {
+                    if (typeof globalThis.CoreClrWasmDebugSubmitContinueRequest !== "function") {
+                        return -1;
+                    }
+
+                    return globalThis.CoreClrWasmDebugSubmitContinueRequest(
+                        requestBytesAddress >>> 0,
+                        requestBytesLength >>> 0);
                 }
             };
 
@@ -561,6 +570,23 @@ async function main() {
                 writeUint64(debuggerHeap, addressOutAddress, 1);
                 return 0;
             };
+            globalThis.CoreClrWasmDebugSubmitContinueRequest = (requestBytesAddress, requestBytesLength) => {
+                const debuggerHeap = getDebuggerHeap();
+                if (requestBytesAddress + requestBytesLength > debuggerHeap.length ||
+                    typeof runtimeExports.CoreClrWasmDebugSubmitContinueRequest !== "function") {
+                    return -1;
+                }
+
+                const requestBytes = debuggerHeap.slice(requestBytesAddress, requestBytesAddress + requestBytesLength);
+                const savedRuntimeStack = runtimeExports.stackSave();
+                try {
+                    const runtimeRequestAddress = runtimeExports.stackAlloc(requestBytesLength);
+                    getRuntimeHeap().set(requestBytes, runtimeRequestAddress);
+                    return runtimeExports.CoreClrWasmDebugSubmitContinueRequest(runtimeRequestAddress, requestBytesLength) | 0;
+                } finally {
+                    runtimeExports.stackRestore(savedRuntimeStack);
+                }
+            };
             globalThis.coreClrDebugFireEventToPause = (eventAddress, eventLength) => {
                 fireEventToPauseCount++;
                 fireEventToPauseLastEvent = readAscii(getRuntimeHeap(), eventAddress >>> 0, eventLength >>> 0);
@@ -666,7 +692,10 @@ async function main() {
                         ipcEventDuringCallback = { readBytes: ipcReadBytes, magic: 0, type: 0, funcMetadataToken: 0, breakpointToken: 0n, isIL: 0, offset: 0, size: ipcSize };
                     }
                     runtimeExports.stackRestore(ipcStack);
-                    continueDuringCallbackResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_continue();
+                    const continueToken = dbiIpcEventDuringCallback.payload.breakpointToken;
+                    continueDuringCallbackResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_send_ipc_continue_request(
+                        Number(continueToken & 0xffffffffn),
+                        Number(continueToken >> 32n));
                     sawBreakpointBeforeContinue = true;
                 }
 
@@ -818,6 +847,7 @@ async function main() {
         delete globalThis.CoreClrWasmDebugGetTargetModuleBase;
         delete globalThis.CoreClrWasmDebugGetSymbolAddress;
         delete globalThis.CoreClrWasmDebugReadTargetMemory;
+        delete globalThis.CoreClrWasmDebugSubmitContinueRequest;
     }
 }
 

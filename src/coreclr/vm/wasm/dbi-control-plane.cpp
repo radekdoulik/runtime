@@ -146,6 +146,17 @@ struct WasmDbgIpcEventBreakpointRuntime
     uint64_t CodeStartAddress;
 };
 
+struct WasmDbgIpcEventContinueRequest
+{
+    uint32_t Magic;
+    uint32_t Type;
+    uint32_t ProcessId;
+    uint32_t ThreadId;
+    uint64_t BreakpointToken;
+    uint32_t Flags;
+    uint32_t Reserved0;
+};
+
 struct WasmDebugFrameRecord
 {
     uint32_t MethodToken;
@@ -162,9 +173,13 @@ static_assert(sizeof(WasmDebugEventRecord) == 340);
 static_assert(sizeof(WasmDebugFrameRecord) == 88);
 static_assert(sizeof(WasmDbgIpcEventBreakpointRuntime) == 96,
               "WasmDbgIpcEventBreakpointRuntime must mirror the sidecar's WasmDbgIpcEventBreakpoint byte-for-byte");
+static_assert(sizeof(WasmDbgIpcEventContinueRequest) == 32,
+              "WasmDbgIpcEventContinueRequest must mirror the sidecar's byte-for-byte");
 
 constexpr uint32_t WasmDbgIpcEventBreakpointMagic = 0x42435049;
 constexpr uint32_t WasmDbgIpcEventTypeBreakpoint = 0x0100;
+constexpr uint32_t WasmDbgIpcEventContinueRequestMagic = 0x43435049;
+constexpr uint32_t WasmDbgIpcEventTypeContinueRequest = 0x0101;
 
 WasmDbiDacTestData g_wasmDbiDacTestData =
 {
@@ -501,6 +516,15 @@ bool WasmDebugBreakpointSlotMatches(const WasmDebugBreakpointSlot& slot, MethodD
     return true;
 }
 
+void RequestWasmDebugContinue()
+{
+    if (g_wasmDebugBreakpointStopped)
+    {
+        g_wasmDebugContinueRequested = true;
+        g_wasmDebugContinueCount++;
+    }
+}
+
 void ContinueWasmDebugBreakpointFromCommand(const char* command)
 {
     static constexpr char ContinueCommand[] = "dbi-command:continue";
@@ -509,11 +533,7 @@ void ContinueWasmDebugBreakpointFromCommand(const char* command)
         return;
     }
 
-    if (g_wasmDebugBreakpointStopped)
-    {
-        g_wasmDebugContinueRequested = true;
-        g_wasmDebugContinueCount++;
-    }
+    RequestWasmDebugContinue();
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE void* GetWasmDbiDacTestData()
@@ -673,16 +693,31 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReceiveCommandRecord(con
             return ArmWasmDebugBreakpoint(record.MethodToken, "") ? 0 : -1;
 
         case WasmDebugCommandKind::Continue:
-            if (g_wasmDebugBreakpointStopped)
-            {
-                g_wasmDebugContinueRequested = true;
-                g_wasmDebugContinueCount++;
-            }
+            RequestWasmDebugContinue();
             return 0;
 
         default:
             return -1;
     }
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugSubmitContinueRequest(const uint8_t* requestBytes, uint32_t requestBytesLength)
+{
+    if (requestBytes == nullptr || requestBytesLength != sizeof(WasmDbgIpcEventContinueRequest))
+    {
+        return -1;
+    }
+
+    WasmDbgIpcEventContinueRequest request;
+    memcpy(&request, requestBytes, sizeof(request));
+    if (request.Magic != WasmDbgIpcEventContinueRequestMagic ||
+        request.Type != WasmDbgIpcEventTypeContinueRequest)
+    {
+        return -1;
+    }
+
+    RequestWasmDebugContinue();
+    return 0;
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetLastCommandLength()

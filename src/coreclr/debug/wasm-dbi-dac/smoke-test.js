@@ -11,7 +11,7 @@ const ExpectedAbiVersion = 1;
 const ExpectedComponentMask = 0xf;
 const ExpectedVersionBlobMagic = 0x42564457;
 const ExpectedVersionBlobSize = 32;
-const ExpectedProtocolBreakingChangeCounter = 2;
+const ExpectedProtocolBreakingChangeCounter = 3;
 const HrIncompatibleProtocol = 0x8013134b | 0;
 const ContractDescriptorMagic = 0x0043414443434e44n;
 const TestDataMagic = 0x43445744;
@@ -360,6 +360,25 @@ async function main() {
         const result = debuggerModule._coreclr_wasm_dbi_dac_receive_runtime_event(eventAddress, event.length);
         debuggerExports.stackRestore(savedStack);
         return result;
+    };
+    hostImports.submit_continue_request = (requestBytesAddressArg, requestBytesLengthArg) => {
+        const requestBytesAddress = requestBytesAddressArg >>> 0;
+        const requestBytesLength = requestBytesLengthArg >>> 0;
+        const debuggerHeapForRead = getDebuggerHeap();
+        if (requestBytesAddress + requestBytesLength > debuggerHeapForRead.length ||
+            typeof runtimeExports.CoreClrWasmDebugSubmitContinueRequest !== "function") {
+            return -1;
+        }
+
+        const requestBytes = debuggerHeapForRead.slice(requestBytesAddress, requestBytesAddress + requestBytesLength);
+        const savedRuntimeStack = runtime.exports.stackSave();
+        try {
+            const runtimeRequestAddress = runtime.exports.stackAlloc(requestBytesLength);
+            getRuntimeHeap().set(requestBytes, runtimeRequestAddress);
+            return runtimeExports.CoreClrWasmDebugSubmitContinueRequest(runtimeRequestAddress, requestBytesLength) | 0;
+        } finally {
+            runtime.exports.stackRestore(savedRuntimeStack);
+        }
     };
 
     const debuggerInstance = await loadDebugger(debuggerJsPath, imports => {

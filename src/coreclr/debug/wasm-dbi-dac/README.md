@@ -61,6 +61,7 @@ sidecar declares them in `dbi_dac_wasm.cpp` near line 740 with
 | `get_symbol_address`              | `int32_t (uint32_t baseAddress, uint32_t symbolNameAddress, uint32_t symbolNameLength, uint32_t outAddress)` | DAC bootstrap    |
 | `get_target_module_base`          | `int32_t (uint32_t imageNameAddress, uint32_t imageNameCharCount, uint32_t outAddress)` | DAC bootstrap    |
 | `send_ipc_to_runtime`             | `int32_t (uint32_t messageAddress, uint32_t messageLength)`                          | DBI session/breakpoint flow |
+| `submit_continue_request`         | `int32_t (uint32_t requestBytesAddress, uint32_t requestBytesLength)`                 | Structured DBI continue flow |
 
 ### `read_target_memory(targetAddress, debuggerAddress, byteCount)`
 
@@ -132,6 +133,22 @@ export, then synchronously copies any reply back via
 - `messageLength` of `0` or > 256 is invalid.
 - Returns `0` on success, non-zero on transport failure.
 
+### `submit_continue_request(requestBytesAddress, requestBytesLength)`
+
+Deliver a 32-byte `WasmDbgIpcEventContinueRequest` payload from the
+sidecar to the runtime module's
+`CoreClrWasmDebugSubmitContinueRequest` export. The host pulls
+`requestBytesLength` bytes starting at `requestBytesAddress` in the
+**sidecar** memory, stages them in runtime memory, and calls the runtime
+export synchronously.
+
+**Required semantics**:
+
+- `requestBytesLength` must equal 32 (`sizeof(WasmDbgIpcEventContinueRequest)`).
+- The payload magic is `'IPCC'` (`0x43435049`) and type is
+  `DB_IPCE_CONTINUE` (`0x0101`).
+- Returns `0` on success, non-zero on validation or transport failure.
+
 ## Sidecar exports (sidecar → JS)
 
 Exports group into seven families. All are visible in the `tests`
@@ -177,6 +194,7 @@ acknowledged handshake returns `HrIncompatibleProtocol`.
 | `coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_name`   | Send `SetBreakpointByName` command record to runtime.  |
 | `coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_token`  | Send `SetBreakpointByToken` command record to runtime. |
 | `coreclr_wasm_dbi_dac_dbi_continue`                 | Send `Continue` command record; invalidates the page cache. |
+| `coreclr_wasm_dbi_dac_dbi_send_ipc_continue_request` | Send structured `DB_IPCE_CONTINUE` request; invalidates the page cache on success. |
 | `coreclr_wasm_dbi_dac_dbi_poll_event`               | Drain queued runtime event text into the supplied buffer. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints`    | Drain the runtime breakpoint slot table (`8 + 16 * 88` bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_poll_event_record`        | Drain queued runtime event record (`WasmDebugEventRecord`, 340 bytes). |
@@ -281,7 +299,7 @@ legacy `ICLRDataTarget` / `ICLRRuntimeLocator` interfaces. Filling out
 A well-behaved host follows this sequence at session start:
 
 1. Instantiate `coreclr-dbi-dac.wasm` (or `-tests.wasm`) and wire all
-   four host imports.
+   five host imports.
 2. Call `get_abi_version` and `get_component_mask` to detect a
    completely unknown sidecar build before doing anything else.
 3. Call `get_version_blob(out, sizeof(out), &written)` and validate
@@ -291,8 +309,9 @@ A well-behaved host follows this sequence at session start:
 5. Call `dbi_session_create()`.
 6. Call `dbi_connect_runtime(runtimeBase)`; this invalidates the page
    cache so the next reads come from runtime memory.
-7. Issue breakpoints, polls, and continues as needed; each `continue`
-   call invalidates the page cache.
+7. Issue breakpoints, polls, and continues as needed; each legacy
+   `continue` call and each successful structured continue request
+   invalidates the page cache.
 8. At shutdown: `dbi_disconnect_runtime` (invalidates cache) then
    `dbi_session_destroy`. The session is single-use today.
 
