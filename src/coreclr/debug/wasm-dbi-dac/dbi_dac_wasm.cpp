@@ -76,7 +76,8 @@ constexpr uint32_t WasmDbiDacVersionBlobMagic = 0x42564457;
 //   2 - add dbi_enumerate_breakpoints sidecar export + slot-table payload.
 //   3 - add structured DB_IPCE_CONTINUE request import/export path.
 //   4 - add dbi_enumerate_locals sidecar export + locals-record payload.
-constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 4;
+//   5 - add structured DB_IPCE_STEP_INTO request import/export path.
+constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 5;
 
 // Sidecar build version - encoded VS_FIXEDFILEINFO-style as two 32-bit
 // words. Reserved for future use; today's PoC sidecar reports 0/0 so
@@ -255,8 +256,9 @@ struct WasmDebugCommandRecord
 struct WasmDebugBreakpointSlotMirror
 {
     uint8_t Armed;
+    uint8_t IsOneShot;
     char MethodName[64];
-    uint8_t Pad0[3];
+    uint8_t Pad0[2];
     uint32_t MethodToken;
     uint32_t PatchAddress;
     int32_t OriginalOpcode;
@@ -367,10 +369,23 @@ struct WasmDbgIpcEventContinueRequest
     uint32_t Reserved0;             // pad for 8-byte alignment of future fields
 };
 
+struct WasmDbgIpcEventStepIntoRequest
+{
+    uint32_t Magic;
+    uint32_t Type;
+    uint32_t ProcessId;
+    uint32_t ThreadId;
+    uint64_t BreakpointToken;
+    uint32_t Flags;
+    uint32_t Reserved0;             // pad for 8-byte alignment of future fields
+};
+
 constexpr uint32_t WasmDbgIpcEventBreakpointMagic = 0x42435049;  // 'IPCB' little-endian
 constexpr uint32_t WasmDbgIpcEventTypeBreakpoint = 0x0100;       // DB_IPCE_BREAKPOINT
 constexpr uint32_t WasmDbgIpcEventContinueRequestMagic = 0x43435049; // 'IPCC' little-endian
 constexpr uint32_t WasmDbgIpcEventTypeContinueRequest = 0x0201;      // DB_IPCE_CONTINUE
+constexpr uint32_t WasmDbgIpcEventStepIntoRequestMagic = 0x53435049; // 'IPCS' little-endian
+constexpr uint32_t WasmDbgIpcEventTypeStepIntoRequest = 0x0102;      // DB_IPCE_STEP_INTO
 constexpr uint32_t WasmDbgIpcEventFlagReplyRequired = 0x1;
 constexpr uint32_t WasmDbgIpcEventFlagAsyncSend = 0x2;
 
@@ -406,6 +421,7 @@ static_assert(sizeof(WasmDebugLocalRecord) == 48);
 static_assert(sizeof(WasmDebugLocalsRecord) == 16 + 32 * 48);
 static_assert(sizeof(WasmDbgIpcEventBreakpoint) == 96);
 static_assert(sizeof(WasmDbgIpcEventContinueRequest) == 32);
+static_assert(sizeof(WasmDbgIpcEventStepIntoRequest) == 32);
 static_assert(sizeof(WasmDbiProcessState) == 40);
 static_assert(sizeof(void*) == sizeof(uint32_t));
 
@@ -906,6 +922,9 @@ extern "C" int32_t coreclr_wasm_dbi_dac_send_ipc_to_runtime(uint32_t messageAddr
 
 extern "C" int32_t coreclr_wasm_dbi_dac_submit_continue_request(uint32_t requestBytesAddress, uint32_t requestBytesLength)
     __attribute__((import_module("coreclr_dbi_dac"), import_name("submit_continue_request")));
+
+extern "C" int32_t coreclr_wasm_dbi_dac_submit_step_into_request(uint32_t requestBytesAddress, uint32_t requestBytesLength)
+    __attribute__((import_module("coreclr_dbi_dac"), import_name("submit_step_into_request")));
 
 extern "C" HRESULT CLRDataCreateInstance(REFIID iid, ICLRDataTarget* legacyTarget, void** iface);
 
@@ -2306,6 +2325,39 @@ int32_t coreclr_wasm_dbi_dac_dbi_send_ipc_continue_request(uint64_t breakpointTo
     request.Reserved0 = 0;
 
     int32_t result = coreclr_wasm_dbi_dac_submit_continue_request(
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&request)),
+        sizeof(request));
+    if (result == Success)
+    {
+        InvalidatePageCache();
+    }
+    return result == Success ? Success : result;
+}
+
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request)
+int32_t coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request(uint64_t breakpointToken)
+{
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
+    if (g_cordb == nullptr || !g_connectedToRuntime)
+    {
+        return E_FAIL;
+    }
+
+    WasmDbgIpcEventStepIntoRequest request{};
+    request.Magic = WasmDbgIpcEventStepIntoRequestMagic;
+    request.Type = WasmDbgIpcEventTypeStepIntoRequest;
+    request.ProcessId = 1;
+    request.ThreadId = 1;
+    request.BreakpointToken = breakpointToken;
+    request.Flags = 0;
+    request.Reserved0 = 0;
+
+    int32_t result = coreclr_wasm_dbi_dac_submit_step_into_request(
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&request)),
         sizeof(request));
     if (result == Success)

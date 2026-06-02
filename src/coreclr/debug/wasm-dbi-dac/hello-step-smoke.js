@@ -165,8 +165,8 @@ async function loadDebugger(debuggerJsPath, sendToRuntime) {
 }
 
 function buildHelloWorld(repoRoot) {
-    const testDirectory = path.join(repoRoot, "artifacts", "wasm-dbi-dac-smoke", "hello-breakpoint");
-    const assemblyName = "HelloBreakpoint";
+    const testDirectory = path.join(repoRoot, "artifacts", "wasm-dbi-dac-smoke", "hello-step");
+    const assemblyName = "HelloStep";
     fs.rmSync(testDirectory, { recursive: true, force: true });
     fs.mkdirSync(testDirectory, { recursive: true });
     const projectPath = path.join(testDirectory, `${assemblyName}.csproj`);
@@ -286,11 +286,11 @@ async function loadAndRunRuntime(runtimeJsPath, appPath, sharedFrameworkPath, on
     }
 }
 
-async function waitForBreakpointHit(runtimeExports) {
+async function waitForBreakpointHit(runtimeExports, expectedHitCount = 1) {
     const deadline = Date.now() + 5000;
     while (Date.now() < deadline) {
         const hitCount = runtimeExports.CoreClrWasmDebugGetBreakpointHitCount();
-        if (hitCount !== 0) {
+        if (hitCount >= expectedHitCount) {
             const runtimeMemory = new Uint8Array(runtimeExports.memory.buffer);
             const eventLength = runtimeExports.CoreClrWasmDebugGetLastEventLength();
             const stack = runtimeExports.stackSave();
@@ -384,6 +384,23 @@ function pollDbiIpcEvent(debuggerInstance) {
     debuggerInstance.exports.stackRestore(stack);
 
     return { pollResult, bytesWritten, payload };
+}
+
+function enumerateBreakpoints(debuggerInstance) {
+    const recordSize = 8 + (16 * 88);
+    const stack = debuggerInstance.exports.stackSave();
+    const slotsAddress = debuggerInstance.exports.stackAlloc(recordSize);
+    const bytesWrittenAddress = debuggerInstance.exports.stackAlloc(4);
+    const enumerateResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints(
+        slotsAddress,
+        recordSize,
+        bytesWrittenAddress);
+    const bytesWritten = new DataView(debuggerInstance.module.HEAPU8.buffer, bytesWrittenAddress, 4).getUint32(0, true);
+    const view = new DataView(debuggerInstance.module.HEAPU8.buffer, slotsAddress, recordSize);
+    const activeCount = enumerateResult === 0 ? view.getUint32(4, true) : 0;
+    debuggerInstance.exports.stackRestore(stack);
+
+    return { enumerateResult, bytesWritten, activeCount };
 }
 
 function readFrameRecord(memory, address) {
@@ -530,6 +547,11 @@ async function main() {
     let testDataDuringCallback = { readResult: -1, testData: null };
     let dbiIpcEventDuringCallback = { pollResult: -1, bytesWritten: 0, payload: null };
     let continueDuringCallbackResult = -1;
+    let stepRequestDuringCallbackResult = -1;
+    let preStepBreakpointCount = -1;
+    let afterStepRequestBreakpointCount = -1;
+    let stepLandingBreakpointCount = -1;
+    const breakpointEvents = [];
     // Phase 4 slice 2: structured DebuggerIPCEvent payload captured by
     // CoreClrWasmDebugReadLastIpcEvent during the breakpoint callback.
     // Asserts the runtime fills the 96-byte WasmDbgIpcEventBreakpoint
@@ -782,11 +804,30 @@ async function main() {
                         ipcEventDuringCallback = { readBytes: ipcReadBytes, magic: 0, type: 0, funcMetadataToken: 0, breakpointToken: 0n, isIL: 0, offset: 0, size: ipcSize };
                     }
                     runtimeExports.stackRestore(ipcStack);
-                    const continueToken = dbiIpcEventDuringCallback.payload.breakpointToken;
-                    continueDuringCallbackResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_send_ipc_continue_request(
-                        Number(continueToken & 0xffffffffn),
-                        Number(continueToken >> 32n));
-                    sawBreakpointBeforeContinue = true;
+                    if (dbiIpcEventDuringCallback.payload === null) {
+                        return -1;
+                    }
+
+                    breakpointEvents.push({
+                        event,
+                        ipc: dbiIpcEventDuringCallback.payload,
+                        record: dbiEventRecordDuringCallback.record
+                    });
+
+                    if (breakpointEvents.length === 1) {
+                        const beforeStep = enumerateBreakpoints(debuggerInstance);
+                        preStepBreakpointCount = beforeStep.enumerateResult === 0 ? beforeStep.activeCount : -1;
+                        const stepToken = dbiIpcEventDuringCallback.payload.breakpointToken;
+                        stepRequestDuringCallbackResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request(
+                            Number(stepToken & 0xffffffffn),
+                            Number(stepToken >> 32n));
+                        const afterStep = enumerateBreakpoints(debuggerInstance);
+                        afterStepRequestBreakpointCount = afterStep.enumerateResult === 0 ? afterStep.activeCount : -1;
+                        sawBreakpointBeforeContinue = true;
+                    } else if (breakpointEvents.length === 2) {
+                        const stepLanding = enumerateBreakpoints(debuggerInstance);
+                        stepLandingBreakpointCount = stepLanding.enumerateResult === 0 ? stepLanding.activeCount : -1;
+                    }
                 }
 
                 return receiveResult;
@@ -832,116 +873,61 @@ async function main() {
             }
         });
 
-        const result = await waitForBreakpointHit(runtimeExports);
+        const result = await waitForBreakpointHit(runtimeExports, 2);
         const continueCount = runtimeExports.CoreClrWasmDebugGetContinueCount();
         const methodEnterQueryCount = runtimeExports.CoreClrWasmDebugGetMethodEnterEnabledQueryCount() >>> 0;
         const disconnectResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_disconnect_runtime();
         const sessionDestroyResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_session_destroy();
-        result.callbackEvent = callbackEvent;
-        result.fireEventToPauseCount = fireEventToPauseCount;
-        result.fireEventToPauseLastEvent = fireEventToPauseLastEvent;
-        result.dbiEvent = dbiEventDuringCallback;
-        result.dbiEventRecord = dbiEventRecordDuringCallback;
-        result.dbiFrameRecord = dbiFrameRecordDuringCallback;
-        result.dbiLocalsDuringCallback = dbiLocalsDuringCallback;
-        result.dbiProcessState = dbiProcessStateDuringCallback;
-        result.testDataAtBreakpoint = testDataDuringCallback;
-        result.continueDuringCallbackResult = continueDuringCallbackResult;
-        result.continueCount = continueCount;
-        result.methodEnterQueryCount = methodEnterQueryCount;
-        result.disconnectResult = disconnectResult;
-        result.sessionDestroyResult = sessionDestroyResult;
-        result.sawBreakpointBeforeContinue = sawBreakpointBeforeContinue;
-        result.ipcEventDuringCallback = {
-            ...ipcEventDuringCallback,
-            magic: `0x${ipcEventDuringCallback.magic.toString(16)}`,
-            type: `0x${ipcEventDuringCallback.type.toString(16)}`,
-            funcMetadataToken: `0x${ipcEventDuringCallback.funcMetadataToken.toString(16)}`,
-            breakpointToken: `0x${ipcEventDuringCallback.breakpointToken.toString(16)}`
+        const firstEvent = breakpointEvents[0];
+        const stepEvent = breakpointEvents[1];
+        const summary = {
+            hitCount: result.hitCount,
+            copyResult: result.copyResult,
+            callbackEvent,
+            breakpointEventCount: breakpointEvents.length,
+            firstOffset: firstEvent?.ipc?.offset,
+            stepOffset: stepEvent?.ipc?.offset,
+            firstToken: firstEvent?.ipc?.breakpointToken !== undefined ? `0x${firstEvent.ipc.breakpointToken.toString(16)}` : null,
+            stepToken: stepEvent?.ipc?.breakpointToken !== undefined ? `0x${stepEvent.ipc.breakpointToken.toString(16)}` : null,
+            stepRequestDuringCallbackResult,
+            preStepBreakpointCount,
+            afterStepRequestBreakpointCount,
+            stepLandingBreakpointCount,
+            continueCount,
+            methodEnterQueryCount,
+            fireEventToPauseCount,
+            fireEventToPauseLastEvent,
+            disconnectResult,
+            sessionDestroyResult,
+            sawBreakpointBeforeContinue
         };
-        result.dbiIpcEventDuringCallback = dbiIpcEventDuringCallback.payload
-            ? {
-                pollResult: dbiIpcEventDuringCallback.pollResult,
-                bytesWritten: dbiIpcEventDuringCallback.bytesWritten,
-                magic: `0x${dbiIpcEventDuringCallback.payload.magic.toString(16)}`,
-                type: `0x${dbiIpcEventDuringCallback.payload.type.toString(16)}`,
-                processId: dbiIpcEventDuringCallback.payload.processId,
-                threadId: dbiIpcEventDuringCallback.payload.threadId,
-                hr: dbiIpcEventDuringCallback.payload.hr,
-                flags: dbiIpcEventDuringCallback.payload.flags,
-                breakpointToken: `0x${dbiIpcEventDuringCallback.payload.breakpointToken.toString(16)}`,
-                funcMetadataToken: `0x${dbiIpcEventDuringCallback.payload.funcMetadataToken.toString(16)}`,
-                isIL: dbiIpcEventDuringCallback.payload.isIL,
-                offset: dbiIpcEventDuringCallback.payload.offset,
-                encVersion: dbiIpcEventDuringCallback.payload.encVersion
-            }
-            : dbiIpcEventDuringCallback;
-        console.log(JSON.stringify(result, null, 2));
+        console.log(JSON.stringify(summary, null, 2));
 
-        if (result.hitCount !== 1 ||
+        if (result.hitCount < 2 ||
             result.copyResult !== 0 ||
-            !result.event.includes("breakpoint-hit:name=BreakHere") ||
-            dbiEventDuringCallback.pollResult !== 0 ||
-            !dbiEventDuringCallback.event.includes("breakpoint-hit:name=BreakHere") ||
-            dbiEventRecordDuringCallback.pollResult !== 0 ||
-            dbiEventRecordDuringCallback.bytesWritten !== 340 ||
-            dbiEventRecordDuringCallback.record?.kind !== 1 ||
-            dbiEventRecordDuringCallback.record?.methodName !== "BreakHere" ||
-            dbiEventRecordDuringCallback.record?.message !== result.event ||
-            dbiFrameRecordDuringCallback.pollResult !== 0 ||
-            dbiFrameRecordDuringCallback.bytesWritten !== 88 ||
-            dbiFrameRecordDuringCallback.record?.methodName !== "BreakHere" ||
-            dbiFrameRecordDuringCallback.record?.methodToken !== dbiEventRecordDuringCallback.record?.methodToken ||
-            dbiFrameRecordDuringCallback.record?.ilOffset !== 0 ||
-            dbiFrameRecordDuringCallback.record?.interpreterIP === 0 ||
-            dbiFrameRecordDuringCallback.record?.frameAddress === 0 ||
-            dbiFrameRecordDuringCallback.record?.stackAddress === 0 ||
-            dbiLocalsDuringCallback.pollResult !== 0 ||
-            dbiLocalsDuringCallback.bytesWritten !== 1552 ||
-            dbiLocalsDuringCallback.record?.magic !== 0x524C4457 ||
-            dbiLocalsDuringCallback.record?.version !== 1 ||
-            dbiLocalsDuringCallback.record?.methodToken !== dbiEventRecordDuringCallback.record?.methodToken ||
-            dbiLocalsDuringCallback.record?.localCount < 1 ||
-            dbiLocalsDuringCallback.record?.locals[0]?.name !== "local0" ||
-            dbiLocalsDuringCallback.record?.locals[0]?.byteSize <= 0 ||
-            dbiProcessStateDuringCallback.pollResult !== 0 ||
-            dbiProcessStateDuringCallback.bytesWritten !== 40 ||
-            dbiProcessStateDuringCallback.state?.sessionCreated !== 1 ||
-            dbiProcessStateDuringCallback.state?.connected !== 1 ||
-            dbiProcessStateDuringCallback.state?.runtimeBase !== 1 ||
-            dbiProcessStateDuringCallback.state?.syntheticProcessId !== 1 ||
-            dbiProcessStateDuringCallback.state?.hasRealCordbProcess !== 1 ||
-            dbiProcessStateDuringCallback.state?.lastEventKind !== 1 ||
-            dbiProcessStateDuringCallback.state?.lastMethodToken !== dbiEventRecordDuringCallback.record?.methodToken ||
-            testDataDuringCallback.readResult !== 0 ||
-            testDataDuringCallback.testData?.magic !== 0x43445744 ||
-            testDataDuringCallback.testData?.int32Value !== 123456789 ||
-            testDataDuringCallback.testData?.doubleValue !== 1234.5 ||
-            testDataDuringCallback.testData?.message !== "wasm-dbi-dac" ||
-            continueDuringCallbackResult !== 0 ||
+            breakpointEvents.length < 2 ||
+            firstEvent?.ipc?.magic !== 0x42435049 ||
+            stepEvent?.ipc?.magic !== 0x42435049 ||
+            firstEvent?.ipc?.type !== 0x100 ||
+            stepEvent?.ipc?.type !== 0x100 ||
+            firstEvent?.ipc?.isIL !== 1 ||
+            stepEvent?.ipc?.isIL !== 1 ||
+            firstEvent?.ipc?.offset !== 0 ||
+            stepEvent?.ipc?.offset <= firstEvent?.ipc?.offset ||
+            firstEvent?.ipc?.breakpointToken === 0n ||
+            stepEvent?.ipc?.breakpointToken <= firstEvent?.ipc?.breakpointToken ||
+            stepRequestDuringCallbackResult !== 0 ||
+            preStepBreakpointCount < 1 ||
+            afterStepRequestBreakpointCount !== preStepBreakpointCount + 1 ||
+            stepLandingBreakpointCount !== preStepBreakpointCount ||
             continueCount !== 1 ||
             methodEnterQueryCount === 0 ||
             disconnectResult !== 0 ||
             sessionDestroyResult !== 0 ||
             !sawBreakpointBeforeContinue ||
-            fireEventToPauseCount !== 1 ||
-            !fireEventToPauseLastEvent.includes("breakpoint-hit:name=BreakHere") ||
-            ipcEventDuringCallback.readBytes !== 96 ||
-            ipcEventDuringCallback.magic !== 0x42435049 ||
-            ipcEventDuringCallback.type !== 0x100 ||
-            ipcEventDuringCallback.funcMetadataToken !== dbiEventRecordDuringCallback.record?.methodToken ||
-            ipcEventDuringCallback.breakpointToken === 0n ||
-            ipcEventDuringCallback.isIL !== 1 ||
-            ipcEventDuringCallback.offset !== 0 ||
-            dbiIpcEventDuringCallback.pollResult !== 0 ||
-            dbiIpcEventDuringCallback.bytesWritten !== 96 ||
-            dbiIpcEventDuringCallback.payload?.magic !== 0x42435049 ||
-            dbiIpcEventDuringCallback.payload?.type !== 0x100 ||
-            dbiIpcEventDuringCallback.payload?.funcMetadataToken !== ipcEventDuringCallback.funcMetadataToken ||
-            dbiIpcEventDuringCallback.payload?.breakpointToken !== ipcEventDuringCallback.breakpointToken ||
-            dbiIpcEventDuringCallback.payload?.isIL !== 1 ||
-            dbiIpcEventDuringCallback.payload?.offset !== 0) {
-            fail("HelloWorld breakpoint was not reached");
+            fireEventToPauseCount < 2 ||
+            !fireEventToPauseLastEvent.includes("breakpoint-hit:name=BreakHere")) {
+            fail("HelloWorld step-into did not land at the next interpreter offset");
         }
     } finally {
         delete globalThis.CoreClrWasmDebugOnBreakpointHit;

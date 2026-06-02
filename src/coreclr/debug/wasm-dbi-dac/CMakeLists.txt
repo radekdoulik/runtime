@@ -80,4 +80,10 @@ if(WASM_DBI_DAC_NODE)
     COMMENT "Running WASM DBI/DAC HelloWorld breakpoint smoke test"
     VERBATIM
   )
+  add_custom_target(coreclr_dbi_dac_wasm_hello_step_smoke
+    COMMAND "${WASM_DBI_DAC_NODE}" "${CMAKE_CURRENT_SOURCE_DIR}/hello-step-smoke.js" "${CMAKE_BINARY_DIR}"
+    DEPENDS coreclr_dbi_dac_wasm_tests corerun
+    COMMENT "Running WASM DBI/DAC HelloWorld step-into smoke test"
+    VERBATIM
+  )
 endif()

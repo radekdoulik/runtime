@@ -11,7 +11,7 @@ const ExpectedAbiVersion = 1;
 const ExpectedComponentMask = 0xf;
 const ExpectedVersionBlobMagic = 0x42564457;
 const ExpectedVersionBlobSize = 32;
-const ExpectedProtocolBreakingChangeCounter = 4;
+const ExpectedProtocolBreakingChangeCounter = 5;
 const HrIncompatibleProtocol = 0x8013134b | 0;
 const ContractDescriptorMagic = 0x0043414443434e44n;
 const TestDataMagic = 0x43445744;
@@ -177,7 +177,8 @@ function readBreakpointEnumeration(memory, address, capacity, slotSize) {
         const slotAddress = address + 8 + (index * slotSize);
         slots.push({
             armed: memory[slotAddress] !== 0,
-            methodName: readNullTerminatedAscii(memory, slotAddress + 1, 64),
+            isOneShot: memory[slotAddress + 1] !== 0,
+            methodName: readNullTerminatedAscii(memory, slotAddress + 2, 64),
             methodToken: view.getUint32(slotAddress + 68, true),
             patchAddress: view.getUint32(slotAddress + 72, true),
             originalOpcode: view.getInt32(slotAddress + 76, true),
@@ -385,6 +386,25 @@ async function main() {
             const runtimeRequestAddress = runtime.exports.stackAlloc(requestBytesLength);
             getRuntimeHeap().set(requestBytes, runtimeRequestAddress);
             return runtimeExports.CoreClrWasmDebugSubmitContinueRequest(runtimeRequestAddress, requestBytesLength) | 0;
+        } finally {
+            runtime.exports.stackRestore(savedRuntimeStack);
+        }
+    };
+    hostImports.submit_step_into_request = (requestBytesAddressArg, requestBytesLengthArg) => {
+        const requestBytesAddress = requestBytesAddressArg >>> 0;
+        const requestBytesLength = requestBytesLengthArg >>> 0;
+        const debuggerHeapForRead = getDebuggerHeap();
+        if (requestBytesAddress + requestBytesLength > debuggerHeapForRead.length ||
+            typeof runtimeExports.CoreClrWasmDebugSubmitStepIntoRequest !== "function") {
+            return -1;
+        }
+
+        const requestBytes = debuggerHeapForRead.slice(requestBytesAddress, requestBytesAddress + requestBytesLength);
+        const savedRuntimeStack = runtime.exports.stackSave();
+        try {
+            const runtimeRequestAddress = runtime.exports.stackAlloc(requestBytesLength);
+            getRuntimeHeap().set(requestBytes, runtimeRequestAddress);
+            return runtimeExports.CoreClrWasmDebugSubmitStepIntoRequest(runtimeRequestAddress, requestBytesLength) | 0;
         } finally {
             runtime.exports.stackRestore(savedRuntimeStack);
         }
@@ -863,6 +883,7 @@ async function main() {
     const multiBpNamedSlotsHaveExpectedFields = multiBpExpectedNames.every(name => {
         const slot = multiBpArmedSlots.find(armedSlot => armedSlot.methodName === name);
         return slot !== undefined &&
+            !slot.isOneShot &&
             slot.methodToken === 0 &&
             slot.patchAddress === 0 &&
             slot.originalOpcode === 0 &&

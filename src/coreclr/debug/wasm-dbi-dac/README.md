@@ -62,6 +62,7 @@ sidecar declares them in `dbi_dac_wasm.cpp` near line 740 with
 | `get_target_module_base`          | `int32_t (uint32_t imageNameAddress, uint32_t imageNameCharCount, uint32_t outAddress)` | DAC bootstrap    |
 | `send_ipc_to_runtime`             | `int32_t (uint32_t messageAddress, uint32_t messageLength)`                          | DBI session/breakpoint flow |
 | `submit_continue_request`         | `int32_t (uint32_t requestBytesAddress, uint32_t requestBytesLength)`                 | Structured DBI continue flow |
+| `submit_step_into_request`        | `int32_t (uint32_t requestBytesAddress, uint32_t requestBytesLength)`                 | Structured DBI step-into flow |
 
 ### `read_target_memory(targetAddress, debuggerAddress, byteCount)`
 
@@ -149,6 +150,21 @@ export synchronously.
   `DB_IPCE_CONTINUE` (`0x0201`).
 - Returns `0` on success, non-zero on validation or transport failure.
 
+### `submit_step_into_request(requestBytesAddress, requestBytesLength)`
+
+Deliver a 32-byte `WasmDbgIpcEventStepIntoRequest` payload from the
+sidecar to the runtime module's
+`CoreClrWasmDebugSubmitStepIntoRequest` export. The host copies the
+payload from sidecar memory to runtime memory and calls the runtime
+export synchronously.
+
+**Required semantics**:
+
+- `requestBytesLength` must equal 32 (`sizeof(WasmDbgIpcEventStepIntoRequest)`).
+- The payload magic is `'IPCS'` (`0x53435049`) and type is
+  `DB_IPCE_STEP_INTO` (`0x0102`).
+- Returns `0` on success, non-zero on validation or transport failure.
+
 ## Sidecar exports (sidecar → JS)
 
 Exports group into seven families. All are visible in the `tests`
@@ -195,6 +211,7 @@ acknowledged handshake returns `HrIncompatibleProtocol`.
 | `coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_token`  | Send `SetBreakpointByToken` command record to runtime. |
 | `coreclr_wasm_dbi_dac_dbi_continue`                 | Send `Continue` command record; invalidates the page cache. |
 | `coreclr_wasm_dbi_dac_dbi_send_ipc_continue_request` | Send structured `DB_IPCE_CONTINUE` request; invalidates the page cache on success. |
+| `coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request` | Send structured `DB_IPCE_STEP_INTO` request; invalidates the page cache on success. |
 | `coreclr_wasm_dbi_dac_dbi_poll_event`               | Drain queued runtime event text into the supplied buffer. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints`    | Drain the runtime breakpoint slot table (`8 + 16 * 88` bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_locals`         | Drain the stopped-frame locals record (`16 + 32 * 48` bytes) via DAC `ReadVirtual`. |
@@ -300,7 +317,7 @@ legacy `ICLRDataTarget` / `ICLRRuntimeLocator` interfaces. Filling out
 A well-behaved host follows this sequence at session start:
 
 1. Instantiate `coreclr-dbi-dac.wasm` (or `-tests.wasm`) and wire all
-   five host imports.
+   six host imports.
 2. Call `get_abi_version` and `get_component_mask` to detect a
    completely unknown sidecar build before doing anything else.
 3. Call `get_version_blob(out, sizeof(out), &written)` and validate
@@ -310,17 +327,18 @@ A well-behaved host follows this sequence at session start:
 5. Call `dbi_session_create()`.
 6. Call `dbi_connect_runtime(runtimeBase)`; this invalidates the page
    cache so the next reads come from runtime memory.
-7. Issue breakpoints, polls, and continues as needed; each legacy
-   `continue` call and each successful structured continue request
-   invalidates the page cache.
+7. Issue breakpoints, polls, continues, and step-into requests as
+   needed; each legacy `continue` call and each successful structured
+   continue or step request invalidates the page cache.
 8. At shutdown: `dbi_disconnect_runtime` (invalidates cache) then
    `dbi_session_destroy`. The session is single-use today.
 
 The page cache is also invalidated on every host-callable
 `invalidate_page_cache` call (a defensive "the runtime was poked
 out of band" hook). The two existing smoke harnesses
-(`smoke-test.js`, `hello-breakpoint-smoke.js`) follow this sequence and
-serve as reference implementations of the host side of the contract.
+(`smoke-test.js`, `hello-breakpoint-smoke.js`, and
+`hello-step-smoke.js`) follow this sequence and serve as reference
+implementations of the host side of the contract.
 
 ## See also
 
@@ -332,5 +350,6 @@ serve as reference implementations of the host side of the contract.
   debugger architecture (the closest shipping comparison).
 - [`dbi_dac_wasm_exports.h`](dbi_dac_wasm_exports.h) - export tagging.
 - [`smoke-test.js`](smoke-test.js),
-  [`hello-breakpoint-smoke.js`](hello-breakpoint-smoke.js) - reference
-  host implementations that fully exercise the contract above.
+  [`hello-breakpoint-smoke.js`](hello-breakpoint-smoke.js), and
+  [`hello-step-smoke.js`](hello-step-smoke.js) - reference host
+  implementations that fully exercise the contract above.
