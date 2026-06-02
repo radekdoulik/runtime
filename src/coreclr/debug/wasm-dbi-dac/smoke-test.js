@@ -11,7 +11,7 @@ const ExpectedAbiVersion = 1;
 const ExpectedComponentMask = 0xf;
 const ExpectedVersionBlobMagic = 0x42564457;
 const ExpectedVersionBlobSize = 32;
-const ExpectedProtocolBreakingChangeCounter = 3;
+const ExpectedProtocolBreakingChangeCounter = 4;
 const HrIncompatibleProtocol = 0x8013134b | 0;
 const ContractDescriptorMagic = 0x0043414443434e44n;
 const TestDataMagic = 0x43445744;
@@ -304,6 +304,7 @@ async function main() {
             symbolName === "g_dacTable" ? runtimeExports.Getg_dacTable() >>> 0 :
             symbolName === "WasmDbiDacTestData" ? runtimeExports.GetWasmDbiDacTestData() >>> 0 :
             symbolName === "g_wasmDebugBreakpoints" ? runtimeExports.Getg_wasmDebugBreakpoints() >>> 0 :
+            symbolName === "g_wasmDebugLastLocalsRecord" ? runtimeExports.Getg_wasmDebugLastLocalsRecord() >>> 0 :
             0;
 
         if (symbolAddress === 0) {

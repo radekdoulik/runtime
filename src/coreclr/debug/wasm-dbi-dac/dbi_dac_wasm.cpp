@@ -58,6 +58,8 @@ constexpr uint32_t MaxTransportMessageBytes = 256;
 constexpr uint32_t WasmDebugCommandRecordMagic = 0x434d4457;
 constexpr uint32_t WasmDebugBreakpointSlotCapacity = 16;
 constexpr uint32_t WasmDebugBreakpointEnumerationHeaderSize = 8;
+constexpr uint32_t WasmDebugMaxLocalsPerFrame = 32;
+constexpr uint32_t WasmDebugLocalsRecordMagic = 0x524C4457; // 'WDLR' little-endian
 
 // 'WDVB' (Wasm DAC/DBI Version Blob) - stored little-endian so the bytes
 // 'W','D','V','B' appear in that order on every wasm host.
@@ -73,7 +75,8 @@ constexpr uint32_t WasmDbiDacVersionBlobMagic = 0x42564457;
 //   1 - initial value; matches the export set captured at this commit.
 //   2 - add dbi_enumerate_breakpoints sidecar export + slot-table payload.
 //   3 - add structured DB_IPCE_CONTINUE request import/export path.
-constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 3;
+//   4 - add dbi_enumerate_locals sidecar export + locals-record payload.
+constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 4;
 
 // Sidecar build version - encoded VS_FIXEDFILEINFO-style as two 32-bit
 // words. Reserved for future use; today's PoC sidecar reports 0/0 so
@@ -284,6 +287,24 @@ struct WasmDebugFrameRecord
     char MethodName[64];
 };
 
+struct WasmDebugLocalRecord
+{
+    uint32_t ILSlot;
+    uint32_t TypeTag;
+    uint32_t ByteOffset;
+    uint32_t ByteSize;
+    char Name[32];
+};
+
+struct WasmDebugLocalsRecord
+{
+    uint32_t Magic;
+    uint32_t Version;
+    uint32_t MethodToken;
+    uint32_t LocalCount;
+    WasmDebugLocalRecord Locals[WasmDebugMaxLocalsPerFrame];
+};
+
 // Phase 4 first slice: a simplified wire-format mirror of
 // DebuggerIPCEvent::BreakpointData + the DebuggerIPCEvent header
 // (src/coreclr/debug/inc/dbgipcevents.h:1696-1761). The real
@@ -381,6 +402,8 @@ static_assert(sizeof(WasmDebugCommandRecord) == 80);
 static_assert(sizeof(WasmDebugBreakpointSlotMirror) == 88);
 static_assert(sizeof(WasmDebugEventRecord) == 340);
 static_assert(sizeof(WasmDebugFrameRecord) == 88);
+static_assert(sizeof(WasmDebugLocalRecord) == 48);
+static_assert(sizeof(WasmDebugLocalsRecord) == 16 + 32 * 48);
 static_assert(sizeof(WasmDbgIpcEventBreakpoint) == 96);
 static_assert(sizeof(WasmDbgIpcEventContinueRequest) == 32);
 static_assert(sizeof(WasmDbiProcessState) == 40);
@@ -526,6 +549,7 @@ WasmDebugFrameRecord g_lastRuntimeFrameRecord{};
 uint64_t g_cachedIpcEventValidAddress = 0;
 uint64_t g_cachedIpcEventAddress = 0;
 uint64_t g_cachedBreakpointSlotsAddress = 0;
+uint64_t g_cachedLocalsRecordAddress = 0;
 
 void ClearRuntimeConnectionState()
 {
@@ -547,6 +571,7 @@ void ClearRuntimeConnectionState()
     g_cachedIpcEventValidAddress = 0;
     g_cachedIpcEventAddress = 0;
     g_cachedBreakpointSlotsAddress = 0;
+    g_cachedLocalsRecordAddress = 0;
     InvalidatePageCache();
 }
 
@@ -2504,6 +2529,83 @@ int32_t coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints(uint32_t bufferAddress, u
     memcpy(out, header, sizeof(header));
     memcpy(out + sizeof(header), slots, sizeof(slots));
 
+    return S_OK;
+}
+
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_enumerate_locals)
+int32_t coreclr_wasm_dbi_dac_dbi_enumerate_locals(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
+{
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
+    if (g_cordb == nullptr || !g_connectedToRuntime)
+    {
+        return E_FAIL;
+    }
+
+    if (bytesWrittenAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    uint32_t recordSize = static_cast<uint32_t>(sizeof(WasmDebugLocalsRecord));
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &recordSize, sizeof(recordSize));
+
+    if (bufferAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    if (bufferLength < recordSize)
+    {
+        return BufferTooSmall;
+    }
+
+    // The runtime overwrites g_wasmDebugLastLocalsRecord on every
+    // breakpoint stop. Force a fresh DAC read so callers do not observe a
+    // pre-stop page-cache snapshot.
+    InvalidatePageCache();
+
+    WasmDacDataTarget dataTarget(g_connectedRuntimeBase);
+    if (g_cachedLocalsRecordAddress == 0)
+    {
+        uint64_t resolved = 0;
+        if (!TryGetSymbol(
+                static_cast<ICorDebugDataTarget*>(&dataTarget),
+                g_connectedRuntimeBase,
+                "g_wasmDebugLastLocalsRecord",
+                &resolved) ||
+            resolved == 0 ||
+            resolved > UINT32_MAX)
+        {
+            return HostSymbolLookupFailed;
+        }
+        g_cachedLocalsRecordAddress = resolved;
+    }
+
+    WasmDebugLocalsRecord payload{};
+    ULONG32 bytesRead = 0;
+    HRESULT hr = dataTarget.ReadVirtual(
+        g_cachedLocalsRecordAddress,
+        reinterpret_cast<BYTE*>(&payload),
+        sizeof(payload),
+        &bytesRead);
+    if (FAILED(hr) || bytesRead != sizeof(payload))
+    {
+        return HostReadFailed;
+    }
+
+    if (payload.Magic != WasmDebugLocalsRecordMagic ||
+        payload.Version != 1 ||
+        payload.LocalCount > WasmDebugMaxLocalsPerFrame)
+    {
+        return InvalidArgument;
+    }
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bufferAddress)), &payload, sizeof(payload));
     return S_OK;
 }
 

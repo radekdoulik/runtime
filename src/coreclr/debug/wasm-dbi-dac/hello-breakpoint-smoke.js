@@ -18,7 +18,7 @@ const CommandRecordSize = 80;
 // point will run (CORDBG_E_INCOMPATIBLE_PROTOCOL otherwise).
 const ExpectedVersionBlobMagic = 0x42564457; // 'WDVB' little-endian
 const ExpectedAbiVersion = 1;
-const ExpectedProtocolBreakingChangeCounter = 3;
+const ExpectedProtocolBreakingChangeCounter = 4;
 
 function fail(message) {
     throw new Error(message);
@@ -381,6 +381,43 @@ function pollDbiFrameRecord(debuggerInstance) {
     return { pollResult, bytesWritten, record };
 }
 
+function readLocalsRecord(memory, address) {
+    const view = new DataView(memory.buffer, address, 1552);
+    const localCount = view.getUint32(12, true);
+    const locals = [];
+    for (let index = 0; index < Math.min(localCount, 32); index++) {
+        const localOffset = 16 + (index * 48);
+        locals.push({
+            ilSlot: view.getUint32(localOffset, true),
+            typeTag: view.getUint32(localOffset + 4, true),
+            byteOffset: view.getUint32(localOffset + 8, true),
+            byteSize: view.getUint32(localOffset + 12, true),
+            name: readNullTerminatedAscii(memory, address + localOffset + 16, 32)
+        });
+    }
+
+    return {
+        magic: view.getUint32(0, true),
+        version: view.getUint32(4, true),
+        methodToken: view.getUint32(8, true),
+        localCount,
+        locals
+    };
+}
+
+function pollDbiLocals(debuggerInstance) {
+    const recordSize = 1552;
+    const stack = debuggerInstance.exports.stackSave();
+    const recordAddress = debuggerInstance.exports.stackAlloc(recordSize);
+    const bytesWrittenAddress = debuggerInstance.exports.stackAlloc(4);
+    const pollResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_enumerate_locals(recordAddress, recordSize, bytesWrittenAddress);
+    const bytesWritten = new DataView(debuggerInstance.module.HEAPU8.buffer, bytesWrittenAddress, 4).getUint32(0, true);
+    const record = pollResult === 0 ? readLocalsRecord(debuggerInstance.module.HEAPU8, recordAddress) : null;
+    debuggerInstance.exports.stackRestore(stack);
+
+    return { pollResult, bytesWritten, record };
+}
+
 function pollDbiProcessState(debuggerInstance) {
     const stack = debuggerInstance.exports.stackSave();
     const stateAddress = debuggerInstance.exports.stackAlloc(40);
@@ -458,6 +495,7 @@ async function main() {
     let dbiEventDuringCallback = { pollResult: -1, event: "", bytesWritten: 0 };
     let dbiEventRecordDuringCallback = { pollResult: -1, bytesWritten: 0, record: null };
     let dbiFrameRecordDuringCallback = { pollResult: -1, bytesWritten: 0, record: null };
+    let dbiLocalsDuringCallback = { pollResult: -1, bytesWritten: 0, record: null };
     let dbiProcessStateDuringCallback = { pollResult: -1, bytesWritten: 0, state: null };
     let testDataDuringCallback = { readResult: -1, testData: null };
     let dbiIpcEventDuringCallback = { pollResult: -1, bytesWritten: 0, payload: null };
@@ -553,6 +591,7 @@ async function main() {
                     symbolName === "g_wasmDebugLastIpcEvent" ? runtimeExports.Getg_wasmDebugLastIpcEvent() >>> 0 :
                     symbolName === "g_wasmDebugLastIpcEventValid" ? runtimeExports.Getg_wasmDebugLastIpcEventValid() >>> 0 :
                     symbolName === "g_wasmDebugBreakpoints" ? runtimeExports.Getg_wasmDebugBreakpoints() >>> 0 :
+                    symbolName === "g_wasmDebugLastLocalsRecord" ? runtimeExports.Getg_wasmDebugLastLocalsRecord() >>> 0 :
                     0;
                 if (symbolAddress === 0 || addressOutAddress + 8 > debuggerHeap.length) {
                     return -1;
@@ -655,6 +694,7 @@ async function main() {
                     // below or the Valid flag will already be 0 when the
                     // sidecar reads it.
                     dbiIpcEventDuringCallback = pollDbiIpcEvent(debuggerInstance);
+                    dbiLocalsDuringCallback = pollDbiLocals(debuggerInstance);
                     // Phase 4 slice 2: drain the structured DebuggerIPCEvent
                     // payload directly from the runtime via
                     // CoreClrWasmDebugReadLastIpcEvent. This is the runtime
@@ -752,6 +792,7 @@ async function main() {
         result.dbiEvent = dbiEventDuringCallback;
         result.dbiEventRecord = dbiEventRecordDuringCallback;
         result.dbiFrameRecord = dbiFrameRecordDuringCallback;
+        result.dbiLocalsDuringCallback = dbiLocalsDuringCallback;
         result.dbiProcessState = dbiProcessStateDuringCallback;
         result.testDataAtBreakpoint = testDataDuringCallback;
         result.continueDuringCallbackResult = continueDuringCallbackResult;
@@ -803,6 +844,15 @@ async function main() {
             dbiFrameRecordDuringCallback.record?.interpreterIP === 0 ||
             dbiFrameRecordDuringCallback.record?.frameAddress === 0 ||
             dbiFrameRecordDuringCallback.record?.stackAddress === 0 ||
+            dbiLocalsDuringCallback.pollResult !== 0 ||
+            dbiLocalsDuringCallback.bytesWritten !== 1552 ||
+            dbiLocalsDuringCallback.record?.magic !== 0x524C4457 ||
+            dbiLocalsDuringCallback.record?.version !== 1 ||
+            dbiLocalsDuringCallback.record?.methodToken !== dbiEventRecordDuringCallback.record?.methodToken ||
+            dbiLocalsDuringCallback.record?.localCount < 1 ||
+            (dbiLocalsDuringCallback.record?.locals[0]?.name !== "local0" &&
+                dbiLocalsDuringCallback.record?.locals[0]?.name === "") ||
+            dbiLocalsDuringCallback.record?.locals[0]?.byteSize <= 0 ||
             dbiProcessStateDuringCallback.pollResult !== 0 ||
             dbiProcessStateDuringCallback.bytesWritten !== 40 ||
             dbiProcessStateDuringCallback.state?.sessionCreated !== 1 ||

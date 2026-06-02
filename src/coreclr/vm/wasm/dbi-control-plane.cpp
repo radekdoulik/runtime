@@ -168,9 +168,32 @@ struct WasmDebugFrameRecord
     char MethodName[64];
 };
 
+constexpr uint32_t WasmDebugMaxLocalsPerFrame = 32;
+constexpr uint32_t WasmDebugLocalsRecordMagic = 0x524C4457; // 'WDLR'
+
+struct WasmDebugLocalRecord
+{
+    uint32_t ILSlot;
+    uint32_t TypeTag;
+    uint32_t ByteOffset;
+    uint32_t ByteSize;
+    char Name[32];
+};
+
+struct WasmDebugLocalsRecord
+{
+    uint32_t Magic;
+    uint32_t Version;
+    uint32_t MethodToken;
+    uint32_t LocalCount;
+    WasmDebugLocalRecord Locals[WasmDebugMaxLocalsPerFrame];
+};
+
 static_assert(sizeof(WasmDebugCommandRecord) == 80);
 static_assert(sizeof(WasmDebugEventRecord) == 340);
 static_assert(sizeof(WasmDebugFrameRecord) == 88);
+static_assert(sizeof(WasmDebugLocalRecord) == 48);
+static_assert(sizeof(WasmDebugLocalsRecord) == 16 + 32 * 48);
 static_assert(sizeof(WasmDbgIpcEventBreakpointRuntime) == 96,
               "WasmDbgIpcEventBreakpointRuntime must mirror the sidecar's WasmDbgIpcEventBreakpoint byte-for-byte");
 static_assert(sizeof(WasmDbgIpcEventContinueRequest) == 32,
@@ -196,6 +219,7 @@ uint8_t g_wasmDebugLastEvent[WasmDebugMessageBufferSize];
 uint32_t g_wasmDebugLastEventLength;
 WasmDebugEventRecord g_wasmDebugLastEventRecord;
 WasmDebugFrameRecord g_wasmDebugLastFrameRecord;
+WasmDebugLocalsRecord g_wasmDebugLastLocalsRecord;
 // Phase 4 slice 2: the structured DebuggerIPCEvent payload populated on
 // every breakpoint hit. g_wasmDebugLastIpcEventValid is set to 1 by
 // HandleInterpreterBreakpoint, cleared to 0 by CoreClrWasmDebugReadLastIpcEvent
@@ -309,6 +333,31 @@ void SetWasmDebugBreakpointFrameRecord(MethodDesc* methodDesc, uint32_t ilOffset
         g_wasmDebugLastFrameRecord.FirstStackSlotI32 = *reinterpret_cast<int32_t*>(stackAddress);
     }
     CopyWasmDebugString(g_wasmDebugLastFrameRecord.MethodName, sizeof(g_wasmDebugLastFrameRecord.MethodName), methodDesc->GetName());
+}
+
+void SetWasmDebugBreakpointLocalsRecord(MethodDesc* methodDesc, uintptr_t stackAddress)
+{
+    memset(&g_wasmDebugLastLocalsRecord, 0, sizeof(g_wasmDebugLastLocalsRecord));
+    g_wasmDebugLastLocalsRecord.Magic = WasmDebugLocalsRecordMagic;
+    g_wasmDebugLastLocalsRecord.Version = 1;
+    g_wasmDebugLastLocalsRecord.MethodToken = methodDesc->GetMemberDef();
+
+    // Phase 8 slice 1 intentionally snapshots a conservative placeholder.
+    // InterpMethod does not yet persist an IL-local descriptor table; the
+    // follow-up sidecar path will expose/walk real interpreter local
+    // metadata. Until then, publish the first 4-byte interpreter stack slot
+    // with stable shape so DBI/IDE callers can exercise the DAC enumeration
+    // path at a stopped frame.
+    if (stackAddress != 0)
+    {
+        WasmDebugLocalRecord& local = g_wasmDebugLastLocalsRecord.Locals[0];
+        local.ILSlot = 0;
+        local.TypeTag = static_cast<uint32_t>(ELEMENT_TYPE_I4);
+        local.ByteOffset = 0;
+        local.ByteSize = sizeof(int32_t);
+        CopyWasmDebugString(local.Name, sizeof(local.Name), "local0");
+        g_wasmDebugLastLocalsRecord.LocalCount = 1;
+    }
 }
 
 // Restore the original interpreter opcode at the patch site for a
@@ -563,6 +612,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugBreakpoints()
     return &g_wasmDebugBreakpoints[0];
 }
 
+extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastLocalsRecord()
+{
+    return &g_wasmDebugLastLocalsRecord;
+}
+
 extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetBreakpointSlotSize()
 {
     return static_cast<uint32_t>(sizeof(WasmDebugBreakpointSlot));
@@ -779,6 +833,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugCopyLastEventRecord(uint
 extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetLastFrameRecordSize()
 {
     return sizeof(WasmDebugFrameRecord);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetLastLocalsRecordSize()
+{
+    return sizeof(WasmDebugLocalsRecord);
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugCopyLastFrameRecord(uint8_t* buffer, uint32_t bufferLength)
@@ -1028,6 +1087,7 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     SetWasmDebugEvent(event);
     SetWasmDebugBreakpointEventRecord(methodDesc, ilOffset);
     SetWasmDebugBreakpointFrameRecord(methodDesc, ilOffset, ip, frameAddress, stackAddress);
+    SetWasmDebugBreakpointLocalsRecord(methodDesc, stackAddress);
 
     // Phase 4 slice 2: populate the structured DebuggerIPCEvent payload
     // the sidecar can drain via CoreClrWasmDebugReadLastIpcEvent. This
