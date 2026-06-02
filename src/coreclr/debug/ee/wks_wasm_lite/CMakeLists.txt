@@ -35,9 +35,12 @@ set(CORDBEE_SOURCES_WKS_WASM_LITE
 # through to ResolveOpcode's "no patch table" branch and returns the
 # raw opcode).
 if(FEATURE_INTERPRETER)
+    # Path A-lite slice 4: Approach B extracts InterpreterStepHelper into a
+    # shared wks source so wasm-lite and desktop use one implementation.
     list(APPEND CORDBEE_SOURCES_WKS_WASM_LITE
         ${CMAKE_CURRENT_SOURCE_DIR}/../interpreterwalker.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../executioncontrol.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../interpreterstephelper.cpp
     )
 endif()
 

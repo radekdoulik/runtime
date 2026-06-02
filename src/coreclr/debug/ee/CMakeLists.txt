@@ -52,6 +52,7 @@ list(APPEND CORDBEE_SOURCES_WKS ${ARCH_SOURCES_DIR}/walker.cpp)
 
 if(FEATURE_INTERPRETER)
   list(APPEND CORDBEE_SOURCES_WKS interpreterwalker.cpp)
+  list(APPEND CORDBEE_SOURCES_WKS interpreterstephelper.cpp)
   list(APPEND CORDBEE_HEADERS_WKS interpreterwalker.h)
 endif(FEATURE_INTERPRETER)
 

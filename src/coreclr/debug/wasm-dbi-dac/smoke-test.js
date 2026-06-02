@@ -237,6 +237,10 @@ async function main() {
         fail("runtime export CoreClrWasmDebugReadDacGlobalsProbe is missing");
     }
 
+    if (typeof runtimeExports.CoreClrWasmDebugCallInterpreterStepHelperProbe !== "function") {
+        fail("runtime export CoreClrWasmDebugCallInterpreterStepHelperProbe is missing");
+    }
+
     if (typeof runtimeExports.CoreClrWasmDebugReceiveCommand !== "function" ||
         typeof runtimeExports.CoreClrWasmDebugGetLastCommandLength !== "function" ||
         typeof runtimeExports.CoreClrWasmDebugCopyLastCommand !== "function") {
@@ -728,6 +732,11 @@ async function main() {
     const connectionPrevOnClear = runtimeExports.CoreClrWasmDebugSetDebuggerConnected(0) | 0;
     const connectionAfterClear = runtimeExports.CoreClrWasmDebugIsDebuggerConnected() | 0;
 
+    // Path A-lite slice 4 link probe: the exported runtime wrapper calls into
+    // interpreterstephelper.cpp, proving that source is present in the live
+    // runtime link graph without constructing the helper yet.
+    const interpreterStepHelperProbeSize = runtimeExports.CoreClrWasmDebugCallInterpreterStepHelperProbe() >>> 0;
+
     // DAC-completeness probe: read 13 well-known DacGlobals slot addresses
     // from the runtime via CoreClrWasmDebugReadDacGlobalsProbe. With the
     // dactable migration + wasm-debuggee-stubs in place, ALL ~145
@@ -1123,6 +1132,9 @@ async function main() {
             prevOnClear: connectionPrevOnClear,
             afterClear: connectionAfterClear
         },
+        interpreterStepHelperProbe: {
+            size: interpreterStepHelperProbeSize
+        },
         dacGlobalsProbeResult,
         dacGlobalsAllNonZero,
         dacGlobals,
@@ -1257,6 +1269,7 @@ async function main() {
         connectionAfterSet !== 1 ||
         connectionPrevOnClear !== 1 ||
         connectionAfterClear !== 0 ||
+        interpreterStepHelperProbeSize === 0 ||
         dacGlobalsProbeResult !== DacGlobalsProbeSlotCount ||
         !dacGlobalsAllNonZero ||
         multiBpSendA !== 0 ||

@@ -41,6 +41,7 @@ extern "C" int32_t CoreClrWasmDebugOnBreakpointHit(uint32_t eventAddress, uint32
 // callFrames (the Mono parallel pattern is BrowserDebugProxy's filter
 // for mono_wasm_fire_debugger_agent_message*).
 extern "C" int32_t coreClrDebugFireEventToPause(uint32_t eventAddress, uint32_t eventLength);
+extern "C" uint32_t CoreClrWasmDebugCallInterpreterStepHelperProbeImpl();
 
 // Forward declaration of g_dacTable defined in src/coreclr/debug/ee/dactable.cpp.
 // Used by CoreClrWasmDebugReadDacGlobalsProbe to expose well-known slot values
@@ -663,6 +664,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetBreakpointSlotCapaci
 // stubs.cpp providing the 6 previously-skipped globals, ~145 of the ~145
 // DacGlobals slots are now wired (only 5 vtable identity slots remain
 // zero — see VPTR_CLASS_REQUIRES_DEBUG_EE handling in dactable.cpp).
+// Public smoke export rooted in this already-live VM translation unit. The
+// implementation lives beside InterpreterStepHelper, so this call pulls the
+// shared helper source from coreclr_static into the runtime link graph.
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugCallInterpreterStepHelperProbe()
+{
+    return CoreClrWasmDebugCallInterpreterStepHelperProbeImpl();
+}
+
 extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReadDacGlobalsProbe(uint32_t* outBuffer, uint32_t bufferLengthBytes)
 {
     constexpr uint32_t SlotCount = 13;
