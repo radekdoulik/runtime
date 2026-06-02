@@ -349,7 +349,7 @@ struct WasmDbgIpcEventContinueRequest
 constexpr uint32_t WasmDbgIpcEventBreakpointMagic = 0x42435049;  // 'IPCB' little-endian
 constexpr uint32_t WasmDbgIpcEventTypeBreakpoint = 0x0100;       // DB_IPCE_BREAKPOINT
 constexpr uint32_t WasmDbgIpcEventContinueRequestMagic = 0x43435049; // 'IPCC' little-endian
-constexpr uint32_t WasmDbgIpcEventTypeContinueRequest = 0x0101;      // DB_IPCE_CONTINUE
+constexpr uint32_t WasmDbgIpcEventTypeContinueRequest = 0x0201;      // DB_IPCE_CONTINUE
 constexpr uint32_t WasmDbgIpcEventFlagReplyRequired = 0x1;
 constexpr uint32_t WasmDbgIpcEventFlagAsyncSend = 0x2;
 

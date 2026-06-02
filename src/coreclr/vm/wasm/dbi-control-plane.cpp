@@ -179,7 +179,7 @@ static_assert(sizeof(WasmDbgIpcEventContinueRequest) == 32,
 constexpr uint32_t WasmDbgIpcEventBreakpointMagic = 0x42435049;
 constexpr uint32_t WasmDbgIpcEventTypeBreakpoint = 0x0100;
 constexpr uint32_t WasmDbgIpcEventContinueRequestMagic = 0x43435049;
-constexpr uint32_t WasmDbgIpcEventTypeContinueRequest = 0x0101;
+constexpr uint32_t WasmDbgIpcEventTypeContinueRequest = 0x0201;
 
 WasmDbiDacTestData g_wasmDbiDacTestData =
 {

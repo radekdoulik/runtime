@@ -146,7 +146,7 @@ export synchronously.
 
 - `requestBytesLength` must equal 32 (`sizeof(WasmDbgIpcEventContinueRequest)`).
 - The payload magic is `'IPCC'` (`0x43435049`) and type is
-  `DB_IPCE_CONTINUE` (`0x0101`).
+  `DB_IPCE_CONTINUE` (`0x0201`).
 - Returns `0` on success, non-zero on validation or transport failure.
 
 ## Sidecar exports (sidecar → JS)
