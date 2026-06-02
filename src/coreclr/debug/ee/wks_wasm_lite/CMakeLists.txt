@@ -24,6 +24,21 @@ set(CORDBEE_SOURCES_WKS_WASM_LITE
     wasm_lite_marker.cpp
 )
 
+# Path A-lite slice 2: bring the zero-coupled IL walker online. The
+# desktop debug-EE shares interpreterwalker.cpp (~200 LOC, 0 Thread /
+# 0 AppDomain / 0 GCX_COOP refs) verbatim; we reuse the same file.
+# Its only link-time dependencies are DebuggerController::GetPatchTable
+# and ControllerLockHolder, which are satisfied by the cordbee_wks_wasm_lite
+# stubs added in subsequent slices (today: provided by
+# wasm-debuggee-stubs.cpp's null g_patches global; the walker falls
+# through to ResolveOpcode's "no patch table" branch and returns the
+# raw opcode).
+if(FEATURE_INTERPRETER)
+    list(APPEND CORDBEE_SOURCES_WKS_WASM_LITE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../interpreterwalker.cpp
+    )
+endif()
+
 add_library_clr(cordbee_wks_wasm_lite
     OBJECT
     ${CORDBEE_SOURCES_WKS_WASM_LITE}
