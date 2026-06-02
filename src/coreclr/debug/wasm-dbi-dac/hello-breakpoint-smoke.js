@@ -850,8 +850,7 @@ async function main() {
             dbiLocalsDuringCallback.record?.version !== 1 ||
             dbiLocalsDuringCallback.record?.methodToken !== dbiEventRecordDuringCallback.record?.methodToken ||
             dbiLocalsDuringCallback.record?.localCount < 1 ||
-            (dbiLocalsDuringCallback.record?.locals[0]?.name !== "local0" &&
-                dbiLocalsDuringCallback.record?.locals[0]?.name === "") ||
+            dbiLocalsDuringCallback.record?.locals[0]?.name !== "local0" ||
             dbiLocalsDuringCallback.record?.locals[0]?.byteSize <= 0 ||
             dbiProcessStateDuringCallback.pollResult !== 0 ||
             dbiProcessStateDuringCallback.bytesWritten !== 40 ||
