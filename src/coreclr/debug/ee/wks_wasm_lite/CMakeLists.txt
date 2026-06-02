@@ -23,6 +23,7 @@
 set(CORDBEE_SOURCES_WKS_WASM_LITE
     wasm_lite_marker.cpp
     wasm_debug_ee_stubs.cpp
+    wasm_debugger_ee_interface.cpp
 )
 
 # Path A-lite slice 2: bring the zero-coupled IL walker online. The

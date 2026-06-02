@@ -42,6 +42,8 @@ extern "C" int32_t CoreClrWasmDebugOnBreakpointHit(uint32_t eventAddress, uint32
 // for mono_wasm_fire_debugger_agent_message*).
 extern "C" int32_t coreClrDebugFireEventToPause(uint32_t eventAddress, uint32_t eventLength);
 extern "C" uint32_t CoreClrWasmDebugCallInterpreterStepHelperProbeImpl();
+extern "C" uint32_t CoreClrWasmDebugGetMethodEnterEnabledQueryCountImpl();
+extern "C" void CoreClrWasmDebugEnsureDebuggerEEInterface();
 
 // Forward declaration of g_dacTable defined in src/coreclr/debug/ee/dactable.cpp.
 // Used by CoreClrWasmDebugReadDacGlobalsProbe to expose well-known slot values
@@ -672,6 +674,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugCallInterpreterStepHelp
     return CoreClrWasmDebugCallInterpreterStepHelperProbeImpl();
 }
 
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetMethodEnterEnabledQueryCount()
+{
+    return CoreClrWasmDebugGetMethodEnterEnabledQueryCountImpl();
+}
+
 extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReadDacGlobalsProbe(uint32_t* outBuffer, uint32_t bufferLengthBytes)
 {
     constexpr uint32_t SlotCount = 13;
@@ -945,8 +952,19 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugClearBreakpointByToken(u
 // gate-check pattern used by mono_wasm_send_dbg_command.
 extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugSetDebuggerConnected(int32_t connected)
 {
+    CoreClrWasmDebugEnsureDebuggerEEInterface();
+
     int32_t previous = g_wasmDebuggerConnected ? 1 : 0;
     g_wasmDebuggerConnected = (connected != 0);
+    if (g_wasmDebuggerConnected)
+    {
+        g_CORDebuggerControlFlags |= DBCF_ATTACHED;
+        g_CORDebuggerControlFlags &= ~DBCF_PENDING_ATTACH;
+    }
+    else
+    {
+        g_CORDebuggerControlFlags &= ~(DBCF_ATTACHED | DBCF_PENDING_ATTACH);
+    }
     return previous;
 }
 

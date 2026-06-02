@@ -13,10 +13,11 @@
 // reading them returns null/zero rather than trapping on unresolved
 // symbols.
 //
-// When a future slice introduces real Debugger / DebuggerController
-// state in the wasm adapter (e.g. a real DebuggerPatchTable for
-// multi-breakpoint support), the corresponding stub here gets replaced
-// by the real definition.
+// Path A-lite slice 5 wires the VM-facing g_pDebugInterface global to a
+// wasm-lite DebugInterface singleton. The desktop Debugger object and
+// DebuggerController patch table are still absent here: breakpoint patch state
+// remains owned by vm/wasm/dbi-control-plane.cpp's WasmDebugBreakpointSlot
+// table until a future slice reconciles it with DebuggerPatchTable.
 //
 // VPtrHostVTable identification is NOT stubbed here because the 5
 // matching VPTR_CLASS entries in src/coreclr/inc/vptr_list.h are still
@@ -30,9 +31,26 @@
 #include "common.h"
 #include "../../debug/ee/debugger.h"
 #include "../../debug/ee/controller.h"
+#include "dbginterface.h"
+
+extern "C" DebugInterface* CoreClrWasmDebugGetDebuggerEEInterface();
+
+extern "C" void CoreClrWasmDebugEnsureDebuggerEEInterface()
+{
+    LIMITED_METHOD_CONTRACT;
+    g_pDebugInterface = CoreClrWasmDebugGetDebuggerEEInterface();
+}
+
+static struct WasmDebuggerEEInterfaceInitializer
+{
+    WasmDebuggerEEInterfaceInitializer()
+    {
+        CoreClrWasmDebugEnsureDebuggerEEInterface();
+    }
+} s_wasmDebuggerEEInterfaceInitializer;
 
 GPTR_IMPL(Debugger,         g_pDebugger);
-GPTR_IMPL(EEDebugInterface, g_pEEInterface);
+EEDebugInterface*           g_pEEInterface = NULL;
 GVAL_IMPL_INIT(ULONG,       CLRJitAttachState, 0);
 
 SPTR_IMPL_INIT(DebuggerPatchTable, DebuggerController, g_patches, NULL);

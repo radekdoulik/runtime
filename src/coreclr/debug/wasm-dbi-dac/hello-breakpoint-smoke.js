@@ -570,6 +570,9 @@ async function main() {
             if (typeof runtimeExports.memory === "undefined" || typeof runtimeExports.memory.buffer === "undefined") {
                 fail("runtime export 'memory' is missing or does not expose a buffer");
             }
+            if (typeof runtimeExports.CoreClrWasmDebugGetMethodEnterEnabledQueryCount !== "function") {
+                fail("runtime export CoreClrWasmDebugGetMethodEnterEnabledQueryCount is missing");
+            }
             globalThis.CoreClrWasmDebugReadTargetMemory = (targetAddress, debuggerAddress, byteCount) => {
                 const runtimeHeap = getRuntimeHeap();
                 const debuggerHeap = getDebuggerHeap();
@@ -784,6 +787,7 @@ async function main() {
 
         const result = await waitForBreakpointHit(runtimeExports);
         const continueCount = runtimeExports.CoreClrWasmDebugGetContinueCount();
+        const methodEnterQueryCount = runtimeExports.CoreClrWasmDebugGetMethodEnterEnabledQueryCount() >>> 0;
         const disconnectResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_disconnect_runtime();
         const sessionDestroyResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_session_destroy();
         result.callbackEvent = callbackEvent;
@@ -797,6 +801,7 @@ async function main() {
         result.testDataAtBreakpoint = testDataDuringCallback;
         result.continueDuringCallbackResult = continueDuringCallbackResult;
         result.continueCount = continueCount;
+        result.methodEnterQueryCount = methodEnterQueryCount;
         result.disconnectResult = disconnectResult;
         result.sessionDestroyResult = sessionDestroyResult;
         result.sawBreakpointBeforeContinue = sawBreakpointBeforeContinue;
@@ -868,6 +873,7 @@ async function main() {
             testDataDuringCallback.testData?.message !== "wasm-dbi-dac" ||
             continueDuringCallbackResult !== 0 ||
             continueCount !== 1 ||
+            methodEnterQueryCount === 0 ||
             disconnectResult !== 0 ||
             sessionDestroyResult !== 0 ||
             !sawBreakpointBeforeContinue ||

@@ -241,6 +241,10 @@ async function main() {
         fail("runtime export CoreClrWasmDebugCallInterpreterStepHelperProbe is missing");
     }
 
+    if (typeof runtimeExports.CoreClrWasmDebugGetMethodEnterEnabledQueryCount !== "function") {
+        fail("runtime export CoreClrWasmDebugGetMethodEnterEnabledQueryCount is missing");
+    }
+
     if (typeof runtimeExports.CoreClrWasmDebugReceiveCommand !== "function" ||
         typeof runtimeExports.CoreClrWasmDebugGetLastCommandLength !== "function" ||
         typeof runtimeExports.CoreClrWasmDebugCopyLastCommand !== "function") {
@@ -736,6 +740,7 @@ async function main() {
     // interpreterstephelper.cpp, proving that source is present in the live
     // runtime link graph without constructing the helper yet.
     const interpreterStepHelperProbeSize = runtimeExports.CoreClrWasmDebugCallInterpreterStepHelperProbe() >>> 0;
+    const methodEnterQueryCount = runtimeExports.CoreClrWasmDebugGetMethodEnterEnabledQueryCount() >>> 0;
 
     // DAC-completeness probe: read 13 well-known DacGlobals slot addresses
     // from the runtime via CoreClrWasmDebugReadDacGlobalsProbe. With the
@@ -1134,6 +1139,9 @@ async function main() {
         },
         interpreterStepHelperProbe: {
             size: interpreterStepHelperProbeSize
+        },
+        methodEnterQueryProbe: {
+            count: methodEnterQueryCount
         },
         dacGlobalsProbeResult,
         dacGlobalsAllNonZero,
