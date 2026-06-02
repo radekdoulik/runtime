@@ -129,7 +129,10 @@ public:
     LONG NotifyOfCHFFilter(EXCEPTION_POINTERS*, PVOID) override
     {
         LIMITED_METHOD_CONTRACT;
-        WASM_DEBUGGER_EE_UNEXPECTED_STUB("NotifyOfCHFFilter");
+        // Some EH filters call this based only on g_pDebugInterface being
+        // non-null, even when CORDebuggerAttached() is false. Keep this benign
+        // until wasm-lite owns the managed-exception notification pipeline.
+        WASM_DEBUGGER_EE_STUB("NotifyOfCHFFilter");
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
@@ -172,7 +175,7 @@ public:
     LONG LastChanceManagedException(EXCEPTION_POINTERS*, Thread*, BOOL) override
     {
         LIMITED_METHOD_CONTRACT;
-        WASM_DEBUGGER_EE_UNEXPECTED_STUB("LastChanceManagedException");
+        WASM_DEBUGGER_EE_STUB("LastChanceManagedException");
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
@@ -215,7 +218,7 @@ public:
     HRESULT RequestFavor(FAVORCALLBACK, void*) override
     {
         LIMITED_METHOD_CONTRACT;
-        WASM_DEBUGGER_EE_UNEXPECTED_STUB("RequestFavor");
+        WASM_DEBUGGER_EE_STUB("RequestFavor");
         return E_NOTIMPL;
     }
 
@@ -360,33 +363,33 @@ public:
     HRESULT LaunchDebuggerForUser(Thread*, EXCEPTION_POINTERS*, BOOL, BOOL) override
     {
         LIMITED_METHOD_CONTRACT;
-        WASM_DEBUGGER_EE_UNEXPECTED_STUB("LaunchDebuggerForUser");
+        WASM_DEBUGGER_EE_STUB("LaunchDebuggerForUser");
         return E_NOTIMPL;
     }
 
     void JitAttach(Thread*, EXCEPTION_POINTERS*, BOOL, BOOL) override
     {
         LIMITED_METHOD_CONTRACT;
-        WASM_DEBUGGER_EE_UNEXPECTED_STUB("JitAttach");
+        WASM_DEBUGGER_EE_STUB("JitAttach");
     }
 
     BOOL PreJitAttach(BOOL, BOOL, BOOL) override
     {
         LIMITED_METHOD_CONTRACT;
-        WASM_DEBUGGER_EE_UNEXPECTED_STUB("PreJitAttach");
+        WASM_DEBUGGER_EE_STUB("PreJitAttach");
         return FALSE;
     }
 
     void WaitForDebuggerAttach() override
     {
         LIMITED_METHOD_CONTRACT;
-        WASM_DEBUGGER_EE_UNEXPECTED_STUB("WaitForDebuggerAttach");
+        WASM_DEBUGGER_EE_STUB("WaitForDebuggerAttach");
     }
 
     void PostJitAttach() override
     {
         LIMITED_METHOD_CONTRACT;
-        WASM_DEBUGGER_EE_UNEXPECTED_STUB("PostJitAttach");
+        WASM_DEBUGGER_EE_STUB("PostJitAttach");
     }
 
     void SendUserBreakpointAndSynchronize(Thread*) override
@@ -422,7 +425,7 @@ public:
     bool GetILOffsetFromNative(MethodDesc*, const BYTE*, DWORD, DWORD* ilOffset) override
     {
         LIMITED_METHOD_CONTRACT;
-        WASM_DEBUGGER_EE_UNEXPECTED_STUB("GetILOffsetFromNative");
+        WASM_DEBUGGER_EE_STUB("GetILOffsetFromNative");
         if (ilOffset != nullptr)
         {
             *ilOffset = 0;
@@ -433,7 +436,7 @@ public:
     HRESULT GetILToNativeMapping(PCODE, ULONG32, ULONG32* pcMap, COR_DEBUG_IL_TO_NATIVE_MAP[]) override
     {
         LIMITED_METHOD_CONTRACT;
-        WASM_DEBUGGER_EE_UNEXPECTED_STUB("GetILToNativeMapping");
+        WASM_DEBUGGER_EE_STUB("GetILToNativeMapping");
         if (pcMap != nullptr)
         {
             *pcMap = 0;
@@ -445,7 +448,7 @@ public:
     HRESULT GetILToNativeMappingIntoArrays(MethodDesc*, PCODE, USHORT, USHORT* pcMap, UINT**, UINT**) override
     {
         LIMITED_METHOD_CONTRACT;
-        WASM_DEBUGGER_EE_UNEXPECTED_STUB("GetILToNativeMappingIntoArrays");
+        WASM_DEBUGGER_EE_STUB("GetILToNativeMappingIntoArrays");
         if (pcMap != nullptr)
         {
             *pcMap = 0;
@@ -468,7 +471,7 @@ public:
     HRESULT SetILInstrumentedCodeMap(MethodDesc*, BOOL, ULONG32, COR_IL_MAP[]) override
     {
         LIMITED_METHOD_CONTRACT;
-        WASM_DEBUGGER_EE_UNEXPECTED_STUB("SetILInstrumentedCodeMap");
+        WASM_DEBUGGER_EE_STUB("SetILInstrumentedCodeMap");
         return E_NOTIMPL;
     }
 
@@ -529,7 +532,7 @@ public:
         BYTE***) override
     {
         LIMITED_METHOD_CONTRACT;
-        WASM_DEBUGGER_EE_UNEXPECTED_STUB("GetVariablesFromOffset");
+        WASM_DEBUGGER_EE_STUB("GetVariablesFromOffset");
         return E_NOTIMPL;
     }
 
@@ -544,7 +547,7 @@ public:
         BYTE**) override
     {
         LIMITED_METHOD_CONTRACT;
-        WASM_DEBUGGER_EE_UNEXPECTED_STUB("SetVariablesAtOffset");
+        WASM_DEBUGGER_EE_STUB("SetVariablesAtOffset");
         return E_NOTIMPL;
     }
 
@@ -568,7 +571,7 @@ public:
     DWORD* GetJMCFlagAddr(Module*) override
     {
         LIMITED_METHOD_CONTRACT;
-        WASM_DEBUGGER_EE_UNEXPECTED_STUB("GetJMCFlagAddr");
+        WASM_DEBUGGER_EE_STUB("GetJMCFlagAddr");
         return nullptr;
     }
 
