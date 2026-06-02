@@ -36,6 +36,7 @@ set(CORDBEE_SOURCES_WKS_WASM_LITE
 if(FEATURE_INTERPRETER)
     list(APPEND CORDBEE_SOURCES_WKS_WASM_LITE
         ${CMAKE_CURRENT_SOURCE_DIR}/../interpreterwalker.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../executioncontrol.cpp
     )
 endif()
 

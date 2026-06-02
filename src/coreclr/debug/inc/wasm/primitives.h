@@ -52,6 +52,15 @@ inline bool PRDIsEmpty(PRD_TYPE p1)
     return p1 == 0;
 }
 
+inline void InitializePRD(PRD_TYPE *p1)
+{
+    // Reset the patch-restoration-data slot to the "empty / not-set"
+    // state. Mirrors the arm_primitives.h / amd64_primitives.h
+    // implementations: a zeroed PRD means "no original opcode saved".
+    // Used by debug/ee/executioncontrol.cpp when un-applying a patch.
+    *p1 = 0;
+}
+
 inline BOOL CompareControlRegisters(const DT_CONTEXT * pCtx1, const DT_CONTEXT * pCtx2)
 {
     LIMITED_METHOD_CONTRACT;
