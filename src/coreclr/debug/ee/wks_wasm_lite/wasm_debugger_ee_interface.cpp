@@ -298,7 +298,11 @@ public:
         }
     }
 
-    void getBoundaries(MethodDesc*, unsigned int* cILOffsets, DWORD** pILOffsets, ICorDebugInfo::BoundaryTypes*) override
+    void getBoundaries(
+        MethodDesc*,
+        unsigned int* cILOffsets,
+        DWORD** pILOffsets,
+        ICorDebugInfo::BoundaryTypes* implicitBoundaries) override
     {
         LIMITED_METHOD_CONTRACT;
         WASM_DEBUGGER_EE_STUB("getBoundaries");
@@ -309,6 +313,10 @@ public:
         if (pILOffsets != nullptr)
         {
             *pILOffsets = nullptr;
+        }
+        if (implicitBoundaries != nullptr)
+        {
+            *implicitBoundaries = ICorDebugInfo::DEFAULT_BOUNDARIES;
         }
     }
 
@@ -326,7 +334,8 @@ public:
         }
         if (extendOthers != nullptr)
         {
-            *extendOthers = false;
+            // Match CEEInfo::getVars' no-debugger fallback.
+            *extendOthers = true;
         }
     }
 
