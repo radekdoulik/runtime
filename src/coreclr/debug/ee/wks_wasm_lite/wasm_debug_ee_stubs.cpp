@@ -26,15 +26,35 @@ DebuggerControllerPage *DebuggerController::g_protections = NULL;
 CrstStatic              DebuggerController::g_criticalSection;
 int                     DebuggerController::g_cTotalMethodEnter = 0;
 
+static bool s_controllerLockInitialized = false;
+
+static bool InitializeControllerLock(CrstStatic *lock)
+{
+    LIMITED_METHOD_CONTRACT;
+
+    if (s_controllerLockInitialized)
+    {
+        return true;
+    }
+
+    ZeroMemory(lock, sizeof(*lock));
+    s_controllerLockInitialized = lock->InitNoThrow(
+        CrstDebuggerController,
+        (CrstFlags)(CRST_UNSAFE_ANYMODE | CRST_REENTRANCY | CRST_DEBUGGER_THREAD));
+    _ASSERTE(s_controllerLockInitialized);
+    return s_controllerLockInitialized;
+}
+
 HRESULT DebuggerController::Initialize()
 {
     LIMITED_METHOD_CONTRACT;
-    return S_OK;
+    return InitializeControllerLock(&g_criticalSection) ? S_OK : E_OUTOFMEMORY;
 }
 
 void DebuggerController::DeleteAllControllers()
 {
     LIMITED_METHOD_CONTRACT;
+    InitializeControllerLock(&g_criticalSection);
 }
 
 DebuggerController::DebuggerController(Thread *pThread, AppDomain *pAppDomain)
@@ -53,6 +73,7 @@ DebuggerController::DebuggerController(Thread *pThread, AppDomain *pAppDomain)
       m_externalMethodFixup(false)
 {
     LIMITED_METHOD_CONTRACT;
+    InitializeControllerLock(&g_criticalSection);
 }
 
 DebuggerController::~DebuggerController()
