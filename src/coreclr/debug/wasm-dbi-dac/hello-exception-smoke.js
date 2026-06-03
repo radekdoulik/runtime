@@ -56,6 +56,23 @@ function readNullTerminatedAscii(memory, address, byteCount) {
     return result;
 }
 
+function decodeIpcExceptionPayload(memory, address) {
+    const view = new DataView(memory.buffer, address, IpcExceptionSize);
+    return {
+        magic: view.getUint32(0, true),
+        type: view.getUint32(4, true),
+        processId: view.getUint32(8, true),
+        threadId: view.getUint32(12, true),
+        hr: view.getInt32(32, true),
+        flags: view.getUint32(36, true),
+        exceptionToken: view.getBigUint64(40, true),
+        funcMetadataToken: view.getUint32(48, true),
+        ilOffset: view.getUint32(52, true),
+        exceptionAddress: view.getBigUint64(64, true),
+        exceptionTypeName: readNullTerminatedAscii(memory, address + 72, 64)
+    };
+}
+
 async function loadDebugger(debuggerJsPath, sendToRuntime) {
     const debuggerDirectory = path.dirname(debuggerJsPath);
     const source = fs.readFileSync(debuggerJsPath, "utf8");
@@ -342,24 +359,22 @@ function pollDbiIpcException(debuggerInstance) {
     const bytesWritten = new DataView(debuggerInstance.module.HEAPU8.buffer, bytesWrittenAddress, 4).getUint32(0, true);
     let payload = null;
     if (pollResult === 0 && bytesWritten === IpcExceptionSize) {
-        const view = new DataView(debuggerInstance.module.HEAPU8.buffer, eventAddress, IpcExceptionSize);
-        payload = {
-            magic: view.getUint32(0, true),
-            type: view.getUint32(4, true),
-            processId: view.getUint32(8, true),
-            threadId: view.getUint32(12, true),
-            hr: view.getInt32(32, true),
-            flags: view.getUint32(36, true),
-            exceptionToken: view.getBigUint64(40, true),
-            funcMetadataToken: view.getUint32(48, true),
-            ilOffset: view.getUint32(52, true),
-            exceptionAddress: view.getBigUint64(64, true),
-            exceptionTypeName: readNullTerminatedAscii(debuggerInstance.module.HEAPU8, eventAddress + 72, 64)
-        };
+        payload = decodeIpcExceptionPayload(debuggerInstance.module.HEAPU8, eventAddress);
     }
     debuggerInstance.exports.stackRestore(stack);
 
     return { pollResult, bytesWritten, payload };
+}
+
+function readRuntimeIpcException(runtimeExports, runtimeHeap) {
+    const stack = runtimeExports.stackSave();
+    const eventAddress = runtimeExports.stackAlloc(IpcExceptionSize);
+    const readBytes = runtimeExports.CoreClrWasmDebugReadLastIpcException(eventAddress, IpcExceptionSize);
+    const payload = readBytes === IpcExceptionSize ? decodeIpcExceptionPayload(runtimeHeap, eventAddress) : null;
+    const secondReadBytes = runtimeExports.CoreClrWasmDebugReadLastIpcException(eventAddress, IpcExceptionSize);
+    runtimeExports.stackRestore(stack);
+
+    return { readBytes, secondReadBytes, payload };
 }
 
 async function waitForExceptionEvents(exceptionEvents, expectedCount) {
@@ -393,6 +408,8 @@ async function main() {
     let fireEventToPauseCount = 0;
     let fireEventToPauseLastLength = 0;
     const exceptionEvents = [];
+    const runtimeExceptionReads = [];
+    const postRuntimeDrainPolls = [];
     const runtimeOutput = [];
 
     const getRuntimeHeap = () => {
@@ -489,6 +506,8 @@ async function main() {
                 if (exception.payload !== null) {
                     exceptionEvents.push(exception);
                 }
+                runtimeExceptionReads.push(readRuntimeIpcException(runtimeExports, getRuntimeHeap()));
+                postRuntimeDrainPolls.push(pollDbiIpcException(debuggerInstance));
                 return 0;
             };
 
@@ -522,6 +541,9 @@ async function main() {
         const matchingRethrowEvents = exceptionEvents.filter(event =>
             event.payload?.funcMetadataToken === ExpectedRethrowHereToken &&
             event.payload?.exceptionTypeName === "System.InvalidOperationException");
+        const matchingRuntimeRead = runtimeExceptionReads.find(event =>
+            event.payload?.funcMetadataToken === expectedMethodToken &&
+            event.payload?.exceptionTypeName === "System.InvalidOperationException");
         const disconnectResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_disconnect_runtime();
         const sessionDestroyResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_session_destroy();
 
@@ -531,7 +553,9 @@ async function main() {
             fireEventToPauseLastLength,
             expectedMethodToken: `0x${expectedMethodToken.toString(16)}`,
             eventCount: exceptionEvents.length,
+            runtimeReadCount: runtimeExceptionReads.length,
             rethrowEventCount: matchingRethrowEvents.length,
+            postRuntimeDrainPollCount: postRuntimeDrainPolls.length,
             matchingEvent: matchingEvent?.payload !== undefined ? {
                 pollResult: matchingEvent.pollResult,
                 bytesWritten: matchingEvent.bytesWritten,
@@ -546,6 +570,15 @@ async function main() {
                 ilOffset: matchingEvent.payload.ilOffset,
                 exceptionAddress: `0x${matchingEvent.payload.exceptionAddress.toString(16)}`,
                 exceptionTypeName: matchingEvent.payload.exceptionTypeName
+            } : null,
+            matchingRuntimeRead: matchingRuntimeRead?.payload !== undefined ? {
+                readBytes: matchingRuntimeRead.readBytes,
+                secondReadBytes: matchingRuntimeRead.secondReadBytes,
+                magic: `0x${matchingRuntimeRead.payload.magic.toString(16)}`,
+                type: `0x${matchingRuntimeRead.payload.type.toString(16)}`,
+                exceptionToken: `0x${matchingRuntimeRead.payload.exceptionToken.toString(16)}`,
+                funcMetadataToken: `0x${matchingRuntimeRead.payload.funcMetadataToken.toString(16)}`,
+                exceptionTypeName: matchingRuntimeRead.payload.exceptionTypeName
             } : null,
             runtimeOutput,
             disconnectResult,
@@ -567,6 +600,16 @@ async function main() {
             matchingEvent.payload?.exceptionToken === 0n ||
             matchingEvent.payload?.funcMetadataToken !== expectedMethodToken ||
             matchingEvent.payload?.exceptionAddress === 0n ||
+            matchingRuntimeRead === undefined ||
+            matchingRuntimeRead.readBytes !== IpcExceptionSize ||
+            matchingRuntimeRead.secondReadBytes !== 0 ||
+            matchingRuntimeRead.payload?.magic !== IpcExceptionMagic ||
+            matchingRuntimeRead.payload?.type !== IpcExceptionType ||
+            matchingRuntimeRead.payload?.funcMetadataToken !== expectedMethodToken ||
+            runtimeExceptionReads.length !== 3 ||
+            runtimeExceptionReads.some(event => event.readBytes !== IpcExceptionSize || event.secondReadBytes !== 0) ||
+            postRuntimeDrainPolls.length !== 3 ||
+            postRuntimeDrainPolls.some(event => event.pollResult !== 0 || event.bytesWritten !== 0) ||
             matchingRethrowEvents.length < 2 ||
             fireEventToPauseCount < 3 ||
             fireEventToPauseLastLength !== IpcExceptionSize ||

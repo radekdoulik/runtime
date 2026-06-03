@@ -4376,8 +4376,17 @@ do                                                                      \
                     *(const int32_t**)pFrame->pRetVal = ip + ip[1];
                     goto EXIT_FRAME;
                 case INTOP_THROW_PNSE:
-                    COMPlusThrow(kPlatformNotSupportedException);
+                {
+                    EEException ex(kPlatformNotSupportedException);
+                    OBJECTREF throwable = ex.CreateThrowable();
+                    pInterpreterFrame->SetIsFaulting(true);
+#if defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
+                    CoreClrWasmDebugNotifyInterpreterExceptionAtIP(pMethod, pFrame, ip, &throwable);
+#endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
+                    DispatchManagedException(throwable);
+                    UNREACHABLE();
                     break;
+                }
 
                 case INTOP_HANDLE_CONTINUATION_GENERIC:
                 case INTOP_HANDLE_CONTINUATION:
