@@ -357,6 +357,49 @@ void CopyWasmDebugString(char* destination, size_t destinationLength, const char
     destination[sourceLength] = 0;
 }
 
+void AppendWasmDebugString(char* destination, size_t destinationLength, size_t* destinationOffset, const char* source)
+{
+    if (destinationLength == 0 || source == nullptr)
+    {
+        return;
+    }
+
+    while (*source != 0 && *destinationOffset + 1 < destinationLength)
+    {
+        destination[*destinationOffset] = *source;
+        (*destinationOffset)++;
+        source++;
+    }
+    destination[*destinationOffset] = 0;
+}
+
+void CopyWasmDebugTypeName(char* destination, size_t destinationLength, MethodTable* methodTable)
+{
+    if (destinationLength == 0)
+    {
+        return;
+    }
+
+    destination[0] = 0;
+    if (methodTable == nullptr)
+    {
+        return;
+    }
+
+    LPCUTF8 namespaceName = nullptr;
+    LPCUTF8 className = methodTable->GetFullyQualifiedNameInfo(&namespaceName);
+    size_t destinationOffset = 0;
+    if (namespaceName != nullptr && namespaceName[0] != 0)
+    {
+        AppendWasmDebugString(destination, destinationLength, &destinationOffset, namespaceName);
+        if (className != nullptr && className[0] != 0)
+        {
+            AppendWasmDebugString(destination, destinationLength, &destinationOffset, ".");
+        }
+    }
+    AppendWasmDebugString(destination, destinationLength, &destinationOffset, className);
+}
+
 void SetWasmDebugBreakpointEventRecord(MethodDesc* methodDesc, uint32_t ilOffset)
 {
     uint32_t hitCount = (g_wasmDebugLastFiredSlot < WasmDebugMaxBreakpoints)
@@ -443,12 +486,10 @@ void EmitWasmDebugException(MethodDesc* methodDesc, uint32_t ilOffset, const int
             g_wasmDebugLastIpcException.Hr = ((EXCEPTIONREF)protectedException)->GetHResult();
         }
 
-        DefineFullyQualifiedNameForClass();
-        LPCUTF8 exceptionTypeName = GetFullyQualifiedNameForClass(exceptionMethodTable);
-        CopyWasmDebugString(
+        CopyWasmDebugTypeName(
             g_wasmDebugLastIpcException.ExceptionTypeName,
             sizeof(g_wasmDebugLastIpcException.ExceptionTypeName),
-            exceptionTypeName);
+            exceptionMethodTable);
         GCPROTECT_END();
     }
 
