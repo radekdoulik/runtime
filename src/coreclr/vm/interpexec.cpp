@@ -27,6 +27,37 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     int32_t* originalOpcode);
 extern "C" bool CoreClrWasmDebugIsDebuggerConnectedForHooks();
 extern "C" void CoreClrWasmDebugNotifyInterpreterException(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, OBJECTREF exceptionObj);
+
+static void CoreClrWasmDebugNotifyInterpreterExceptionAtIP(InterpMethod* pMethod, const InterpMethodContextFrame* pFrame, const int32_t* ip, OBJECTREF* pThrowable)
+{
+    CONTRACTL
+    {
+        NOTHROW;
+        WRAPPER(GC_TRIGGERS);
+        MODE_COOPERATIVE;
+    }
+    CONTRACTL_END;
+
+    if (pMethod == nullptr || pFrame == nullptr || pThrowable == nullptr || *pThrowable == NULL)
+    {
+        return;
+    }
+
+    uint32_t exceptionILOffset = 0;
+    const int32_t* startIP = pFrame->startIp->GetByteCodes();
+    if (ip >= startIP)
+    {
+        uintptr_t slotOffset = static_cast<uintptr_t>(ip - startIP);
+        if (slotOffset <= UINT32_MAX)
+        {
+            exceptionILOffset = static_cast<uint32_t>(slotOffset);
+        }
+    }
+
+    GCPROTECT_BEGIN(*pThrowable);
+    CoreClrWasmDebugNotifyInterpreterException(pMethod->methodHnd, exceptionILOffset, ip, *pThrowable);
+    GCPROTECT_END();
+}
 #endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
 
 struct InterpDispatchCacheEntry
@@ -3643,19 +3674,7 @@ CALL_INTERP_METHOD:
 
                     pInterpreterFrame->SetIsFaulting(true);
 #if defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
-                    GCPROTECT_BEGIN(throwable);
-                    uint32_t exceptionILOffset = 0;
-                    const int32_t* startIP = pFrame->startIp->GetByteCodes();
-                    if (ip >= startIP)
-                    {
-                        uintptr_t slotOffset = static_cast<uintptr_t>(ip - startIP);
-                        if (slotOffset <= UINT32_MAX)
-                        {
-                            exceptionILOffset = static_cast<uint32_t>(slotOffset);
-                        }
-                    }
-                    CoreClrWasmDebugNotifyInterpreterException(pMethod->methodHnd, exceptionILOffset, ip, throwable);
-                    GCPROTECT_END();
+                    CoreClrWasmDebugNotifyInterpreterExceptionAtIP(pMethod, pFrame, ip, &throwable);
 #endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
                     DispatchManagedException(throwable);
                     UNREACHABLE();
@@ -3664,6 +3683,10 @@ CALL_INTERP_METHOD:
                 case INTOP_RETHROW:
                 {
                     pInterpreterFrame->SetIsFaulting(true);
+#if defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
+                    OBJECTREF throwable = GetThread()->GetExceptionState()->GetThrowable();
+                    CoreClrWasmDebugNotifyInterpreterExceptionAtIP(pMethod, pFrame, ip, &throwable);
+#endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
                     DispatchRethrownManagedException();
                     UNREACHABLE();
                     break;
@@ -4654,6 +4677,9 @@ do                                                                      \
                         if (exception != NULL)
                         {
                             pInterpreterFrame->SetIsFaulting(true);
+#if defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
+                            CoreClrWasmDebugNotifyInterpreterExceptionAtIP(pMethod, pFrame, ip, &exception);
+#endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
                             DispatchManagedException(exception, ExKind::RethrowFlag);
                             UNREACHABLE();
                         }

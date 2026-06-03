@@ -17,6 +17,8 @@ const IpcExceptionSize = 144;
 const IpcExceptionMagic = 0x58435049;
 const IpcExceptionType = 0x0103;
 const InvalidOperationHr = 0x80131509 | 0;
+const ExpectedThrowHereToken = 0x06000002;
+const ExpectedRethrowHereToken = 0x06000003;
 
 function fail(message) {
     throw new Error(message);
@@ -204,6 +206,14 @@ public static class Program
         {
             Console.WriteLine($"caught:{ex.GetType().FullName}:{ex.Message}");
         }
+        try
+        {
+            HelloExceptionTarget.RethrowHere();
+        }
+        catch (InvalidOperationException ex)
+        {
+            Console.WriteLine($"recaught:{ex.GetType().FullName}:{ex.Message}");
+        }
         Console.WriteLine("after");
     }
 }
@@ -215,6 +225,20 @@ public static class HelloExceptionTarget
     {
         Console.WriteLine($"throw-token=0x{MethodBase.GetCurrentMethod()!.MetadataToken:x8}");
         throw new InvalidOperationException("wasm-dbi-dac test");
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static void RethrowHere()
+    {
+        Console.WriteLine($"rethrow-token=0x{MethodBase.GetCurrentMethod()!.MetadataToken:x8}");
+        try
+        {
+            throw new InvalidOperationException("wasm-dbi-dac rethrow");
+        }
+        catch
+        {
+            throw;
+        }
     }
 }
 `);
@@ -338,10 +362,10 @@ function pollDbiIpcException(debuggerInstance) {
     return { pollResult, bytesWritten, payload };
 }
 
-async function waitForExceptionEvent(exceptionEvents) {
+async function waitForExceptionEvents(exceptionEvents, expectedCount) {
     const deadline = Date.now() + 5000;
     while (Date.now() < deadline) {
-        if (exceptionEvents.length !== 0) {
+        if (exceptionEvents.length >= expectedCount) {
             return true;
         }
 
@@ -490,10 +514,13 @@ async function main() {
             }
         }, runtimeOutput);
 
-        const sawException = await waitForExceptionEvent(exceptionEvents);
-        const expectedMethodToken = 0x06000002;
+        const sawException = await waitForExceptionEvents(exceptionEvents, 3);
+        const expectedMethodToken = ExpectedThrowHereToken;
         const matchingEvent = exceptionEvents.find(event =>
             event.payload?.funcMetadataToken === expectedMethodToken &&
+            event.payload?.exceptionTypeName === "System.InvalidOperationException");
+        const matchingRethrowEvents = exceptionEvents.filter(event =>
+            event.payload?.funcMetadataToken === ExpectedRethrowHereToken &&
             event.payload?.exceptionTypeName === "System.InvalidOperationException");
         const disconnectResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_disconnect_runtime();
         const sessionDestroyResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_session_destroy();
@@ -504,6 +531,7 @@ async function main() {
             fireEventToPauseLastLength,
             expectedMethodToken: `0x${expectedMethodToken.toString(16)}`,
             eventCount: exceptionEvents.length,
+            rethrowEventCount: matchingRethrowEvents.length,
             matchingEvent: matchingEvent?.payload !== undefined ? {
                 pollResult: matchingEvent.pollResult,
                 bytesWritten: matchingEvent.bytesWritten,
@@ -539,7 +567,8 @@ async function main() {
             matchingEvent.payload?.exceptionToken === 0n ||
             matchingEvent.payload?.funcMetadataToken !== expectedMethodToken ||
             matchingEvent.payload?.exceptionAddress === 0n ||
-            fireEventToPauseCount === 0 ||
+            matchingRethrowEvents.length < 2 ||
+            fireEventToPauseCount < 3 ||
             fireEventToPauseLastLength !== IpcExceptionSize ||
             disconnectResult !== 0 ||
             sessionDestroyResult !== 0) {
