@@ -367,6 +367,7 @@ uint32_t g_wasmDebugStepIntoCallerILOffset;
 const int32_t* g_wasmDebugStepIntoCallFallbackIP;
 MethodDesc* g_wasmDebugMethodEnterContextMethodDesc;
 const int32_t* g_wasmDebugMethodEnterContextIP;
+InterpMethodContextFrame* g_wasmDebugMethodEnterContextFrame;
 bool g_wasmDebugOneShotStepPending;
 uint64_t g_wasmDebugOneShotStepRequestToken;
 
@@ -620,6 +621,46 @@ void RestoreWasmDebugBreakpointPatchSlot(WasmDebugBreakpointSlot& slot)
     slot.PatchActive = false;
 }
 
+bool HasOtherWasmDebugActivePatchAt(const WasmDebugBreakpointSlot& slot)
+{
+    if (!slot.PatchActive || slot.PatchAddress == nullptr)
+    {
+        return false;
+    }
+
+    for (const WasmDebugBreakpointSlot& otherSlot : g_wasmDebugBreakpoints)
+    {
+        if (&otherSlot != &slot &&
+            otherSlot.PatchActive &&
+            otherSlot.PatchAddress == slot.PatchAddress)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void ClearWasmDebugBreakpointSlot(WasmDebugBreakpointSlot& slot)
+{
+    if (HasOtherWasmDebugActivePatchAt(slot))
+    {
+        slot.PatchAddress = nullptr;
+        slot.OriginalOpcode = 0;
+        slot.PatchActive = false;
+    }
+    else
+    {
+        RestoreWasmDebugBreakpointPatchSlot(slot);
+    }
+
+    slot.Armed = false;
+    slot.IsOneShot = false;
+    slot.MethodName[0] = 0;
+    slot.MethodToken = 0;
+    slot.HitCount = 0;
+}
+
 // Find a free slot to arm a new breakpoint into. Returns nullptr when
 // all WasmDebugMaxBreakpoints slots are in use; callers (e.g.
 // dbi_set_breakpoint_by_*) should surface that as a session-level error.
@@ -829,11 +870,7 @@ uint32_t ClearWasmDebugBreakpointByName(const char* methodName)
             slot.MethodToken == 0 &&
             strcmp(slot.MethodName, methodName) == 0)
         {
-            RestoreWasmDebugBreakpointPatchSlot(slot);
-            slot.Armed = false;
-            slot.IsOneShot = false;
-            slot.MethodName[0] = 0;
-            slot.HitCount = 0;
+            ClearWasmDebugBreakpointSlot(slot);
             cleared++;
         }
     }
@@ -852,12 +889,7 @@ uint32_t ClearWasmDebugBreakpointByToken(uint32_t methodToken)
     {
         if (slot.Armed && slot.MethodToken == methodToken)
         {
-            RestoreWasmDebugBreakpointPatchSlot(slot);
-            slot.Armed = false;
-            slot.IsOneShot = false;
-            slot.MethodName[0] = 0;
-            slot.MethodToken = 0;
-            slot.HitCount = 0;
+            ClearWasmDebugBreakpointSlot(slot);
             cleared++;
         }
     }
@@ -879,12 +911,7 @@ void ClearWasmDebugOneShotBreakpointAt(MethodDesc* methodDesc, const int32_t* ta
             slot.MethodToken == methodToken &&
             slot.PatchAddress == targetIP)
         {
-            RestoreWasmDebugBreakpointPatchSlot(slot);
-            slot.Armed = false;
-            slot.IsOneShot = false;
-            slot.MethodName[0] = 0;
-            slot.MethodToken = 0;
-            slot.HitCount = 0;
+            ClearWasmDebugBreakpointSlot(slot);
         }
     }
 }
@@ -895,12 +922,7 @@ void ClearWasmDebugAllOneShotBreakpoints()
     {
         if (slot.Armed && slot.IsOneShot)
         {
-            RestoreWasmDebugBreakpointPatchSlot(slot);
-            slot.Armed = false;
-            slot.IsOneShot = false;
-            slot.MethodName[0] = 0;
-            slot.MethodToken = 0;
-            slot.HitCount = 0;
+            ClearWasmDebugBreakpointSlot(slot);
         }
     }
 }
@@ -1711,11 +1733,12 @@ extern "C" bool CoreClrWasmDebugIsStepIntoCallPending()
     return g_wasmDebuggerConnected && g_wasmDebugStepIntoCallPending;
 }
 
-extern "C" void CoreClrWasmDebugSetMethodEnterContext(MethodDesc* methodDesc, const int32_t* ip)
+extern "C" void CoreClrWasmDebugSetMethodEnterContext(MethodDesc* methodDesc, const int32_t* ip, InterpMethodContextFrame* frame)
 {
     LIMITED_METHOD_CONTRACT;
     g_wasmDebugMethodEnterContextMethodDesc = methodDesc;
     g_wasmDebugMethodEnterContextIP = ip;
+    g_wasmDebugMethodEnterContextFrame = frame;
 }
 
 extern "C" void CoreClrWasmDebugClearMethodEnterContext()
@@ -1723,6 +1746,7 @@ extern "C" void CoreClrWasmDebugClearMethodEnterContext()
     LIMITED_METHOD_CONTRACT;
     g_wasmDebugMethodEnterContextMethodDesc = nullptr;
     g_wasmDebugMethodEnterContextIP = nullptr;
+    g_wasmDebugMethodEnterContextFrame = nullptr;
 }
 
 extern "C" void CoreClrWasmDebugHandleMethodEnter(const int32_t* ip)
@@ -1737,8 +1761,9 @@ extern "C" void CoreClrWasmDebugHandleMethodEnter(const int32_t* ip)
     const int32_t* landedIP = ip != nullptr ? ip : g_wasmDebugMethodEnterContextIP;
     uint64_t originalStepRequestToken = g_wasmDebugStepIntoTokenAtCall;
     MethodDesc* methodDesc = g_wasmDebugMethodEnterContextMethodDesc;
+    InterpMethodContextFrame* frame = g_wasmDebugMethodEnterContextFrame;
     ClearWasmDebugStepIntoCallState(true);
-    EmitWasmDebugStepComplete(methodDesc, 0, landedIP, originalStepRequestToken, true, nullptr);
+    EmitWasmDebugStepComplete(methodDesc, 0, landedIP, originalStepRequestToken, true, frame);
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugIsDebuggerConnected()
@@ -1902,12 +1927,7 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
         {
             if (slot.IsOneShot)
             {
-                RestoreWasmDebugBreakpointPatchSlot(slot);
-                slot.Armed = false;
-                slot.IsOneShot = false;
-                slot.MethodName[0] = 0;
-                slot.MethodToken = 0;
-                slot.HitCount = 0;
+                ClearWasmDebugBreakpointSlot(slot);
             }
         }
     }
