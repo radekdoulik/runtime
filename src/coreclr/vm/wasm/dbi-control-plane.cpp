@@ -1940,6 +1940,10 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     {
         ClearWasmDebugOneShotStepState(false);
     }
+    else if (g_wasmDebugOneShotStepPending)
+    {
+        ClearWasmDebugOneShotStepState(true);
+    }
 
     g_wasmDebugBreakpointStopped = true;
     g_wasmDebugContinueRequested = false;
