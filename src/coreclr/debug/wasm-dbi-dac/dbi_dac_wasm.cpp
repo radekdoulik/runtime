@@ -77,7 +77,8 @@ constexpr uint32_t WasmDbiDacVersionBlobMagic = 0x42564457;
 //   3 - add structured DB_IPCE_CONTINUE request import/export path.
 //   4 - add dbi_enumerate_locals sidecar export + locals-record payload.
 //   5 - add structured DB_IPCE_STEP_INTO request import/export path.
-constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 5;
+//   6 - add structured first-chance exception event drain path.
+constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 6;
 
 // Sidecar build version - encoded VS_FIXEDFILEINFO-style as two 32-bit
 // words. Reserved for future use; today's PoC sidecar reports 0/0 so
@@ -358,6 +359,25 @@ struct WasmDbgIpcEventBreakpoint
     uint64_t CodeStartAddress;
 };
 
+struct WasmDbgIpcEventException
+{
+    uint32_t Magic;
+    uint32_t Type;
+    uint32_t ProcessId;
+    uint32_t ThreadId;
+    uint64_t VmAppDomain;
+    uint64_t VmThread;
+    int32_t Hr;
+    uint32_t Flags;
+    uint64_t ExceptionToken;
+    uint32_t FuncMetadataToken;
+    uint32_t ILOffset;
+    uint64_t VmAssembly;
+    uint64_t ExceptionAddress;
+    char ExceptionTypeName[64];
+    uint64_t Reserved0;
+};
+
 struct WasmDbgIpcEventContinueRequest
 {
     uint32_t Magic;
@@ -382,6 +402,8 @@ struct WasmDbgIpcEventStepIntoRequest
 
 constexpr uint32_t WasmDbgIpcEventBreakpointMagic = 0x42435049;  // 'IPCB' little-endian
 constexpr uint32_t WasmDbgIpcEventTypeBreakpoint = 0x0100;       // DB_IPCE_BREAKPOINT
+constexpr uint32_t WasmDbgIpcEventExceptionMagic = 0x58435049;   // 'IPCX' little-endian
+constexpr uint32_t WasmDbgIpcEventTypeException = 0x0103;        // DB_IPCE_EXCEPTION-shaped wasm event
 constexpr uint32_t WasmDbgIpcEventContinueRequestMagic = 0x43435049; // 'IPCC' little-endian
 constexpr uint32_t WasmDbgIpcEventTypeContinueRequest = 0x0201;      // DB_IPCE_CONTINUE
 constexpr uint32_t WasmDbgIpcEventStepIntoRequestMagic = 0x53435049; // 'IPCS' little-endian
@@ -420,6 +442,7 @@ static_assert(sizeof(WasmDebugFrameRecord) == 88);
 static_assert(sizeof(WasmDebugLocalRecord) == 48);
 static_assert(sizeof(WasmDebugLocalsRecord) == 16 + 32 * 48);
 static_assert(sizeof(WasmDbgIpcEventBreakpoint) == 96);
+static_assert(sizeof(WasmDbgIpcEventException) == 144);
 static_assert(sizeof(WasmDbgIpcEventContinueRequest) == 32);
 static_assert(sizeof(WasmDbgIpcEventStepIntoRequest) == 32);
 static_assert(sizeof(WasmDbiProcessState) == 40);
@@ -564,6 +587,8 @@ WasmDebugFrameRecord g_lastRuntimeFrameRecord{};
 // them.
 uint64_t g_cachedIpcEventValidAddress = 0;
 uint64_t g_cachedIpcEventAddress = 0;
+uint64_t g_cachedExceptionEventValidAddress = 0;
+uint64_t g_cachedExceptionEventAddress = 0;
 uint64_t g_cachedBreakpointSlotsAddress = 0;
 uint64_t g_cachedLocalsRecordAddress = 0;
 
@@ -586,6 +611,8 @@ void ClearRuntimeConnectionState()
     // addresses survive teardown and ReadVirtual would hit garbage.
     g_cachedIpcEventValidAddress = 0;
     g_cachedIpcEventAddress = 0;
+    g_cachedExceptionEventValidAddress = 0;
+    g_cachedExceptionEventAddress = 0;
     g_cachedBreakpointSlotsAddress = 0;
     g_cachedLocalsRecordAddress = 0;
     InvalidatePageCache();
@@ -2487,6 +2514,102 @@ int32_t coreclr_wasm_dbi_dac_dbi_poll_ipc_event(uint32_t bufferAddress, uint32_t
     bytesRead = 0;
     hr = dataTarget.ReadVirtual(
         g_cachedIpcEventAddress,
+        reinterpret_cast<BYTE*>(&payload),
+        sizeof(payload),
+        &bytesRead);
+    if (FAILED(hr) || bytesRead != sizeof(payload))
+    {
+        return HostReadFailed;
+    }
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bufferAddress)), &payload, sizeof(payload));
+    uint32_t written = static_cast<uint32_t>(sizeof(payload));
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &written, sizeof(written));
+    return S_OK;
+}
+
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_poll_ipc_exception)
+int32_t coreclr_wasm_dbi_dac_dbi_poll_ipc_exception(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
+{
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
+    if (g_cordb == nullptr || !g_connectedToRuntime)
+    {
+        return E_FAIL;
+    }
+
+    if (bytesWrittenAddress == 0 || bufferAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    if (bufferLength < sizeof(WasmDbgIpcEventException))
+    {
+        return BufferTooSmall;
+    }
+
+    InvalidatePageCache();
+
+    WasmDacDataTarget dataTarget(g_connectedRuntimeBase);
+
+    if (g_cachedExceptionEventValidAddress == 0)
+    {
+        uint64_t resolved = 0;
+        if (!TryGetSymbol(
+                static_cast<ICorDebugDataTarget*>(&dataTarget),
+                g_connectedRuntimeBase,
+                "g_wasmDebugLastIpcExceptionValid",
+                &resolved) ||
+            resolved == 0 ||
+            resolved > UINT32_MAX)
+        {
+            return HostSymbolLookupFailed;
+        }
+        g_cachedExceptionEventValidAddress = resolved;
+    }
+    if (g_cachedExceptionEventAddress == 0)
+    {
+        uint64_t resolved = 0;
+        if (!TryGetSymbol(
+                static_cast<ICorDebugDataTarget*>(&dataTarget),
+                g_connectedRuntimeBase,
+                "g_wasmDebugLastIpcException",
+                &resolved) ||
+            resolved == 0 ||
+            resolved > UINT32_MAX)
+        {
+            return HostSymbolLookupFailed;
+        }
+        g_cachedExceptionEventAddress = resolved;
+    }
+
+    uint32_t valid = 0;
+    ULONG32 bytesRead = 0;
+    HRESULT hr = dataTarget.ReadVirtual(
+        g_cachedExceptionEventValidAddress,
+        reinterpret_cast<BYTE*>(&valid),
+        sizeof(valid),
+        &bytesRead);
+    if (FAILED(hr) || bytesRead != sizeof(valid))
+    {
+        return HostReadFailed;
+    }
+
+    uint32_t zeroBytes = 0;
+    if (valid == 0)
+    {
+        memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &zeroBytes, sizeof(zeroBytes));
+        return S_OK;
+    }
+
+    WasmDbgIpcEventException payload{};
+    bytesRead = 0;
+    hr = dataTarget.ReadVirtual(
+        g_cachedExceptionEventAddress,
         reinterpret_cast<BYTE*>(&payload),
         sizeof(payload),
         &bytesRead);

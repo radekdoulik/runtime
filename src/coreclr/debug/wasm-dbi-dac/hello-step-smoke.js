@@ -17,7 +17,7 @@ const CommandRecordSize = 80;
 // point will run (CORDBG_E_INCOMPATIBLE_PROTOCOL otherwise).
 const ExpectedVersionBlobMagic = 0x42564457; // 'WDVB' little-endian
 const ExpectedAbiVersion = 1;
-const ExpectedProtocolBreakingChangeCounter = 5;
+const ExpectedProtocolBreakingChangeCounter = 6;
 
 function fail(message) {
     throw new Error(message);
@@ -645,6 +645,8 @@ async function main() {
                     symbolName === "WasmDbiDacTestData" ? runtimeExports.GetWasmDbiDacTestData() >>> 0 :
                     symbolName === "g_wasmDebugLastIpcEvent" ? runtimeExports.Getg_wasmDebugLastIpcEvent() >>> 0 :
                     symbolName === "g_wasmDebugLastIpcEventValid" ? runtimeExports.Getg_wasmDebugLastIpcEventValid() >>> 0 :
+                    symbolName === "g_wasmDebugLastIpcException" ? runtimeExports.Getg_wasmDebugLastIpcException() >>> 0 :
+                    symbolName === "g_wasmDebugLastIpcExceptionValid" ? runtimeExports.Getg_wasmDebugLastIpcExceptionValid() >>> 0 :
                     symbolName === "g_wasmDebugBreakpoints" ? runtimeExports.Getg_wasmDebugBreakpoints() >>> 0 :
                     symbolName === "g_wasmDebugLastLocalsRecord" ? runtimeExports.Getg_wasmDebugLastLocalsRecord() >>> 0 :
                     0;

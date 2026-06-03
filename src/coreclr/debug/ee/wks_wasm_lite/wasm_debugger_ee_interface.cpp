@@ -22,6 +22,8 @@
 
 #include "debugger.h"
 
+void EmitWasmDebugException(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, OBJECTREF exceptionObj);
+
 #define WASM_DEBUGGER_EE_STUB(methodName) \
     LOG((LF_CORDB, LL_INFO10000, "WasmDebuggerEEInterface: %s not implemented yet\n", methodName))
 
@@ -31,6 +33,16 @@
         WASM_DEBUGGER_EE_STUB(methodName); \
         _ASSERTE(!"WasmDebuggerEEInterface: " methodName " not implemented yet"); \
     } while (0)
+
+struct WasmDebugPendingExceptionContext
+{
+    MethodDesc* MethodDesc;
+    uint32_t ILOffset;
+    const int32_t* IP;
+    OBJECTREF* ExceptionObj;
+};
+
+static WasmDebugPendingExceptionContext g_wasmDebugPendingException;
 
 class WasmDebuggerEEInterface final : public DebugInterface
 {
@@ -143,7 +155,14 @@ public:
         Thread* thread,
         BOOL fIsVEH = TRUE) override
     {
-        LIMITED_METHOD_CONTRACT;
+        CONTRACTL
+        {
+            NOTHROW;
+            WRAPPER(GC_TRIGGERS);
+            MODE_ANY;
+        }
+        CONTRACTL_END;
+
         LOG((LF_CORDB, LL_INFO10000,
             "WasmDebuggerEEInterface::FirstChanceNativeException: exception=%p context=%p code=0x%x thread=%p fIsVEH=%d\n",
             exception,
@@ -151,6 +170,18 @@ public:
             code,
             thread,
             fIsVEH));
+
+        if (code == EXCEPTION_COMPLUS &&
+            !fIsVEH &&
+            g_wasmDebugPendingException.MethodDesc != nullptr &&
+            g_wasmDebugPendingException.ExceptionObj != nullptr)
+        {
+            EmitWasmDebugException(
+                g_wasmDebugPendingException.MethodDesc,
+                g_wasmDebugPendingException.ILOffset,
+                g_wasmDebugPendingException.IP,
+                *g_wasmDebugPendingException.ExceptionObj);
+        }
 
         // This slice only recognizes the interpreter's synthetic breakpoint
         // callback. Returning true there lets the existing interpreter
@@ -703,6 +734,52 @@ private:
 };
 
 uint32_t WasmDebuggerEEInterface::s_isMethodEnterEnabledCallCount;
+
+extern "C" void CoreClrWasmDebugNotifyInterpreterException(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, OBJECTREF exceptionObj)
+{
+    CONTRACTL
+    {
+        NOTHROW;
+        WRAPPER(GC_TRIGGERS);
+        MODE_COOPERATIVE;
+    }
+    CONTRACTL_END;
+
+    Thread* thread = GetThreadNULLOk();
+    if (methodDesc == nullptr || thread == nullptr || g_pDebugInterface == nullptr)
+    {
+        return;
+    }
+
+    OBJECTREF protectedException = exceptionObj;
+    GCPROTECT_BEGIN(protectedException);
+
+    WasmDebugPendingExceptionContext previous = g_wasmDebugPendingException;
+    g_wasmDebugPendingException.MethodDesc = methodDesc;
+    g_wasmDebugPendingException.ILOffset = ilOffset;
+    g_wasmDebugPendingException.IP = ip;
+    g_wasmDebugPendingException.ExceptionObj = &protectedException;
+
+    EXCEPTION_RECORD exceptionRecord;
+    memset(&exceptionRecord, 0, sizeof(exceptionRecord));
+    exceptionRecord.ExceptionCode = EXCEPTION_COMPLUS;
+    exceptionRecord.ExceptionAddress = reinterpret_cast<PVOID>(const_cast<int32_t*>(ip));
+
+    CONTEXT context;
+    memset(&context, 0, sizeof(context));
+    context.ContextFlags = CONTEXT_FULL;
+    SetIP(&context, reinterpret_cast<TADDR>(ip));
+
+    g_pDebugInterface->FirstChanceNativeException(
+        &exceptionRecord,
+        &context,
+        exceptionRecord.ExceptionCode,
+        thread,
+        FALSE /* fIsVEH */);
+
+    g_wasmDebugPendingException = previous;
+    GCPROTECT_END();
+}
 
 extern "C" DebugInterface* CoreClrWasmDebugGetDebuggerEEInterface()
 {

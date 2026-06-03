@@ -26,6 +26,7 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     uintptr_t stackAddress,
     int32_t* originalOpcode);
 extern "C" bool CoreClrWasmDebugIsDebuggerConnectedForHooks();
+extern "C" void CoreClrWasmDebugNotifyInterpreterException(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, OBJECTREF exceptionObj);
 #endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
 
 struct InterpDispatchCacheEntry
@@ -3641,6 +3642,19 @@ CALL_INTERP_METHOD:
                     }
 
                     pInterpreterFrame->SetIsFaulting(true);
+#if defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
+                    uint32_t exceptionILOffset = 0;
+                    const int32_t* startIP = pFrame->startIp->GetByteCodes();
+                    if (ip >= startIP)
+                    {
+                        uintptr_t slotOffset = static_cast<uintptr_t>(ip - startIP);
+                        if (slotOffset <= UINT32_MAX)
+                        {
+                            exceptionILOffset = static_cast<uint32_t>(slotOffset);
+                        }
+                    }
+                    CoreClrWasmDebugNotifyInterpreterException(pMethod->methodHnd, exceptionILOffset, ip, throwable);
+#endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
                     DispatchManagedException(throwable);
                     UNREACHABLE();
                     break;

@@ -17,6 +17,7 @@
 // TARGET_WASM branch, so this file no longer duplicates DAC-table logic.
 
 #include "common.h"
+#include "excep.h"
 #include "threads.h"
 #include "../../debug/ee/interpreterwalker.h"
 #include "../../interpreter/intops.h"
@@ -151,6 +152,25 @@ struct WasmDbgIpcEventBreakpointRuntime
     uint64_t CodeStartAddress;
 };
 
+struct WasmDbgIpcEventException
+{
+    uint32_t Magic;
+    uint32_t Type;
+    uint32_t ProcessId;
+    uint32_t ThreadId;
+    uint64_t VmAppDomain;
+    uint64_t VmThread;
+    int32_t Hr;
+    uint32_t Flags;
+    uint64_t ExceptionToken;
+    uint32_t FuncMetadataToken;
+    uint32_t ILOffset;
+    uint64_t VmAssembly;
+    uint64_t ExceptionAddress;
+    char ExceptionTypeName[64];
+    uint64_t Reserved0;
+};
+
 struct WasmDbgIpcEventContinueRequest
 {
     uint32_t Magic;
@@ -212,6 +232,8 @@ static_assert(sizeof(WasmDebugLocalRecord) == 48);
 static_assert(sizeof(WasmDebugLocalsRecord) == 16 + 32 * 48);
 static_assert(sizeof(WasmDbgIpcEventBreakpointRuntime) == 96,
               "WasmDbgIpcEventBreakpointRuntime must mirror the sidecar's WasmDbgIpcEventBreakpoint byte-for-byte");
+static_assert(sizeof(WasmDbgIpcEventException) == 144,
+              "WasmDbgIpcEventException must mirror the sidecar's WasmDbgIpcEventException byte-for-byte");
 static_assert(sizeof(WasmDbgIpcEventContinueRequest) == 32,
               "WasmDbgIpcEventContinueRequest must mirror the sidecar's byte-for-byte");
 static_assert(sizeof(WasmDbgIpcEventStepIntoRequest) == 32,
@@ -219,6 +241,8 @@ static_assert(sizeof(WasmDbgIpcEventStepIntoRequest) == 32,
 
 constexpr uint32_t WasmDbgIpcEventBreakpointMagic = 0x42435049;
 constexpr uint32_t WasmDbgIpcEventTypeBreakpoint = 0x0100;
+constexpr uint32_t WasmDbgIpcEventExceptionMagic = 0x58435049;
+constexpr uint32_t WasmDbgIpcEventTypeException = 0x0103;
 constexpr uint32_t WasmDbgIpcEventContinueRequestMagic = 0x43435049;
 constexpr uint32_t WasmDbgIpcEventTypeContinueRequest = 0x0201;
 constexpr uint32_t WasmDbgIpcEventStepIntoRequestMagic = 0x53435049;
@@ -246,11 +270,14 @@ WasmDebugLocalsRecord g_wasmDebugLastLocalsRecord;
 // every breakpoint hit. g_wasmDebugLastIpcEventValid is set to 1 by
 // HandleInterpreterBreakpoint, cleared to 0 by CoreClrWasmDebugReadLastIpcEvent
 // once a consumer (sidecar poll_event) drains it. BreakpointToken is the
-// monotonic counter; future stepping/exception events will share the same
-// counter so DBI can totally-order all notifications.
+// monotonic breakpoint counter; first-chance exception events keep their
+// own counter so DBI can distinguish the event streams.
 WasmDbgIpcEventBreakpointRuntime g_wasmDebugLastIpcEvent;
 uint32_t g_wasmDebugLastIpcEventValid;
 uint64_t g_wasmDebugBreakpointTokenCounter;
+WasmDbgIpcEventException g_wasmDebugLastIpcException;
+uint32_t g_wasmDebugLastIpcExceptionValid;
+uint64_t g_wasmDebugExceptionTokenCounter;
 // Phase 7 multi-breakpoint state. The single-slot facade was replaced
 // with a fixed-size array of slots so multiple managed breakpoints can
 // be armed concurrently. Single-threaded wasm means at most one slot
@@ -384,6 +411,51 @@ void SetWasmDebugBreakpointLocalsRecord(MethodDesc* methodDesc, uintptr_t stackA
         CopyWasmDebugString(local.Name, sizeof(local.Name), "local0");
         g_wasmDebugLastLocalsRecord.LocalCount = 1;
     }
+}
+
+void EmitWasmDebugException(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, OBJECTREF exceptionObj)
+{
+    if (!g_wasmDebuggerConnected || methodDesc == nullptr)
+    {
+        return;
+    }
+
+    g_wasmDebugExceptionTokenCounter++;
+    memset(&g_wasmDebugLastIpcException, 0, sizeof(g_wasmDebugLastIpcException));
+    g_wasmDebugLastIpcException.Magic = WasmDbgIpcEventExceptionMagic;
+    g_wasmDebugLastIpcException.Type = WasmDbgIpcEventTypeException;
+    g_wasmDebugLastIpcException.ProcessId = 1;
+    g_wasmDebugLastIpcException.ThreadId = 1;
+    g_wasmDebugLastIpcException.Hr = 0;
+    g_wasmDebugLastIpcException.Flags = 0;
+    g_wasmDebugLastIpcException.ExceptionToken = g_wasmDebugExceptionTokenCounter;
+    g_wasmDebugLastIpcException.FuncMetadataToken = methodDesc->GetMemberDef();
+    g_wasmDebugLastIpcException.ILOffset = ilOffset;
+    g_wasmDebugLastIpcException.ExceptionAddress = reinterpret_cast<uintptr_t>(ip);
+
+    if (exceptionObj != NULL)
+    {
+        OBJECTREF protectedException = exceptionObj;
+        GCPROTECT_BEGIN(protectedException);
+        MethodTable* exceptionMethodTable = protectedException->GetMethodTable();
+        if (IsException(exceptionMethodTable))
+        {
+            g_wasmDebugLastIpcException.Hr = ((EXCEPTIONREF)protectedException)->GetHResult();
+        }
+
+        DefineFullyQualifiedNameForClass();
+        LPCUTF8 exceptionTypeName = GetFullyQualifiedNameForClass(exceptionMethodTable);
+        CopyWasmDebugString(
+            g_wasmDebugLastIpcException.ExceptionTypeName,
+            sizeof(g_wasmDebugLastIpcException.ExceptionTypeName),
+            exceptionTypeName);
+        GCPROTECT_END();
+    }
+
+    g_wasmDebugLastIpcExceptionValid = 1;
+    coreClrDebugFireEventToPause(
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_wasmDebugLastIpcException)),
+        static_cast<uint32_t>(sizeof(g_wasmDebugLastIpcException)));
 }
 
 // Restore the original interpreter opcode at the patch site for a
@@ -772,6 +844,16 @@ extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcEvent()
 extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcEventValid()
 {
     return &g_wasmDebugLastIpcEventValid;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcException()
+{
+    return &g_wasmDebugLastIpcException;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcExceptionValid()
+{
+    return &g_wasmDebugLastIpcExceptionValid;
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugBreakpoints()
@@ -1169,6 +1251,28 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReadLastIpcEvent(uint8_t
     memcpy(buffer, &g_wasmDebugLastIpcEvent, sizeof(g_wasmDebugLastIpcEvent));
     g_wasmDebugLastIpcEventValid = 0;
     return static_cast<int32_t>(sizeof(g_wasmDebugLastIpcEvent));
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetLastIpcExceptionSize()
+{
+    return sizeof(WasmDbgIpcEventException);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReadLastIpcException(uint8_t* buffer, uint32_t bufferLength)
+{
+    if (buffer == nullptr || bufferLength < sizeof(WasmDbgIpcEventException))
+    {
+        return -1;
+    }
+
+    if (g_wasmDebugLastIpcExceptionValid == 0)
+    {
+        return 0;
+    }
+
+    memcpy(buffer, &g_wasmDebugLastIpcException, sizeof(g_wasmDebugLastIpcException));
+    g_wasmDebugLastIpcExceptionValid = 0;
+    return static_cast<int32_t>(sizeof(g_wasmDebugLastIpcException));
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetBreakpointHitCount()
