@@ -23,6 +23,8 @@
 #include "debugger.h"
 
 void EmitWasmDebugException(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, OBJECTREF exceptionObj);
+extern "C" bool CoreClrWasmDebugIsStepIntoCallPending();
+extern "C" void CoreClrWasmDebugHandleMethodEnter(const int32_t* ip);
 
 #define WASM_DEBUGGER_EE_STUB(methodName) \
     LOG((LF_CORDB, LL_INFO10000, "WasmDebuggerEEInterface: %s not implemented yet\n", methodName))
@@ -604,8 +606,7 @@ public:
             "WasmDebuggerEEInterface::OnMethodEnter: ip=%p\n",
             ip));
 
-        // Future slice: convert this callback into the wasm pause event flow
-        // by sending a structured event and invoking coreClrDebugFireEventToPause.
+        CoreClrWasmDebugHandleMethodEnter(reinterpret_cast<const int32_t*>(ip));
     }
 
     DWORD* GetJMCFlagAddr(Module*) override
@@ -623,10 +624,7 @@ public:
             "WasmDebuggerEEInterface::IsMethodEnterEnabled: count=%u\n",
             s_isMethodEnterEnabledCallCount));
 
-        // Future slice: return true while a stepper has enabled the
-        // method-enter backstop. It remains false here so merely wiring
-        // g_pDebugInterface does not change stepping or breakpoint ownership.
-        return false;
+        return CoreClrWasmDebugIsStepIntoCallPending();
     }
 
     bool ThisIsHelperThread() override

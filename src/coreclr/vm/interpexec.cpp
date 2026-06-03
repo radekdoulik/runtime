@@ -27,6 +27,8 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     int32_t* originalOpcode);
 extern "C" bool CoreClrWasmDebugIsDebuggerConnectedForHooks();
 extern "C" void CoreClrWasmDebugNotifyInterpreterException(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, OBJECTREF exceptionObj);
+extern "C" void CoreClrWasmDebugSetMethodEnterContext(MethodDesc* methodDesc, const int32_t* ip);
+extern "C" void CoreClrWasmDebugClearMethodEnterContext();
 
 static void CoreClrWasmDebugNotifyInterpreterExceptionAtIP(InterpMethod* pMethod, const InterpMethodContextFrame* pFrame, const int32_t* ip, OBJECTREF* pThrowable)
 {
@@ -1513,7 +1515,13 @@ SWITCH_OPCODE:
                             callbackIp = pFrame->startIp->GetByteCodes() + seqPointOffset;
                             _ASSERTE(*callbackIp == INTOP_DEBUG_SEQ_POINT || *callbackIp == INTOP_BREAKPOINT);
                         }
+#if defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
+                        CoreClrWasmDebugSetMethodEnterContext(pFrame->startIp->Method->methodHnd, callbackIp);
+#endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
                         g_pDebugInterface->OnMethodEnter((void*)callbackIp);
+#if defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
+                        CoreClrWasmDebugClearMethodEnterContext();
+#endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
                     }
                     ip += 2;
                     break;

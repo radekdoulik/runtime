@@ -214,6 +214,7 @@ acknowledged handshake returns `HrIncompatibleProtocol`.
 | `coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request` | Send structured wasm-private StepInto request; invalidates the page cache on success. |
 | `coreclr_wasm_dbi_dac_dbi_poll_event`               | Drain queued runtime event text into the supplied buffer. |
 | `coreclr_wasm_dbi_dac_dbi_poll_ipc_exception`       | Drain structured first-chance exception event (`WasmDbgIpcEventException`, 144 bytes) via DAC `ReadVirtual`. |
+| `coreclr_wasm_dbi_dac_dbi_poll_ipc_step_complete`   | Drain structured step-complete event (`WasmDbgIpcEventStepComplete`, 96 bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints`    | Drain the runtime breakpoint slot table (`8 + 16 * 88` bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_locals`         | Drain the stopped-frame locals record (`16 + 32 * 48` bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_poll_event_record`        | Drain queued runtime event record (`WasmDebugEventRecord`, 340 bytes). |
@@ -223,6 +224,29 @@ acknowledged handshake returns `HrIncompatibleProtocol`.
 | `coreclr_wasm_dbi_dac_receive_runtime_event_record` | Push a `WasmDebugEventRecord`.                         |
 | `coreclr_wasm_dbi_dac_receive_runtime_frame_record` | Push a `WasmDebugFrameRecord`.                         |
 | `coreclr_wasm_dbi_dac_invalidate_page_cache`        | Force-invalidate the in-sidecar page cache (epoch bump). |
+
+#### `WasmDbgIpcEventStepComplete` (96 bytes, little-endian)
+
+```text
+offset  size  field
+   0     4    Magic                     // 'IPCT' = 0x54435049 LE
+   4     4    Type                      // wasm-private step-complete event = 0x0104
+   8     4    ProcessId                 // 1 today
+  12     4    ThreadId                  // 1 today
+  16     8    VmAppDomain               // reserved, 0 today
+  24     8    VmThread                  // reserved, 0 today
+  32     4    Hr                        // 0 on success
+  36     4    Flags                     // reserved, 0 today
+  40     8    StepToken                 // monotonic step-complete event token
+  48     8    OriginalStepRequestToken  // breakpoint token from the StepInto request
+  56     4    FuncMetadataToken         // mdMethodDef landed in
+  60     4    ILOffset                  // 0 for method-entry step-into-call
+  64     8    VmAssembly                // reserved, 0 today
+  72     4    IsIL                      // 1 today
+  76     4    Reserved0                 // 0
+  80     8    NativeCodeMethodDescToken // reserved, 0 today
+  88     8    CodeStartAddress          // interpreter IP that fired method-enter
+```
 
 ### Session teardown (product, ungated)
 
@@ -336,10 +360,10 @@ A well-behaved host follows this sequence at session start:
 
 The page cache is also invalidated on every host-callable
 `invalidate_page_cache` call (a defensive "the runtime was poked
-out of band" hook). The two existing smoke harnesses
-(`smoke-test.js`, `hello-breakpoint-smoke.js`, and
-`hello-step-smoke.js`) follow this sequence and serve as reference
-implementations of the host side of the contract.
+out of band" hook). The smoke harnesses (`smoke-test.js`,
+`hello-breakpoint-smoke.js`, `hello-step-smoke.js`, and
+`hello-step-into-call-smoke.js`) follow this sequence and serve as
+reference implementations of the host side of the contract.
 
 ## See also
 
@@ -351,6 +375,7 @@ implementations of the host side of the contract.
   debugger architecture (the closest shipping comparison).
 - [`dbi_dac_wasm_exports.h`](dbi_dac_wasm_exports.h) - export tagging.
 - [`smoke-test.js`](smoke-test.js),
-  [`hello-breakpoint-smoke.js`](hello-breakpoint-smoke.js), and
-  [`hello-step-smoke.js`](hello-step-smoke.js) - reference host
-  implementations that fully exercise the contract above.
+  [`hello-breakpoint-smoke.js`](hello-breakpoint-smoke.js),
+  [`hello-step-smoke.js`](hello-step-smoke.js), and
+  [`hello-step-into-call-smoke.js`](hello-step-into-call-smoke.js) -
+  reference host implementations that fully exercise the contract above.

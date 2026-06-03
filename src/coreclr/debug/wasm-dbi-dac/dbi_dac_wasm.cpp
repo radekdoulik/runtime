@@ -78,7 +78,8 @@ constexpr uint32_t WasmDbiDacVersionBlobMagic = 0x42564457;
 //   4 - add dbi_enumerate_locals sidecar export + locals-record payload.
 //   5 - add structured DB_IPCE_STEP_INTO request import/export path.
 //   6 - add structured first-chance exception event drain path.
-constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 6;
+//   7 - add structured step-complete event drain path.
+constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 7;
 
 // Sidecar build version - encoded VS_FIXEDFILEINFO-style as two 32-bit
 // words. Reserved for future use; today's PoC sidecar reports 0/0 so
@@ -378,6 +379,27 @@ struct WasmDbgIpcEventException
     uint64_t Reserved0;
 };
 
+struct WasmDbgIpcEventStepComplete
+{
+    uint32_t Magic;
+    uint32_t Type;
+    uint32_t ProcessId;
+    uint32_t ThreadId;
+    uint64_t VmAppDomain;
+    uint64_t VmThread;
+    int32_t Hr;
+    uint32_t Flags;
+    uint64_t StepToken;
+    uint64_t OriginalStepRequestToken;
+    uint32_t FuncMetadataToken;
+    uint32_t ILOffset;
+    uint64_t VmAssembly;
+    uint32_t IsIL;
+    uint32_t Reserved0;
+    uint64_t NativeCodeMethodDescToken;
+    uint64_t CodeStartAddress;
+};
+
 struct WasmDbgIpcEventContinueRequest
 {
     uint32_t Magic;
@@ -404,6 +426,8 @@ constexpr uint32_t WasmDbgIpcEventBreakpointMagic = 0x42435049;  // 'IPCB' littl
 constexpr uint32_t WasmDbgIpcEventTypeBreakpoint = 0x0100;       // DB_IPCE_BREAKPOINT
 constexpr uint32_t WasmDbgIpcEventExceptionMagic = 0x58435049;   // 'IPCX' little-endian
 constexpr uint32_t WasmDbgIpcEventTypeException = 0x0103;        // DB_IPCE_EXCEPTION-shaped wasm event
+constexpr uint32_t WasmDbgIpcEventStepCompleteMagic = 0x54435049; // 'IPCT' little-endian
+constexpr uint32_t WasmDbgIpcEventTypeStepComplete = 0x0104;      // Wasm-private step-complete event under IPCT magic
 constexpr uint32_t WasmDbgIpcEventContinueRequestMagic = 0x43435049; // 'IPCC' little-endian
 constexpr uint32_t WasmDbgIpcEventTypeContinueRequest = 0x0201;      // DB_IPCE_CONTINUE
 constexpr uint32_t WasmDbgIpcEventStepIntoRequestMagic = 0x53435049; // 'IPCS' little-endian
@@ -443,6 +467,7 @@ static_assert(sizeof(WasmDebugLocalRecord) == 48);
 static_assert(sizeof(WasmDebugLocalsRecord) == 16 + 32 * 48);
 static_assert(sizeof(WasmDbgIpcEventBreakpoint) == 96);
 static_assert(sizeof(WasmDbgIpcEventException) == 144);
+static_assert(sizeof(WasmDbgIpcEventStepComplete) == 96);
 static_assert(sizeof(WasmDbgIpcEventContinueRequest) == 32);
 static_assert(sizeof(WasmDbgIpcEventStepIntoRequest) == 32);
 static_assert(sizeof(WasmDbiProcessState) == 40);
@@ -589,6 +614,8 @@ uint64_t g_cachedIpcEventValidAddress = 0;
 uint64_t g_cachedIpcEventAddress = 0;
 uint64_t g_cachedExceptionEventValidAddress = 0;
 uint64_t g_cachedExceptionEventAddress = 0;
+uint64_t g_cachedStepCompleteEventValidAddress = 0;
+uint64_t g_cachedStepCompleteEventAddress = 0;
 uint64_t g_cachedBreakpointSlotsAddress = 0;
 uint64_t g_cachedLocalsRecordAddress = 0;
 
@@ -613,6 +640,8 @@ void ClearRuntimeConnectionState()
     g_cachedIpcEventAddress = 0;
     g_cachedExceptionEventValidAddress = 0;
     g_cachedExceptionEventAddress = 0;
+    g_cachedStepCompleteEventValidAddress = 0;
+    g_cachedStepCompleteEventAddress = 0;
     g_cachedBreakpointSlotsAddress = 0;
     g_cachedLocalsRecordAddress = 0;
     InvalidatePageCache();
@@ -2610,6 +2639,102 @@ int32_t coreclr_wasm_dbi_dac_dbi_poll_ipc_exception(uint32_t bufferAddress, uint
     bytesRead = 0;
     hr = dataTarget.ReadVirtual(
         g_cachedExceptionEventAddress,
+        reinterpret_cast<BYTE*>(&payload),
+        sizeof(payload),
+        &bytesRead);
+    if (FAILED(hr) || bytesRead != sizeof(payload))
+    {
+        return HostReadFailed;
+    }
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bufferAddress)), &payload, sizeof(payload));
+    uint32_t written = static_cast<uint32_t>(sizeof(payload));
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &written, sizeof(written));
+    return S_OK;
+}
+
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_poll_ipc_step_complete)
+int32_t coreclr_wasm_dbi_dac_dbi_poll_ipc_step_complete(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
+{
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
+    if (g_cordb == nullptr || !g_connectedToRuntime)
+    {
+        return E_FAIL;
+    }
+
+    if (bytesWrittenAddress == 0 || bufferAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    if (bufferLength < sizeof(WasmDbgIpcEventStepComplete))
+    {
+        return BufferTooSmall;
+    }
+
+    InvalidatePageCache();
+
+    WasmDacDataTarget dataTarget(g_connectedRuntimeBase);
+
+    if (g_cachedStepCompleteEventValidAddress == 0)
+    {
+        uint64_t resolved = 0;
+        if (!TryGetSymbol(
+                static_cast<ICorDebugDataTarget*>(&dataTarget),
+                g_connectedRuntimeBase,
+                "g_wasmDebugLastIpcStepCompleteValid",
+                &resolved) ||
+            resolved == 0 ||
+            resolved > UINT32_MAX)
+        {
+            return HostSymbolLookupFailed;
+        }
+        g_cachedStepCompleteEventValidAddress = resolved;
+    }
+    if (g_cachedStepCompleteEventAddress == 0)
+    {
+        uint64_t resolved = 0;
+        if (!TryGetSymbol(
+                static_cast<ICorDebugDataTarget*>(&dataTarget),
+                g_connectedRuntimeBase,
+                "g_wasmDebugLastIpcStepComplete",
+                &resolved) ||
+            resolved == 0 ||
+            resolved > UINT32_MAX)
+        {
+            return HostSymbolLookupFailed;
+        }
+        g_cachedStepCompleteEventAddress = resolved;
+    }
+
+    uint32_t valid = 0;
+    ULONG32 bytesRead = 0;
+    HRESULT hr = dataTarget.ReadVirtual(
+        g_cachedStepCompleteEventValidAddress,
+        reinterpret_cast<BYTE*>(&valid),
+        sizeof(valid),
+        &bytesRead);
+    if (FAILED(hr) || bytesRead != sizeof(valid))
+    {
+        return HostReadFailed;
+    }
+
+    uint32_t zeroBytes = 0;
+    if (valid == 0)
+    {
+        memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &zeroBytes, sizeof(zeroBytes));
+        return S_OK;
+    }
+
+    WasmDbgIpcEventStepComplete payload{};
+    bytesRead = 0;
+    hr = dataTarget.ReadVirtual(
+        g_cachedStepCompleteEventAddress,
         reinterpret_cast<BYTE*>(&payload),
         sizeof(payload),
         &bytesRead);

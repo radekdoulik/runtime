@@ -171,6 +171,27 @@ struct WasmDbgIpcEventException
     uint64_t Reserved0;
 };
 
+struct WasmDbgIpcEventStepComplete
+{
+    uint32_t Magic;
+    uint32_t Type;
+    uint32_t ProcessId;
+    uint32_t ThreadId;
+    uint64_t VmAppDomain;
+    uint64_t VmThread;
+    int32_t Hr;
+    uint32_t Flags;
+    uint64_t StepToken;
+    uint64_t OriginalStepRequestToken;
+    uint32_t FuncMetadataToken;
+    uint32_t ILOffset;
+    uint64_t VmAssembly;
+    uint32_t IsIL;
+    uint32_t Reserved0;
+    uint64_t NativeCodeMethodDescToken;
+    uint64_t CodeStartAddress;
+};
+
 struct WasmDbgIpcEventContinueRequest
 {
     uint32_t Magic;
@@ -234,6 +255,8 @@ static_assert(sizeof(WasmDbgIpcEventBreakpointRuntime) == 96,
               "WasmDbgIpcEventBreakpointRuntime must mirror the sidecar's WasmDbgIpcEventBreakpoint byte-for-byte");
 static_assert(sizeof(WasmDbgIpcEventException) == 144,
               "WasmDbgIpcEventException must mirror the sidecar's WasmDbgIpcEventException byte-for-byte");
+static_assert(sizeof(WasmDbgIpcEventStepComplete) == 96,
+              "WasmDbgIpcEventStepComplete must mirror the sidecar's WasmDbgIpcEventStepComplete byte-for-byte");
 static_assert(sizeof(WasmDbgIpcEventContinueRequest) == 32,
               "WasmDbgIpcEventContinueRequest must mirror the sidecar's byte-for-byte");
 static_assert(sizeof(WasmDbgIpcEventStepIntoRequest) == 32,
@@ -243,6 +266,10 @@ constexpr uint32_t WasmDbgIpcEventBreakpointMagic = 0x42435049;
 constexpr uint32_t WasmDbgIpcEventTypeBreakpoint = 0x0100;
 constexpr uint32_t WasmDbgIpcEventExceptionMagic = 0x58435049;
 constexpr uint32_t WasmDbgIpcEventTypeException = 0x0103;
+constexpr uint32_t WasmDbgIpcEventStepCompleteMagic = 0x54435049;
+// Wasm-private event type carried under the IPCT magic. This is not the
+// canonical DebuggerIPCEventType DB_IPCE_STEP_COMPLETE value.
+constexpr uint32_t WasmDbgIpcEventTypeStepComplete = 0x0104;
 constexpr uint32_t WasmDbgIpcEventContinueRequestMagic = 0x43435049;
 constexpr uint32_t WasmDbgIpcEventTypeContinueRequest = 0x0201;
 constexpr uint32_t WasmDbgIpcEventStepIntoRequestMagic = 0x53435049;
@@ -278,6 +305,9 @@ uint64_t g_wasmDebugBreakpointTokenCounter;
 WasmDbgIpcEventException g_wasmDebugLastIpcException;
 uint32_t g_wasmDebugLastIpcExceptionValid;
 uint64_t g_wasmDebugExceptionTokenCounter;
+WasmDbgIpcEventStepComplete g_wasmDebugLastIpcStepComplete;
+uint32_t g_wasmDebugLastIpcStepCompleteValid;
+uint64_t g_wasmDebugStepTokenCounter;
 // Phase 7 multi-breakpoint state. The single-slot facade was replaced
 // with a fixed-size array of slots so multiple managed breakpoints can
 // be armed concurrently. Single-threaded wasm means at most one slot
@@ -320,6 +350,16 @@ uint32_t g_wasmDebugLastStoppedILOffset;
 // WasmDebugMaxBreakpoints when no slot has fired). Used by the event-
 // record builder to report the correct per-slot hit count.
 uint32_t g_wasmDebugLastFiredSlot = WasmDebugMaxBreakpoints;
+
+bool g_wasmDebugStepIntoCallPending;
+uint64_t g_wasmDebugStepIntoTokenAtCall;
+MethodDesc* g_wasmDebugStepIntoCallerMethod;
+uint32_t g_wasmDebugStepIntoCallerILOffset;
+const int32_t* g_wasmDebugStepIntoCallFallbackIP;
+MethodDesc* g_wasmDebugMethodEnterContextMethodDesc;
+const int32_t* g_wasmDebugMethodEnterContextIP;
+
+void ClearWasmDebugStepIntoCallState(bool clearFallbackBreakpoint);
 
 // Phase 6 connection-state gate. Mirrors Mono's
 // mono_wasm_set_is_debugger_attached (src/mono/mono/component/mini-wasm-debugger.c:38).
@@ -458,6 +498,11 @@ void SetWasmDebugBreakpointLocalsRecord(MethodDesc* methodDesc, uintptr_t stackA
 
 void EmitWasmDebugException(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, OBJECTREF exceptionObj)
 {
+    if (g_wasmDebugStepIntoCallPending)
+    {
+        ClearWasmDebugStepIntoCallState(true);
+    }
+
     if (!g_wasmDebuggerConnected || methodDesc == nullptr)
     {
         return;
@@ -497,6 +542,43 @@ void EmitWasmDebugException(MethodDesc* methodDesc, uint32_t ilOffset, const int
     coreClrDebugFireEventToPause(
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_wasmDebugLastIpcException)),
         static_cast<uint32_t>(sizeof(g_wasmDebugLastIpcException)));
+}
+
+void EmitWasmDebugStepComplete(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, uint64_t originalStepRequestToken)
+{
+    if (!g_wasmDebuggerConnected || methodDesc == nullptr)
+    {
+        return;
+    }
+
+    g_wasmDebugStepTokenCounter++;
+    memset(&g_wasmDebugLastIpcStepComplete, 0, sizeof(g_wasmDebugLastIpcStepComplete));
+    g_wasmDebugLastIpcStepComplete.Magic = WasmDbgIpcEventStepCompleteMagic;
+    g_wasmDebugLastIpcStepComplete.Type = WasmDbgIpcEventTypeStepComplete;
+    g_wasmDebugLastIpcStepComplete.ProcessId = 1;
+    g_wasmDebugLastIpcStepComplete.ThreadId = 1;
+    g_wasmDebugLastIpcStepComplete.Hr = 0;
+    g_wasmDebugLastIpcStepComplete.Flags = 0;
+    g_wasmDebugLastIpcStepComplete.StepToken = g_wasmDebugStepTokenCounter;
+    g_wasmDebugLastIpcStepComplete.OriginalStepRequestToken = originalStepRequestToken;
+    g_wasmDebugLastIpcStepComplete.FuncMetadataToken = methodDesc->GetMemberDef();
+    g_wasmDebugLastIpcStepComplete.ILOffset = ilOffset;
+    g_wasmDebugLastIpcStepComplete.IsIL = 1;
+    g_wasmDebugLastIpcStepComplete.CodeStartAddress = reinterpret_cast<uintptr_t>(ip);
+    g_wasmDebugLastIpcStepCompleteValid = 1;
+
+    g_wasmDebugBreakpointStopped = true;
+    g_wasmDebugContinueRequested = false;
+    g_wasmDebugLastFiredSlot = WasmDebugMaxBreakpoints;
+    g_wasmDebugLastStoppedMethodDesc = methodDesc;
+    g_wasmDebugLastStoppedIP = ip;
+    g_wasmDebugLastStoppedILOffset = ilOffset;
+
+    coreClrDebugFireEventToPause(
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_wasmDebugLastIpcStepComplete)),
+        static_cast<uint32_t>(sizeof(g_wasmDebugLastIpcStepComplete)));
+
+    g_wasmDebugBreakpointStopped = false;
 }
 
 // Restore the original interpreter opcode at the patch site for a
@@ -758,6 +840,45 @@ uint32_t ClearWasmDebugBreakpointByToken(uint32_t methodToken)
     return cleared;
 }
 
+void ClearWasmDebugOneShotBreakpointAt(MethodDesc* methodDesc, const int32_t* targetIP)
+{
+    if (methodDesc == nullptr || targetIP == nullptr)
+    {
+        return;
+    }
+
+    mdMethodDef methodToken = methodDesc->GetMemberDef();
+    for (auto& slot : g_wasmDebugBreakpoints)
+    {
+        if (slot.Armed &&
+            slot.IsOneShot &&
+            slot.MethodToken == methodToken &&
+            slot.PatchAddress == targetIP)
+        {
+            RestoreWasmDebugBreakpointPatchSlot(slot);
+            slot.Armed = false;
+            slot.IsOneShot = false;
+            slot.MethodName[0] = 0;
+            slot.MethodToken = 0;
+            slot.HitCount = 0;
+        }
+    }
+}
+
+void ClearWasmDebugStepIntoCallState(bool clearFallbackBreakpoint)
+{
+    if (clearFallbackBreakpoint)
+    {
+        ClearWasmDebugOneShotBreakpointAt(g_wasmDebugStepIntoCallerMethod, g_wasmDebugStepIntoCallFallbackIP);
+    }
+
+    g_wasmDebugStepIntoCallPending = false;
+    g_wasmDebugStepIntoTokenAtCall = 0;
+    g_wasmDebugStepIntoCallerMethod = nullptr;
+    g_wasmDebugStepIntoCallerILOffset = 0;
+    g_wasmDebugStepIntoCallFallbackIP = nullptr;
+}
+
 uint32_t CountActiveWasmDebugBreakpoints()
 {
     uint32_t count = 0;
@@ -895,6 +1016,16 @@ extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcException()
 extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcExceptionValid()
 {
     return &g_wasmDebugLastIpcExceptionValid;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcStepComplete()
+{
+    return &g_wasmDebugLastIpcStepComplete;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcStepCompleteValid()
+{
+    return &g_wasmDebugLastIpcStepCompleteValid;
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugBreakpoints()
@@ -1114,6 +1245,10 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugSubmitStepIntoRequest(co
     InterpreterWalker walker;
     walker.Init(g_wasmDebugLastStoppedIP, byteCodeStart->Method);
 
+    uint64_t originalStepRequestToken = request.BreakpointToken != 0
+        ? request.BreakpointToken
+        : g_wasmDebugLastIpcEvent.BreakpointToken;
+
     const int32_t* targets[2] = { nullptr, nullptr };
     uint32_t targetCount = 0;
     switch (walker.GetOpcodeWalkType())
@@ -1132,8 +1267,46 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugSubmitStepIntoRequest(co
             targets[targetCount++] = walker.GetSkipIP();
             break;
 
-        case WALK_RETURN:
         case WALK_CALL:
+        {
+            const int32_t* skipIP = walker.GetSkipIP();
+            if (skipIP == nullptr ||
+                !IsWasmDebugInterpreterIPInMethod(g_wasmDebugLastStoppedMethodDesc, skipIP))
+            {
+                return -1;
+            }
+
+            if (g_wasmDebugStepIntoCallPending)
+            {
+                return -1;
+            }
+
+            if (CountFreeWasmDebugBreakpointSlots() < 1)
+            {
+                return -3;
+            }
+
+            if (!ArmWasmDebugOneShotBreakpoint(g_wasmDebugLastStoppedMethodDesc, skipIP))
+            {
+                return -3;
+            }
+
+            uint32_t callerILOffset = g_wasmDebugLastStoppedILOffset;
+            TryGetWasmDebugInterpreterIPOffset(
+                g_wasmDebugLastStoppedMethodDesc,
+                g_wasmDebugLastStoppedIP,
+                &callerILOffset);
+
+            g_wasmDebugStepIntoCallPending = true;
+            g_wasmDebugStepIntoTokenAtCall = originalStepRequestToken;
+            g_wasmDebugStepIntoCallerMethod = g_wasmDebugLastStoppedMethodDesc;
+            g_wasmDebugStepIntoCallerILOffset = callerILOffset;
+            g_wasmDebugStepIntoCallFallbackIP = skipIP;
+            RequestWasmDebugContinue();
+            return 0;
+        }
+
+        case WALK_RETURN:
         case WALK_THROW:
         default:
             return -2;
@@ -1316,6 +1489,28 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReadLastIpcException(uin
     return static_cast<int32_t>(sizeof(g_wasmDebugLastIpcException));
 }
 
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetLastIpcStepCompleteSize()
+{
+    return sizeof(WasmDbgIpcEventStepComplete);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReadLastIpcStepComplete(uint8_t* buffer, uint32_t bufferLength)
+{
+    if (buffer == nullptr || bufferLength < sizeof(WasmDbgIpcEventStepComplete))
+    {
+        return -1;
+    }
+
+    if (g_wasmDebugLastIpcStepCompleteValid == 0)
+    {
+        return 0;
+    }
+
+    memcpy(buffer, &g_wasmDebugLastIpcStepComplete, sizeof(g_wasmDebugLastIpcStepComplete));
+    g_wasmDebugLastIpcStepCompleteValid = 0;
+    return static_cast<int32_t>(sizeof(g_wasmDebugLastIpcStepComplete));
+}
+
 extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetBreakpointHitCount()
 {
     // Phase 7 multi-bp: aggregate hit count across all armed slots.
@@ -1382,6 +1577,42 @@ extern "C" bool CoreClrWasmDebugIsDebuggerConnectedForHooks()
 {
     LIMITED_METHOD_CONTRACT;
     return g_wasmDebuggerConnected;
+}
+
+extern "C" bool CoreClrWasmDebugIsStepIntoCallPending()
+{
+    LIMITED_METHOD_CONTRACT;
+    return g_wasmDebuggerConnected && g_wasmDebugStepIntoCallPending;
+}
+
+extern "C" void CoreClrWasmDebugSetMethodEnterContext(MethodDesc* methodDesc, const int32_t* ip)
+{
+    LIMITED_METHOD_CONTRACT;
+    g_wasmDebugMethodEnterContextMethodDesc = methodDesc;
+    g_wasmDebugMethodEnterContextIP = ip;
+}
+
+extern "C" void CoreClrWasmDebugClearMethodEnterContext()
+{
+    LIMITED_METHOD_CONTRACT;
+    g_wasmDebugMethodEnterContextMethodDesc = nullptr;
+    g_wasmDebugMethodEnterContextIP = nullptr;
+}
+
+extern "C" void CoreClrWasmDebugHandleMethodEnter(const int32_t* ip)
+{
+    if (!g_wasmDebuggerConnected ||
+        !g_wasmDebugStepIntoCallPending ||
+        g_wasmDebugMethodEnterContextMethodDesc == nullptr)
+    {
+        return;
+    }
+
+    const int32_t* landedIP = ip != nullptr ? ip : g_wasmDebugMethodEnterContextIP;
+    uint64_t originalStepRequestToken = g_wasmDebugStepIntoTokenAtCall;
+    MethodDesc* methodDesc = g_wasmDebugMethodEnterContextMethodDesc;
+    ClearWasmDebugStepIntoCallState(true);
+    EmitWasmDebugStepComplete(methodDesc, 0, landedIP, originalStepRequestToken);
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugIsDebuggerConnected()
@@ -1465,6 +1696,7 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     uint32_t firingSlotIndex = WasmDebugMaxBreakpoints;
     uint32_t effectiveILOffset = ilOffset;
     bool firedOneShot = false;
+    bool firedStepIntoCallFallback = false;
     TryGetWasmDebugInterpreterIPOffset(methodDesc, ip, &effectiveILOffset);
     for (uint32_t i = 0; i < WasmDebugMaxBreakpoints; i++)
     {
@@ -1482,6 +1714,12 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
             if (slot.IsOneShot)
             {
                 firedOneShot = true;
+                if (g_wasmDebugStepIntoCallPending &&
+                    g_wasmDebugStepIntoCallerMethod == methodDesc &&
+                    g_wasmDebugStepIntoCallFallbackIP == ip)
+                {
+                    firedStepIntoCallFallback = true;
+                }
                 slot.Armed = false;
                 slot.IsOneShot = false;
                 slot.MethodName[0] = 0;
@@ -1538,6 +1776,11 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
                 slot.HitCount = 0;
             }
         }
+    }
+
+    if (firedStepIntoCallFallback)
+    {
+        ClearWasmDebugStepIntoCallState(false);
     }
 
     g_wasmDebugBreakpointStopped = true;
