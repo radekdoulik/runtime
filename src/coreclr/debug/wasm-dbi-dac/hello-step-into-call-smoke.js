@@ -9,6 +9,7 @@ const { pathToFileURL } = require("url");
 const { spawnSync } = require("child_process");
 
 const BreakpointMethodName = "BreakHere";
+const ExpectedStepIntoCallerToken = 0x06000002;
 const ExpectedStepIntoTargetToken = 0x06000003;
 const IpcStepCompleteSize = 96;
 const IpcStepCompleteMagic = 0x54435049;
@@ -611,6 +612,9 @@ async function main() {
     let afterStepRequestBreakpointCount = -1;
     let stepLandingBreakpointCount = -1;
     let stepCompleteBreakpointCount = -1;
+    let stepOutFromMethodEnterRequestResult = -1;
+    let stepOutFromMethodEnterRequestToken = 0n;
+    let stepOutCompleteBreakpointCount = -1;
     const breakpointEvents = [];
     const stepCompleteEvents = [];
     const stepRequestResults = [];
@@ -778,7 +782,22 @@ async function main() {
                             stepCompleteEvents.push(dbiStepCompleteDuringCallback.payload);
                         }
                         const stepCompleteBreakpoints = enumerateBreakpoints(debuggerInstance);
-                        stepCompleteBreakpointCount = stepCompleteBreakpoints.enumerateResult === 0 ? stepCompleteBreakpoints.activeCount : -1;
+                        if (stepCompleteEvents.length === 1) {
+                            stepCompleteBreakpointCount = stepCompleteBreakpoints.enumerateResult === 0 ? stepCompleteBreakpoints.activeCount : -1;
+                        } else if (stepCompleteEvents.length === 2) {
+                            stepOutCompleteBreakpointCount = stepCompleteBreakpoints.enumerateResult === 0 ? stepCompleteBreakpoints.activeCount : -1;
+                        }
+                        const stepComplete = dbiStepCompleteDuringCallback.payload;
+                        if (stepComplete !== null &&
+                            stepCompleteEvents.length === 1 &&
+                            stepComplete.funcMetadataToken === ExpectedStepIntoTargetToken &&
+                            stepComplete.isIL === 1) {
+                            stepOutFromMethodEnterRequestToken = stepComplete.originalStepRequestToken;
+                            stepOutFromMethodEnterRequestResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request(
+                                Number(stepOutFromMethodEnterRequestToken & 0xffffffffn),
+                                Number(stepOutFromMethodEnterRequestToken >> 32n),
+                                2);
+                        }
                         return 0;
                     }
                 }
@@ -981,11 +1000,18 @@ async function main() {
         const firstEvent = breakpointEvents[0];
         const stepEvent = breakpointEvents[1];
         const stepComplete = stepCompleteEvents[0];
+        const stepOutComplete = stepCompleteEvents[1];
         const summaryStepComplete = stepComplete === undefined ? null : {
             ...stepComplete,
             stepToken: `0x${stepComplete.stepToken.toString(16)}`,
             originalStepRequestToken: `0x${stepComplete.originalStepRequestToken.toString(16)}`,
             codeStartAddress: `0x${stepComplete.codeStartAddress.toString(16)}`
+        };
+        const summaryStepOutComplete = stepOutComplete === undefined ? null : {
+            ...stepOutComplete,
+            stepToken: `0x${stepOutComplete.stepToken.toString(16)}`,
+            originalStepRequestToken: `0x${stepOutComplete.originalStepRequestToken.toString(16)}`,
+            codeStartAddress: `0x${stepOutComplete.codeStartAddress.toString(16)}`
         };
         const summary = {
             hitCount: result.hitCount,
@@ -1003,10 +1029,14 @@ async function main() {
             afterStepRequestBreakpointCount,
             stepLandingBreakpointCount,
             stepCompleteBreakpointCount,
+            stepOutCompleteBreakpointCount,
+            stepOutFromMethodEnterRequestResult,
+            stepOutFromMethodEnterRequestToken: `0x${stepOutFromMethodEnterRequestToken.toString(16)}`,
             continueCount,
             methodEnterQueryCount,
             stepCompleteSeen,
             stepComplete: summaryStepComplete,
+            stepOutComplete: summaryStepOutComplete,
             stepRequestResults,
             stepRequestTokens: stepRequestTokens.map(token => `0x${token.toString(16)}`),
             fireEventToPauseCount,
@@ -1047,8 +1077,17 @@ async function main() {
             stepComplete?.isIL !== 1 ||
             stepComplete?.stepToken === 0n ||
             stepComplete?.originalStepRequestToken !== stepRequestTokens[stepRequestTokens.length - 1] ||
-            fireEventToPauseCount < 2 ||
-            fireEventToPauseLastEvent !== "step-complete") {
+            stepOutFromMethodEnterRequestResult !== 0 ||
+            stepOutFromMethodEnterRequestToken !== stepComplete?.originalStepRequestToken ||
+            stepOutCompleteBreakpointCount !== preStepBreakpointCount ||
+            stepOutComplete?.magic !== IpcStepCompleteMagic ||
+            stepOutComplete?.type !== IpcStepCompleteType ||
+            stepOutComplete?.funcMetadataToken !== ExpectedStepIntoCallerToken ||
+            stepOutComplete?.ilOffset <= firstEvent?.ipc?.offset ||
+            stepOutComplete?.isIL !== 0 ||
+            stepOutComplete?.stepToken <= stepComplete?.stepToken ||
+            stepOutComplete?.originalStepRequestToken !== stepComplete?.originalStepRequestToken ||
+            fireEventToPauseCount < 3) {
             fail("HelloWorld step-into-call did not land in StepIntoTarget");
         }
     } finally {
