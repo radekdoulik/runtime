@@ -62,7 +62,7 @@ sidecar declares them in `dbi_dac_wasm.cpp` near line 740 with
 | `get_target_module_base`          | `int32_t (uint32_t imageNameAddress, uint32_t imageNameCharCount, uint32_t outAddress)` | DAC bootstrap    |
 | `send_ipc_to_runtime`             | `int32_t (uint32_t messageAddress, uint32_t messageLength)`                          | DBI session/breakpoint flow |
 | `submit_continue_request`         | `int32_t (uint32_t requestBytesAddress, uint32_t requestBytesLength)`                 | Structured DBI continue flow |
-| `submit_step_into_request`        | `int32_t (uint32_t requestBytesAddress, uint32_t requestBytesLength)`                 | Structured DBI step-into flow |
+| `submit_step_into_request`        | `int32_t (uint32_t requestBytesAddress, uint32_t requestBytesLength)`                 | Structured DBI step request flow (into/over/out) |
 
 ### `read_target_memory(targetAddress, debuggerAddress, byteCount)`
 
@@ -163,6 +163,9 @@ export synchronously.
 - `requestBytesLength` must equal 32 (`sizeof(WasmDbgIpcEventStepIntoRequest)`).
 - The payload magic is `'IPCS'` (`0x53435049`) and type is the
   wasm-private StepInto request value `0x0102`.
+- The final 32-bit field is `StepKind`: `0` = step-into, `1` = step-over,
+  `2` = step-out. Older payloads that left this reserved field as zero keep
+  step-into behavior.
 - Returns `0` on success, non-zero on validation or transport failure.
 
 ## Sidecar exports (sidecar → JS)
@@ -211,7 +214,7 @@ acknowledged handshake returns `HrIncompatibleProtocol`.
 | `coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_token`  | Send `SetBreakpointByToken` command record to runtime. |
 | `coreclr_wasm_dbi_dac_dbi_continue`                 | Send `Continue` command record; invalidates the page cache. |
 | `coreclr_wasm_dbi_dac_dbi_send_ipc_continue_request` | Send structured `DB_IPCE_CONTINUE` request; invalidates the page cache on success. |
-| `coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request` | Send structured wasm-private StepInto request; invalidates the page cache on success. |
+| `coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request` | Send structured wasm-private step request (`breakpointToken`, `stepKind`); invalidates the page cache on success. |
 | `coreclr_wasm_dbi_dac_dbi_poll_event`               | Drain queued runtime event text into the supplied buffer. |
 | `coreclr_wasm_dbi_dac_dbi_poll_ipc_exception`       | Drain structured first-chance exception event (`WasmDbgIpcEventException`, 144 bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_poll_ipc_step_complete`   | Drain structured step-complete event (`WasmDbgIpcEventStepComplete`, 96 bytes) via DAC `ReadVirtual`. |

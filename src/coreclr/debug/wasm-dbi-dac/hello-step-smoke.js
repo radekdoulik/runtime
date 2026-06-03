@@ -17,7 +17,7 @@ const CommandRecordSize = 80;
 // point will run (CORDBG_E_INCOMPATIBLE_PROTOCOL otherwise).
 const ExpectedVersionBlobMagic = 0x42564457; // 'WDVB' little-endian
 const ExpectedAbiVersion = 1;
-const ExpectedProtocolBreakingChangeCounter = 7;
+const ExpectedProtocolBreakingChangeCounter = 8;
 
 function fail(message) {
     throw new Error(message);
@@ -824,7 +824,8 @@ async function main() {
                         const stepToken = dbiIpcEventDuringCallback.payload.breakpointToken;
                         stepRequestDuringCallbackResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request(
                             Number(stepToken & 0xffffffffn),
-                            Number(stepToken >> 32n));
+                            Number(stepToken >> 32n),
+                            0);
                         const afterStep = enumerateBreakpoints(debuggerInstance);
                         afterStepRequestBreakpointCount = afterStep.enumerateResult === 0 ? afterStep.activeCount : -1;
                         sawBreakpointBeforeContinue = true;

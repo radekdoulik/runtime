@@ -19,6 +19,7 @@
 #include "common.h"
 #include "excep.h"
 #include "threads.h"
+#include "../interpexec.h"
 #include "../../debug/ee/interpreterwalker.h"
 #include "../../interpreter/intops.h"
 #include "../../interpreter/inc/interpretershared.h"
@@ -211,7 +212,14 @@ struct WasmDbgIpcEventStepIntoRequest
     uint32_t ThreadId;
     uint64_t BreakpointToken;
     uint32_t Flags;
-    uint32_t Reserved0;
+    uint32_t StepKind;
+};
+
+enum class WasmDebugStepKind : uint32_t
+{
+    Into = 0,
+    Over = 1,
+    Out = 2,
 };
 
 struct WasmDebugFrameRecord
@@ -346,6 +354,7 @@ uint32_t g_wasmDebugContinueCount;
 MethodDesc* g_wasmDebugLastStoppedMethodDesc;
 const int32_t* g_wasmDebugLastStoppedIP;
 uint32_t g_wasmDebugLastStoppedILOffset;
+InterpMethodContextFrame* g_wasmDebugLastStoppedFrame;
 // Index of the slot whose patch fired most recently (or
 // WasmDebugMaxBreakpoints when no slot has fired). Used by the event-
 // record builder to report the correct per-slot hit count.
@@ -358,8 +367,11 @@ uint32_t g_wasmDebugStepIntoCallerILOffset;
 const int32_t* g_wasmDebugStepIntoCallFallbackIP;
 MethodDesc* g_wasmDebugMethodEnterContextMethodDesc;
 const int32_t* g_wasmDebugMethodEnterContextIP;
+bool g_wasmDebugOneShotStepPending;
+uint64_t g_wasmDebugOneShotStepRequestToken;
 
 void ClearWasmDebugStepIntoCallState(bool clearFallbackBreakpoint);
+void ClearWasmDebugOneShotStepState(bool clearBreakpoints);
 
 // Phase 6 connection-state gate. Mirrors Mono's
 // mono_wasm_set_is_debugger_attached (src/mono/mono/component/mini-wasm-debugger.c:38).
@@ -498,6 +510,11 @@ void SetWasmDebugBreakpointLocalsRecord(MethodDesc* methodDesc, uintptr_t stackA
 
 void EmitWasmDebugException(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, OBJECTREF exceptionObj)
 {
+    if (g_wasmDebugOneShotStepPending)
+    {
+        ClearWasmDebugOneShotStepState(true);
+    }
+
     if (g_wasmDebugStepIntoCallPending)
     {
         ClearWasmDebugStepIntoCallState(true);
@@ -544,7 +561,13 @@ void EmitWasmDebugException(MethodDesc* methodDesc, uint32_t ilOffset, const int
         static_cast<uint32_t>(sizeof(g_wasmDebugLastIpcException)));
 }
 
-void EmitWasmDebugStepComplete(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, uint64_t originalStepRequestToken)
+void EmitWasmDebugStepComplete(
+    MethodDesc* methodDesc,
+    uint32_t ilOffset,
+    const int32_t* ip,
+    uint64_t originalStepRequestToken,
+    bool isIL,
+    InterpMethodContextFrame* frame)
 {
     if (!g_wasmDebuggerConnected || methodDesc == nullptr)
     {
@@ -563,7 +586,7 @@ void EmitWasmDebugStepComplete(MethodDesc* methodDesc, uint32_t ilOffset, const 
     g_wasmDebugLastIpcStepComplete.OriginalStepRequestToken = originalStepRequestToken;
     g_wasmDebugLastIpcStepComplete.FuncMetadataToken = methodDesc->GetMemberDef();
     g_wasmDebugLastIpcStepComplete.ILOffset = ilOffset;
-    g_wasmDebugLastIpcStepComplete.IsIL = 1;
+    g_wasmDebugLastIpcStepComplete.IsIL = isIL ? 1 : 0;
     g_wasmDebugLastIpcStepComplete.CodeStartAddress = reinterpret_cast<uintptr_t>(ip);
     g_wasmDebugLastIpcStepCompleteValid = 1;
 
@@ -573,6 +596,7 @@ void EmitWasmDebugStepComplete(MethodDesc* methodDesc, uint32_t ilOffset, const 
     g_wasmDebugLastStoppedMethodDesc = methodDesc;
     g_wasmDebugLastStoppedIP = ip;
     g_wasmDebugLastStoppedILOffset = ilOffset;
+    g_wasmDebugLastStoppedFrame = frame;
 
     coreClrDebugFireEventToPause(
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_wasmDebugLastIpcStepComplete)),
@@ -863,6 +887,39 @@ void ClearWasmDebugOneShotBreakpointAt(MethodDesc* methodDesc, const int32_t* ta
             slot.HitCount = 0;
         }
     }
+}
+
+void ClearWasmDebugAllOneShotBreakpoints()
+{
+    for (auto& slot : g_wasmDebugBreakpoints)
+    {
+        if (slot.Armed && slot.IsOneShot)
+        {
+            RestoreWasmDebugBreakpointPatchSlot(slot);
+            slot.Armed = false;
+            slot.IsOneShot = false;
+            slot.MethodName[0] = 0;
+            slot.MethodToken = 0;
+            slot.HitCount = 0;
+        }
+    }
+}
+
+void SetWasmDebugOneShotStepState(uint64_t originalStepRequestToken)
+{
+    g_wasmDebugOneShotStepPending = true;
+    g_wasmDebugOneShotStepRequestToken = originalStepRequestToken;
+}
+
+void ClearWasmDebugOneShotStepState(bool clearBreakpoints)
+{
+    if (clearBreakpoints)
+    {
+        ClearWasmDebugAllOneShotBreakpoints();
+    }
+
+    g_wasmDebugOneShotStepPending = false;
+    g_wasmDebugOneShotStepRequestToken = 0;
 }
 
 void ClearWasmDebugStepIntoCallState(bool clearFallbackBreakpoint)
@@ -1223,6 +1280,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugSubmitStepIntoRequest(co
         return -1;
     }
 
+    WasmDebugStepKind stepKind = static_cast<WasmDebugStepKind>(request.StepKind);
+    if (stepKind != WasmDebugStepKind::Into &&
+        stepKind != WasmDebugStepKind::Over &&
+        stepKind != WasmDebugStepKind::Out)
+    {
+        return -1;
+    }
+
     if (!g_wasmDebugBreakpointStopped ||
         g_wasmDebugLastStoppedMethodDesc == nullptr ||
         g_wasmDebugLastStoppedIP == nullptr)
@@ -1249,6 +1314,45 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugSubmitStepIntoRequest(co
         ? request.BreakpointToken
         : g_wasmDebugLastIpcEvent.BreakpointToken;
 
+    if (stepKind == WasmDebugStepKind::Out)
+    {
+        if (g_wasmDebugLastStoppedFrame == nullptr)
+        {
+            return -3;
+        }
+
+        InterpMethodContextFrame* callerFrame = g_wasmDebugLastStoppedFrame->pParent;
+        if (callerFrame == nullptr ||
+            callerFrame->startIp == nullptr ||
+            callerFrame->startIp->Method == nullptr ||
+            callerFrame->ip == nullptr)
+        {
+            return -3;
+        }
+
+        MethodDesc* callerMethodDesc = callerFrame->startIp->Method->methodHnd;
+        const int32_t* callerResumeIP = callerFrame->ip;
+        if (callerMethodDesc == nullptr ||
+            !IsWasmDebugInterpreterIPInMethod(callerMethodDesc, callerResumeIP))
+        {
+            return -3;
+        }
+
+        if (CountFreeWasmDebugBreakpointSlots() < 1)
+        {
+            return -3;
+        }
+
+        if (!ArmWasmDebugOneShotBreakpoint(callerMethodDesc, callerResumeIP))
+        {
+            return -3;
+        }
+
+        SetWasmDebugOneShotStepState(originalStepRequestToken);
+        RequestWasmDebugContinue();
+        return 0;
+    }
+
     const int32_t* targets[2] = { nullptr, nullptr };
     uint32_t targetCount = 0;
     switch (walker.GetOpcodeWalkType())
@@ -1274,6 +1378,23 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugSubmitStepIntoRequest(co
                 !IsWasmDebugInterpreterIPInMethod(g_wasmDebugLastStoppedMethodDesc, skipIP))
             {
                 return -1;
+            }
+
+            if (stepKind == WasmDebugStepKind::Over)
+            {
+                if (CountFreeWasmDebugBreakpointSlots() < 1)
+                {
+                    return -3;
+                }
+
+                if (!ArmWasmDebugOneShotBreakpoint(g_wasmDebugLastStoppedMethodDesc, skipIP))
+                {
+                    return -3;
+                }
+
+                SetWasmDebugOneShotStepState(originalStepRequestToken);
+                RequestWasmDebugContinue();
+                return 0;
             }
 
             if (g_wasmDebugStepIntoCallPending)
@@ -1352,10 +1473,15 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugSubmitStepIntoRequest(co
     {
         if (!ArmWasmDebugOneShotBreakpoint(g_wasmDebugLastStoppedMethodDesc, uniqueTargets[i]))
         {
+            ClearWasmDebugOneShotStepState(true);
             return -3;
         }
     }
 
+    if (stepKind != WasmDebugStepKind::Into)
+    {
+        SetWasmDebugOneShotStepState(originalStepRequestToken);
+    }
     RequestWasmDebugContinue();
     return 0;
 }
@@ -1612,7 +1738,7 @@ extern "C" void CoreClrWasmDebugHandleMethodEnter(const int32_t* ip)
     uint64_t originalStepRequestToken = g_wasmDebugStepIntoTokenAtCall;
     MethodDesc* methodDesc = g_wasmDebugMethodEnterContextMethodDesc;
     ClearWasmDebugStepIntoCallState(true);
-    EmitWasmDebugStepComplete(methodDesc, 0, landedIP, originalStepRequestToken);
+    EmitWasmDebugStepComplete(methodDesc, 0, landedIP, originalStepRequestToken, true, nullptr);
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugIsDebuggerConnected()
@@ -1697,6 +1823,8 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     uint32_t effectiveILOffset = ilOffset;
     bool firedOneShot = false;
     bool firedStepIntoCallFallback = false;
+    bool firedTrackedOneShotStep = false;
+    uint64_t stepCompleteOriginalToken = 0;
     TryGetWasmDebugInterpreterIPOffset(methodDesc, ip, &effectiveILOffset);
     for (uint32_t i = 0; i < WasmDebugMaxBreakpoints; i++)
     {
@@ -1764,6 +1892,12 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
 
     if (firedOneShot)
     {
+        if (g_wasmDebugOneShotStepPending)
+        {
+            firedTrackedOneShotStep = true;
+            stepCompleteOriginalToken = g_wasmDebugOneShotStepRequestToken;
+        }
+
         for (auto& slot : g_wasmDebugBreakpoints)
         {
             if (slot.IsOneShot)
@@ -1782,6 +1916,10 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     {
         ClearWasmDebugStepIntoCallState(false);
     }
+    else if (firedTrackedOneShotStep)
+    {
+        ClearWasmDebugOneShotStepState(false);
+    }
 
     g_wasmDebugBreakpointStopped = true;
     g_wasmDebugContinueRequested = false;
@@ -1789,6 +1927,20 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     g_wasmDebugLastStoppedMethodDesc = methodDesc;
     g_wasmDebugLastStoppedIP = ip;
     g_wasmDebugLastStoppedILOffset = effectiveILOffset;
+    g_wasmDebugLastStoppedFrame = reinterpret_cast<InterpMethodContextFrame*>(frameAddress);
+
+    if (firedTrackedOneShotStep)
+    {
+        EmitWasmDebugStepComplete(
+            methodDesc,
+            effectiveILOffset,
+            ip,
+            stepCompleteOriginalToken,
+            false,
+            reinterpret_cast<InterpMethodContextFrame*>(frameAddress));
+        g_wasmDebugBreakpointStopped = true;
+        g_wasmDebugContinueRequested = false;
+    }
 
     LPCUTF8 methodName = methodDesc->GetName();
     mdMethodDef methodToken = methodDesc->GetMemberDef();

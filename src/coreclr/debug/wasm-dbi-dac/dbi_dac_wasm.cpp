@@ -79,7 +79,8 @@ constexpr uint32_t WasmDbiDacVersionBlobMagic = 0x42564457;
 //   5 - add structured DB_IPCE_STEP_INTO request import/export path.
 //   6 - add structured first-chance exception event drain path.
 //   7 - add structured step-complete event drain path.
-constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 7;
+//   8 - repurpose StepIntoRequest.Reserved0 as StepKind (into/over/out).
+constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 8;
 
 // Sidecar build version - encoded VS_FIXEDFILEINFO-style as two 32-bit
 // words. Reserved for future use; today's PoC sidecar reports 0/0 so
@@ -419,7 +420,14 @@ struct WasmDbgIpcEventStepIntoRequest
     uint32_t ThreadId;
     uint64_t BreakpointToken;
     uint32_t Flags;
-    uint32_t Reserved0;             // pad for 8-byte alignment of future fields
+    uint32_t StepKind;              // 0=into, 1=over, 2=out
+};
+
+enum class WasmDebugStepKind : uint32_t
+{
+    Into = 0,
+    Over = 1,
+    Out = 2,
 };
 
 constexpr uint32_t WasmDbgIpcEventBreakpointMagic = 0x42435049;  // 'IPCB' little-endian
@@ -2391,7 +2399,7 @@ int32_t coreclr_wasm_dbi_dac_dbi_send_ipc_continue_request(uint64_t breakpointTo
 }
 
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request)
-int32_t coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request(uint64_t breakpointToken)
+int32_t coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request(uint64_t breakpointToken, uint32_t stepKind)
 {
     int32_t gate = EnsureProtocolAcknowledged();
     if (gate != Success)
@@ -2404,6 +2412,14 @@ int32_t coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request(uint64_t breakpointT
         return E_FAIL;
     }
 
+    WasmDebugStepKind kind = static_cast<WasmDebugStepKind>(stepKind);
+    if (kind != WasmDebugStepKind::Into &&
+        kind != WasmDebugStepKind::Over &&
+        kind != WasmDebugStepKind::Out)
+    {
+        return InvalidArgument;
+    }
+
     WasmDbgIpcEventStepIntoRequest request{};
     request.Magic = WasmDbgIpcEventStepIntoRequestMagic;
     request.Type = WasmDbgIpcEventTypeStepIntoRequest;
@@ -2411,7 +2427,7 @@ int32_t coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request(uint64_t breakpointT
     request.ThreadId = 1;
     request.BreakpointToken = breakpointToken;
     request.Flags = 0;
-    request.Reserved0 = 0;
+    request.StepKind = stepKind;
 
     int32_t result = coreclr_wasm_dbi_dac_submit_step_into_request(
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&request)),
