@@ -75,6 +75,7 @@ function wsTryParseFrame(buffer) {
         return null;
     }
 
+    const fin = (buffer[0] & 0x80) !== 0;
     const opcode = buffer[0] & 0x0f;
     const masked = (buffer[1] & 0x80) !== 0;
     let payloadLength = buffer[1] & 0x7f;
@@ -117,13 +118,14 @@ function wsTryParseFrame(buffer) {
         }
     }
 
-    return { opcode, payload, totalSize: offset + payloadLength };
+    return { fin, opcode, payload, totalSize: offset + payloadLength };
 }
 
 class RawCdpWebSocket {
     constructor(socket, head) {
         this.socket = socket;
         this.pending = head && head.length !== 0 ? Buffer.from(head) : Buffer.alloc(0);
+        this.messageFragments = [];
         this.listeners = new Map();
         this.closed = false;
 
@@ -222,8 +224,26 @@ class RawCdpWebSocket {
                 return;
             }
             this.pending = this.pending.subarray(frame.totalSize);
-            if (frame.opcode === 0x1) {
-                this.emit("message", { data: frame.payload.toString("utf8") });
+            if (frame.opcode === 0x0) {
+                if (this.messageFragments.length === 0) {
+                    throw new Error("CDP WebSocket continuation frame without an active fragmented message");
+                }
+
+                this.messageFragments.push(frame.payload);
+                if (frame.fin) {
+                    this.emit("message", { data: Buffer.concat(this.messageFragments).toString("utf8") });
+                    this.messageFragments = [];
+                }
+            } else if (frame.opcode === 0x1) {
+                if (this.messageFragments.length !== 0) {
+                    throw new Error("CDP WebSocket text frame interrupted an active fragmented message");
+                }
+
+                if (frame.fin) {
+                    this.emit("message", { data: frame.payload.toString("utf8") });
+                } else {
+                    this.messageFragments.push(frame.payload);
+                }
             } else if (frame.opcode === 0x8) {
                 this.close();
                 return;
@@ -535,8 +555,8 @@ class CdpClient {
         return paused;
     }
 
-    async resume(timeoutMs = 1_000) {
-        const resumed = this.waitForNotification("Debugger.resumed", timeoutMs).catch(() => null);
+    async resume(timeoutMs = PauseTimeoutMs) {
+        const resumed = this.waitForNotification("Debugger.resumed", timeoutMs);
         await this.post("Debugger.resume");
         await resumed;
     }
@@ -705,10 +725,8 @@ async function runParent() {
     const repoRoot = path.resolve(__dirname, "../../../..");
     const sharedFrameworkPath = path.join(repoRoot, "artifacts/bin/testhost/net11.0-browser-Debug-wasm/shared/Microsoft.NETCore.App/11.0.0");
     const runtimeJsPath = path.join(coreclrObjDirectory, "hosts/corerun/corerun.js");
-    const debuggerJsPath = path.join(coreclrObjDirectory, "debug/wasm-dbi-dac/coreclr-dbi-dac-tests.js");
 
     requireFile(runtimeJsPath, "runtime JS wrapper");
-    requireFile(debuggerJsPath, "debugger JS wrapper");
     requireFile(sharedFrameworkPath, "browser-wasm testhost shared framework");
 
     const appPath = buildHelloWorld(repoRoot);
