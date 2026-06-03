@@ -11,7 +11,7 @@ const ExpectedAbiVersion = 1;
 const ExpectedComponentMask = 0xf;
 const ExpectedVersionBlobMagic = 0x42564457;
 const ExpectedVersionBlobSize = 32;
-const ExpectedProtocolBreakingChangeCounter = 8;
+const ExpectedProtocolBreakingChangeCounter = 9;
 const HrIncompatibleProtocol = 0x8013134b | 0;
 const ContractDescriptorMagic = 0x0043414443434e44n;
 const TestDataMagic = 0x43445744;
@@ -484,6 +484,7 @@ async function main() {
     // until acknowledge_protocol succeeds. session_destroy is intentionally
     // ungated so a host that lost handshake state can still tear down,
     // so it must succeed even before any acknowledge.
+    const asyncBreakRequestBeforeAckResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_async_break_request() | 0;
     const sessionDestroyBeforeAckResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_session_destroy() | 0;
     const sessionCreateBeforeAckResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_session_create() | 0;
     const ackBadMagicResult = debuggerModule._coreclr_wasm_dbi_dac_acknowledge_protocol(
@@ -759,6 +760,12 @@ async function main() {
     const connectionAfterSet = runtimeExports.CoreClrWasmDebugIsDebuggerConnected() | 0;
     const connectionPrevOnClear = runtimeExports.CoreClrWasmDebugSetDebuggerConnected(0) | 0;
     const connectionAfterClear = runtimeExports.CoreClrWasmDebugIsDebuggerConnected() | 0;
+    const asyncBreakInitial = runtimeExports.CoreClrWasmDebugIsAsyncBreakInProgress() | 0;
+    const asyncBreakPrevOnSet = runtimeExports.CoreClrWasmDebugSetAsyncBreakInProgress(1) | 0;
+    const asyncBreakAfterSet = runtimeExports.CoreClrWasmDebugIsAsyncBreakInProgress() | 0;
+    const asyncBreakPrevOnClear = runtimeExports.CoreClrWasmDebugSetAsyncBreakInProgress(0) | 0;
+    const asyncBreakAfterClear = runtimeExports.CoreClrWasmDebugIsAsyncBreakInProgress() | 0;
+    const asyncBreakRequestAfterAckResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_async_break_request() | 0;
 
     // Path A-lite slice 4 link probe: the exported runtime wrapper calls into
     // interpreterstephelper.cpp, proving that source is present in the live
@@ -1162,6 +1169,15 @@ async function main() {
             prevOnClear: connectionPrevOnClear,
             afterClear: connectionAfterClear
         },
+        asyncBreakFacade: {
+            requestBeforeAck: asyncBreakRequestBeforeAckResult,
+            requestAfterAck: asyncBreakRequestAfterAckResult,
+            initial: asyncBreakInitial,
+            prevOnSet: asyncBreakPrevOnSet,
+            afterSet: asyncBreakAfterSet,
+            prevOnClear: asyncBreakPrevOnClear,
+            afterClear: asyncBreakAfterClear
+        },
         interpreterStepHelperProbe: {
             size: interpreterStepHelperProbeSize
         },
@@ -1193,6 +1209,7 @@ async function main() {
         checkProtocolBadMagicResult !== HrIncompatibleProtocol ||
         checkProtocolBadAbiResult !== HrIncompatibleProtocol ||
         checkProtocolBadCounterResult !== HrIncompatibleProtocol ||
+        asyncBreakRequestBeforeAckResult !== 0 ||
         sessionCreateBeforeAckResult !== HrIncompatibleProtocol ||
         sessionDestroyBeforeAckResult !== 0 ||
         ackBadMagicResult !== HrIncompatibleProtocol ||
@@ -1302,6 +1319,12 @@ async function main() {
         connectionAfterSet !== 1 ||
         connectionPrevOnClear !== 1 ||
         connectionAfterClear !== 0 ||
+        asyncBreakInitial !== 0 ||
+        asyncBreakPrevOnSet !== 0 ||
+        asyncBreakAfterSet !== 1 ||
+        asyncBreakPrevOnClear !== 1 ||
+        asyncBreakAfterClear !== 0 ||
+        asyncBreakRequestAfterAckResult !== 0 ||
         interpreterStepHelperProbeSize === 0 ||
         dacGlobalsProbeResult !== DacGlobalsProbeSlotCount ||
         !dacGlobalsAllNonZero ||

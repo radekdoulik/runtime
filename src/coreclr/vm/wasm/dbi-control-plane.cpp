@@ -385,6 +385,14 @@ void ClearWasmDebugOneShotStepState(bool clearBreakpoints);
 // debug-adapter) completes its handshake; cleared on disconnect.
 bool g_wasmDebuggerConnected;
 
+// CDP-level async-break correlation flag. The runtime does not implement
+// the suspension itself for this path: an external CDP client sends
+// Debugger.pause and V8's wasm-interrupt machinery halts execution at an
+// instruction boundary. Hosts flip this flag around their own pause/resume
+// request so future consumers can distinguish "our async-break request"
+// from unrelated DevTools pauses or user-authored `debugger;` statements.
+bool g_wasmDebugAsyncBreakInProgress;
+
 void SetWasmDebugEvent(const char* event)
 {
     size_t eventLength = strlen(event);
@@ -1769,6 +1777,18 @@ extern "C" void CoreClrWasmDebugHandleMethodEnter(const int32_t* ip)
 extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugIsDebuggerConnected()
 {
     return g_wasmDebuggerConnected ? 1 : 0;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugSetAsyncBreakInProgress(int32_t flag)
+{
+    int32_t previous = g_wasmDebugAsyncBreakInProgress ? 1 : 0;
+    g_wasmDebugAsyncBreakInProgress = (flag != 0);
+    return previous;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugIsAsyncBreakInProgress()
+{
+    return g_wasmDebugAsyncBreakInProgress ? 1 : 0;
 }
 
 extern "C" void CoreClrWasmDebugMaybePatchInterpreterMethod(MethodDesc* methodDesc, uint32_t ilOffset, int32_t* ip)

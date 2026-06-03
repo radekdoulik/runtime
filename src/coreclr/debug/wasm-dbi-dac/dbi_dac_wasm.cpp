@@ -80,7 +80,8 @@ constexpr uint32_t WasmDbiDacVersionBlobMagic = 0x42564457;
 //   6 - add structured first-chance exception event drain path.
 //   7 - add structured step-complete event drain path.
 //   8 - repurpose StepIntoRequest.Reserved0 as StepKind (into/over/out).
-constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 8;
+//   9 - add dbi_async_break_request facade for CDP Debugger.pause hosts.
+constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 9;
 
 // Sidecar build version - encoded VS_FIXEDFILEINFO-style as two 32-bit
 // words. Reserved for future use; today's PoC sidecar reports 0/0 so
@@ -2363,6 +2364,18 @@ int32_t coreclr_wasm_dbi_dac_dbi_continue()
     command.Kind = static_cast<uint32_t>(WasmDebugCommandKind::Continue);
     InvalidatePageCache();
     return SendRuntimeCommandRecord(command);
+}
+
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_async_break_request)
+int32_t coreclr_wasm_dbi_dac_dbi_async_break_request()
+{
+    // A CDP async break is not a runtime-emitted event and the sidecar has no
+    // cross-module write/evaluate callback today. The actual suspension is
+    // initiated by the JS host with CDP Debugger.pause; this facade exists so
+    // future mscordbi-shaped callers can route "Pause" through the same
+    // sidecar API surface as continue/step without implying a sidecar-local
+    // pause mechanism.
+    return Success;
 }
 
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_send_ipc_continue_request)

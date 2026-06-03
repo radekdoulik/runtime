@@ -170,7 +170,7 @@ export synchronously.
 
 ## Sidecar exports (sidecar → JS)
 
-Exports group into seven families. All are visible in the `tests`
+Exports group into several families. All are visible in the `tests`
 variant; only those tagged "product" below are visible in the product
 variant.
 
@@ -227,6 +227,12 @@ acknowledged handshake returns `HrIncompatibleProtocol`.
 | `coreclr_wasm_dbi_dac_receive_runtime_event_record` | Push a `WasmDebugEventRecord`.                         |
 | `coreclr_wasm_dbi_dac_receive_runtime_frame_record` | Push a `WasmDebugFrameRecord`.                         |
 | `coreclr_wasm_dbi_dac_invalidate_page_cache`        | Force-invalidate the in-sidecar page cache (epoch bump). |
+
+### Async-break facade (product, ungated)
+
+| Export                                          | Purpose |
+|-------------------------------------------------|---------|
+| `coreclr_wasm_dbi_dac_dbi_async_break_request` | Facade for host-driven CDP `Debugger.pause`; currently succeeds as a no-op because actual pause/resume happens in the JS host. |
 
 #### `WasmDbgIpcEventStepComplete` (96 bytes, little-endian)
 
@@ -363,10 +369,8 @@ A well-behaved host follows this sequence at session start:
 
 The page cache is also invalidated on every host-callable
 `invalidate_page_cache` call (a defensive "the runtime was poked
-out of band" hook). The smoke harnesses (`smoke-test.js`,
-`hello-breakpoint-smoke.js`, `hello-step-smoke.js`, and
-`hello-step-into-call-smoke.js`) follow this sequence and serve as
-reference implementations of the host side of the contract.
+out of band" hook). The smoke harnesses follow this sequence and serve
+as reference implementations of the host side of the contract.
 
 ## See also
 
@@ -379,6 +383,10 @@ reference implementations of the host side of the contract.
 - [`dbi_dac_wasm_exports.h`](dbi_dac_wasm_exports.h) - export tagging.
 - [`smoke-test.js`](smoke-test.js),
   [`hello-breakpoint-smoke.js`](hello-breakpoint-smoke.js),
-  [`hello-step-smoke.js`](hello-step-smoke.js), and
-  [`hello-step-into-call-smoke.js`](hello-step-into-call-smoke.js) -
+  [`hello-step-smoke.js`](hello-step-smoke.js),
+  [`hello-step-into-call-smoke.js`](hello-step-into-call-smoke.js),
+  [`hello-step-over-smoke.js`](hello-step-over-smoke.js),
+  [`hello-step-out-smoke.js`](hello-step-out-smoke.js),
+  [`hello-exception-smoke.js`](hello-exception-smoke.js), and
+  [`hello-async-break-smoke.js`](hello-async-break-smoke.js) -
   reference host implementations that fully exercise the contract above.
