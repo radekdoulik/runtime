@@ -3643,6 +3643,7 @@ CALL_INTERP_METHOD:
 
                     pInterpreterFrame->SetIsFaulting(true);
 #if defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
+                    GCPROTECT_BEGIN(throwable);
                     uint32_t exceptionILOffset = 0;
                     const int32_t* startIP = pFrame->startIp->GetByteCodes();
                     if (ip >= startIP)
@@ -3654,6 +3655,7 @@ CALL_INTERP_METHOD:
                         }
                     }
                     CoreClrWasmDebugNotifyInterpreterException(pMethod->methodHnd, exceptionILOffset, ip, throwable);
+                    GCPROTECT_END();
 #endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
                     DispatchManagedException(throwable);
                     UNREACHABLE();
