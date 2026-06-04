@@ -41,10 +41,13 @@ function libCoreRunFactory() {
 
             return 0;
         },
-        coreClrDebugLookupSourceLocation: (methodToken, ilOffset, outFileAddress, outFileCapacity, outLineAddress, outColumnAddress) => {
+        coreClrDebugLookupSourceLocation: (methodToken, moduleAddress, modulePathAddress, modulePathLength, ilOffset, outFileAddress, outFileCapacity, outLineAddress, outColumnAddress) => {
             if (typeof globalThis.coreClrDebugLookupSourceLocation === "function") {
                 return globalThis.coreClrDebugLookupSourceLocation(
                     methodToken >>> 0,
+                    moduleAddress >>> 0,
+                    modulePathAddress >>> 0,
+                    modulePathLength >>> 0,
                     ilOffset >>> 0,
                     outFileAddress >>> 0,
                     outFileCapacity >>> 0,

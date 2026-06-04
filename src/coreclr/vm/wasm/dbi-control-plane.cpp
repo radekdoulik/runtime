@@ -33,6 +33,9 @@
 extern "C" int32_t CoreClrWasmDebugOnBreakpointHit(uint32_t eventAddress, uint32_t eventLength);
 extern "C" int32_t coreClrDebugLookupSourceLocation(
     uint32_t methodToken,
+    uint32_t moduleAddress,
+    uint32_t modulePathAddress,
+    uint32_t modulePathLength,
     uint32_t ilOffset,
     uint32_t outFileAddress,
     uint32_t outFileCapacity,
@@ -73,6 +76,7 @@ struct WasmDbiDacTestData
 static_assert(sizeof(WasmDbiDacTestData) == 48);
 
 constexpr uint32_t WasmDebugMessageBufferSize = 256;
+constexpr uint32_t WasmDebugSourceLocationModulePathBytes = 4096;
 constexpr uint32_t WasmDebugCommandRecordMagic = 0x434d4457;
 
 enum class WasmDebugCommandKind : uint32_t
@@ -1321,8 +1325,34 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugLookupSourceLocation(
         return -1;
     }
 
+    Module* stoppedModule = stoppedMethodDesc->GetModule();
+    if (stoppedModule == nullptr)
+    {
+        return -1;
+    }
+
+    char modulePath[WasmDebugSourceLocationModulePathBytes];
+    modulePath[0] = '\0';
+
+    Assembly* stoppedAssembly = stoppedModule->GetAssembly();
+    if (stoppedAssembly != nullptr && stoppedAssembly->GetPEAssembly() != nullptr)
+    {
+        CopyWasmDebugUtf16String(
+            modulePath,
+            sizeof(modulePath),
+            stoppedAssembly->GetPEAssembly()->GetPath().GetUnicode());
+    }
+
+    if (modulePath[0] == '\0')
+    {
+        return -1;
+    }
+
     return coreClrDebugLookupSourceLocation(
         methodToken,
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(stoppedModule)),
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(modulePath)),
+        static_cast<uint32_t>(sizeof(modulePath)),
         ilOffset,
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(outFile)),
         outFileCapacity,

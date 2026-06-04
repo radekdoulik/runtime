@@ -951,19 +951,27 @@ async function main() {
                     runtimeExports.stackRestore(savedRuntimeStack);
                 }
             };
-            globalThis.coreClrDebugLookupSourceLocation = (methodToken, ilOffset, outFileAddress, outFileCapacity, outLineAddress, outColumnAddress) => {
+            globalThis.coreClrDebugLookupSourceLocation = (methodToken, moduleAddress, modulePathAddress, modulePathLength, ilOffset, outFileAddress, outFileCapacity, outLineAddress, outColumnAddress) => {
                 const runtimeHeap = getRuntimeHeap();
                 if (outFileCapacity === 0 ||
+                    modulePathLength === 0 ||
+                    modulePathAddress + modulePathLength > runtimeHeap.length ||
                     outFileAddress + outFileCapacity > runtimeHeap.length ||
                     outLineAddress + 4 > runtimeHeap.length ||
                     outColumnAddress + 4 > runtimeHeap.length) {
                     return -1;
                 }
 
-                const cacheKey = `${methodToken >>> 0}:${ilOffset >>> 0}`;
+                const moduleKey = moduleAddress >>> 0;
+                const assemblyPath = readNullTerminatedAscii(runtimeHeap, modulePathAddress, modulePathLength);
+                if (moduleKey === 0 || assemblyPath.length === 0) {
+                    return -1;
+                }
+
+                const cacheKey = `${moduleKey}:${assemblyPath}:${methodToken >>> 0}:${ilOffset >>> 0}`;
                 let location = sourceLocationCache.get(cacheKey);
                 if (location === undefined) {
-                    location = lookupSourceLocation(repoRoot, sourceLookupHelperPath, appPath, methodToken >>> 0, ilOffset >>> 0);
+                    location = lookupSourceLocation(repoRoot, sourceLookupHelperPath, assemblyPath, methodToken >>> 0, ilOffset >>> 0);
                     sourceLocationCache.set(cacheKey, location);
                 }
                 if (location === null ||

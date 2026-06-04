@@ -173,8 +173,10 @@ export synchronously.
 
 Resolve the source location for a stopped interpreted method token + IL
 offset. The host forwards to the runtime's
-`CoreClrWasmDebugLookupSourceLocation` export, which delegates Portable PDB
-parsing to a managed BCL consumer. On success, the host writes a
+`CoreClrWasmDebugLookupSourceLocation` export, which validates the token
+against the current stopped method and passes that method's module identity
+and full assembly path to the managed BCL Portable PDB consumer. On success,
+the host writes a
 NUL-terminated UTF-8 path into sidecar memory at `outFileAddress`, writes a
 32-bit line to `outLineAddress`, writes a 32-bit column to
 `outColumnAddress`, and returns `0`.
