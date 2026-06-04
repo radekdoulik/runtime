@@ -193,6 +193,22 @@ struct WasmDbgIpcEventStepComplete
     uint64_t CodeStartAddress;
 };
 
+struct WasmDbgIpcEventModuleLoad
+{
+    uint32_t Magic;
+    uint32_t Type;
+    uint32_t ProcessId;
+    uint32_t ThreadId;
+    uint64_t VmAppDomain;
+    uint64_t VmAssembly;
+    uint64_t VmModule;
+    uint64_t ModuleToken;
+    uint32_t Flags;
+    uint32_t IsDynamic;
+    char ModuleName[128];
+    char AssemblyPath[128];
+};
+
 struct WasmDbgIpcEventContinueRequest
 {
     uint32_t Magic;
@@ -265,6 +281,8 @@ static_assert(sizeof(WasmDbgIpcEventException) == 144,
               "WasmDbgIpcEventException must mirror the sidecar's WasmDbgIpcEventException byte-for-byte");
 static_assert(sizeof(WasmDbgIpcEventStepComplete) == 96,
               "WasmDbgIpcEventStepComplete must mirror the sidecar's WasmDbgIpcEventStepComplete byte-for-byte");
+static_assert(sizeof(WasmDbgIpcEventModuleLoad) == 312,
+              "WasmDbgIpcEventModuleLoad must mirror the sidecar's WasmDbgIpcEventModuleLoad byte-for-byte");
 static_assert(sizeof(WasmDbgIpcEventContinueRequest) == 32,
               "WasmDbgIpcEventContinueRequest must mirror the sidecar's byte-for-byte");
 static_assert(sizeof(WasmDbgIpcEventStepIntoRequest) == 32,
@@ -278,6 +296,9 @@ constexpr uint32_t WasmDbgIpcEventStepCompleteMagic = 0x54435049;
 // Wasm-private event type carried under the IPCT magic. This is not the
 // canonical DebuggerIPCEventType DB_IPCE_STEP_COMPLETE value.
 constexpr uint32_t WasmDbgIpcEventTypeStepComplete = 0x0104;
+constexpr uint32_t WasmDbgIpcEventModuleLoadMagic = 0x4D435049;
+constexpr uint32_t WasmDbgIpcEventTypeModuleLoad = 0x0105;
+constexpr uint32_t WasmDbgIpcEventTypeModuleUnload = 0x0106;
 constexpr uint32_t WasmDbgIpcEventContinueRequestMagic = 0x43435049;
 constexpr uint32_t WasmDbgIpcEventTypeContinueRequest = 0x0201;
 constexpr uint32_t WasmDbgIpcEventStepIntoRequestMagic = 0x53435049;
@@ -316,6 +337,9 @@ uint64_t g_wasmDebugExceptionTokenCounter;
 WasmDbgIpcEventStepComplete g_wasmDebugLastIpcStepComplete;
 uint32_t g_wasmDebugLastIpcStepCompleteValid;
 uint64_t g_wasmDebugStepTokenCounter;
+WasmDbgIpcEventModuleLoad g_wasmDebugLastIpcModuleLoad;
+uint32_t g_wasmDebugLastIpcModuleLoadValid;
+uint64_t g_wasmDebugModuleLoadTokenCounter;
 // Phase 7 multi-breakpoint state. The single-slot facade was replaced
 // with a fixed-size array of slots so multiple managed breakpoints can
 // be armed concurrently. Single-threaded wasm means at most one slot
@@ -416,6 +440,67 @@ void CopyWasmDebugString(char* destination, size_t destinationLength, const char
 
     memcpy(destination, source, sourceLength);
     destination[sourceLength] = 0;
+}
+
+void CopyWasmDebugUtf16String(char* destination, size_t destinationLength, LPCWSTR source)
+{
+    if (destinationLength == 0)
+    {
+        return;
+    }
+
+    if (source == nullptr)
+    {
+        destination[0] = 0;
+        return;
+    }
+
+    size_t destinationOffset = 0;
+    while (*source != W('\0') && destinationOffset + 1 < destinationLength)
+    {
+        uint32_t codepoint = static_cast<uint32_t>(*source++);
+        if (codepoint >= 0xD800 && codepoint <= 0xDBFF && *source >= 0xDC00 && *source <= 0xDFFF)
+        {
+            codepoint = 0x10000 + (((codepoint - 0xD800) << 10) | (static_cast<uint32_t>(*source++) - 0xDC00));
+        }
+
+        if (codepoint <= 0x7F)
+        {
+            destination[destinationOffset++] = static_cast<char>(codepoint);
+        }
+        else if (codepoint <= 0x7FF)
+        {
+            if (destinationOffset + 2 >= destinationLength)
+            {
+                break;
+            }
+            destination[destinationOffset++] = static_cast<char>(0xC0 | (codepoint >> 6));
+            destination[destinationOffset++] = static_cast<char>(0x80 | (codepoint & 0x3F));
+        }
+        else if (codepoint <= 0xFFFF)
+        {
+            if (destinationOffset + 3 >= destinationLength)
+            {
+                break;
+            }
+            destination[destinationOffset++] = static_cast<char>(0xE0 | (codepoint >> 12));
+            destination[destinationOffset++] = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+            destination[destinationOffset++] = static_cast<char>(0x80 | (codepoint & 0x3F));
+        }
+        else
+        {
+            if (destinationOffset + 4 >= destinationLength)
+            {
+                break;
+            }
+            destination[destinationOffset++] = static_cast<char>(0xF0 | (codepoint >> 18));
+            destination[destinationOffset++] = static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F));
+            destination[destinationOffset++] = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+            destination[destinationOffset++] = static_cast<char>(0x80 | (codepoint & 0x3F));
+        }
+    }
+
+    destination[destinationOffset] = 0;
 }
 
 void AppendWasmDebugString(char* destination, size_t destinationLength, size_t* destinationOffset, const char* source)
@@ -577,6 +662,58 @@ void EmitWasmDebugException(MethodDesc* methodDesc, uint32_t ilOffset, const int
     coreClrDebugFireEventToPause(
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_wasmDebugLastIpcException)),
         static_cast<uint32_t>(sizeof(g_wasmDebugLastIpcException)));
+}
+
+void EmitWasmDebugModuleLoad(Module* pModule, bool isLoad)
+{
+    if (!g_wasmDebuggerConnected || pModule == nullptr)
+    {
+        return;
+    }
+
+    Assembly* pAssembly = pModule->GetAssembly();
+    g_wasmDebugModuleLoadTokenCounter++;
+    memset(&g_wasmDebugLastIpcModuleLoad, 0, sizeof(g_wasmDebugLastIpcModuleLoad));
+    g_wasmDebugLastIpcModuleLoad.Magic = WasmDbgIpcEventModuleLoadMagic;
+    g_wasmDebugLastIpcModuleLoad.Type = isLoad ? WasmDbgIpcEventTypeModuleLoad : WasmDbgIpcEventTypeModuleUnload;
+    g_wasmDebugLastIpcModuleLoad.ProcessId = 1;
+    g_wasmDebugLastIpcModuleLoad.ThreadId = 1;
+    g_wasmDebugLastIpcModuleLoad.VmAppDomain = 0;
+    g_wasmDebugLastIpcModuleLoad.VmAssembly = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pAssembly));
+    g_wasmDebugLastIpcModuleLoad.VmModule = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pModule));
+    g_wasmDebugLastIpcModuleLoad.ModuleToken = g_wasmDebugModuleLoadTokenCounter;
+    g_wasmDebugLastIpcModuleLoad.Flags = isLoad ? 0 : 1;
+    g_wasmDebugLastIpcModuleLoad.IsDynamic =
+        (pModule->IsReflectionEmit() || (pAssembly != nullptr && pAssembly->IsDynamic())) ? 1 : 0;
+
+    LPCUTF8 moduleName = pModule->GetSimpleName();
+    if (moduleName != nullptr && moduleName[0] != 0)
+    {
+        CopyWasmDebugString(
+            g_wasmDebugLastIpcModuleLoad.ModuleName,
+            sizeof(g_wasmDebugLastIpcModuleLoad.ModuleName),
+            moduleName);
+    }
+    else
+    {
+        CopyWasmDebugUtf16String(
+            g_wasmDebugLastIpcModuleLoad.ModuleName,
+            sizeof(g_wasmDebugLastIpcModuleLoad.ModuleName),
+            pModule->GetPath().GetUnicode());
+    }
+
+    if (pAssembly != nullptr && pAssembly->GetPEAssembly() != nullptr)
+    {
+        CopyWasmDebugUtf16String(
+            g_wasmDebugLastIpcModuleLoad.AssemblyPath,
+            sizeof(g_wasmDebugLastIpcModuleLoad.AssemblyPath),
+            pAssembly->GetPEAssembly()->GetPath().GetUnicode());
+    }
+
+    g_wasmDebugLastIpcModuleLoadValid = 1;
+    coreClrDebugFireEventToPause(
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_wasmDebugLastIpcModuleLoad)),
+        static_cast<uint32_t>(sizeof(g_wasmDebugLastIpcModuleLoad)));
 }
 
 void EmitWasmDebugStepComplete(
@@ -1122,6 +1259,16 @@ extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcStepComplete()
 extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcStepCompleteValid()
 {
     return &g_wasmDebugLastIpcStepCompleteValid;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcModuleLoad()
+{
+    return &g_wasmDebugLastIpcModuleLoad;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcModuleLoadValid()
+{
+    return &g_wasmDebugLastIpcModuleLoadValid;
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugBreakpoints()
@@ -1674,6 +1821,28 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReadLastIpcStepComplete(
     memcpy(buffer, &g_wasmDebugLastIpcStepComplete, sizeof(g_wasmDebugLastIpcStepComplete));
     g_wasmDebugLastIpcStepCompleteValid = 0;
     return static_cast<int32_t>(sizeof(g_wasmDebugLastIpcStepComplete));
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetLastIpcModuleLoadSize()
+{
+    return sizeof(WasmDbgIpcEventModuleLoad);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReadLastIpcModuleLoad(uint8_t* buffer, uint32_t bufferLength)
+{
+    if (buffer == nullptr || bufferLength < sizeof(WasmDbgIpcEventModuleLoad))
+    {
+        return -1;
+    }
+
+    if (g_wasmDebugLastIpcModuleLoadValid == 0)
+    {
+        return 0;
+    }
+
+    memcpy(buffer, &g_wasmDebugLastIpcModuleLoad, sizeof(g_wasmDebugLastIpcModuleLoad));
+    g_wasmDebugLastIpcModuleLoadValid = 0;
+    return static_cast<int32_t>(sizeof(g_wasmDebugLastIpcModuleLoad));
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetBreakpointHitCount()

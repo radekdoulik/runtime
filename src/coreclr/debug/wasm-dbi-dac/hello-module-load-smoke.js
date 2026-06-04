@@ -8,21 +8,12 @@ const { performance } = require("perf_hooks");
 const { pathToFileURL } = require("url");
 const { spawnSync } = require("child_process");
 
-const BreakpointMethodName = "BreakHereInner";
-const ExpectedLandingMethodToken = 0x06000002;
-const ForbiddenLandingMethodToken = 0x06000003;
-const StepKind = 2;
-const StepKindName = "step-out";
-const CommandRecordMagic = 0x434d4457;
-const CommandRecordSize = 80;
-const IpcStepCompleteSize = 96;
-const IpcStepCompleteMagic = 0x54435049;
-const IpcStepCompleteType = 0x0104;
-
 const ExpectedVersionBlobMagic = 0x42564457;
 const ExpectedAbiVersion = 1;
 const ExpectedProtocolBreakingChangeCounter = 10;
 const IpcModuleLoadSize = 312;
+const IpcModuleLoadMagic = 0x4D435049;
+const IpcModuleLoadType = 0x0105;
 
 function fail(message) {
     throw new Error(message);
@@ -34,10 +25,6 @@ function requireFile(filePath, description) {
     }
 }
 
-function writeBytes(memory, address, bytes) {
-    memory.set(bytes, address);
-}
-
 function writeUint64(memory, address, value) {
     new DataView(memory.buffer).setBigUint64(address, BigInt(value), true);
 }
@@ -47,40 +34,37 @@ function readAscii(memory, address, byteCount) {
     for (let index = 0; index < byteCount; index++) {
         result += String.fromCharCode(memory[address + index]);
     }
+
     return result;
 }
 
-function decodeIpcBreakpointPayload(memory, address) {
-    const view = new DataView(memory.buffer, address, 96);
+function readNullTerminatedAscii(memory, address, byteCount) {
+    let result = "";
+    for (let index = 0; index < byteCount && memory[address + index] !== 0; index++) {
+        result += String.fromCharCode(memory[address + index]);
+    }
+
+    return result;
+}
+
+function decodeIpcModuleLoadPayload(memory, address) {
+    const view = new DataView(memory.buffer, address, IpcModuleLoadSize);
     return {
         magic: view.getUint32(0, true),
         type: view.getUint32(4, true),
-        hr: view.getInt32(32, true),
-        flags: view.getUint32(36, true),
-        breakpointToken: view.getBigUint64(40, true),
-        funcMetadataToken: view.getUint32(48, true),
-        isIL: view.getUint32(64, true),
-        offset: view.getUint32(68, true)
+        processId: view.getUint32(8, true),
+        threadId: view.getUint32(12, true),
+        vmAssembly: view.getBigUint64(24, true),
+        vmModule: view.getBigUint64(32, true),
+        moduleToken: view.getBigUint64(40, true),
+        flags: view.getUint32(48, true),
+        isDynamic: view.getUint32(52, true),
+        moduleName: readNullTerminatedAscii(memory, address + 56, 128),
+        assemblyPath: readNullTerminatedAscii(memory, address + 184, 128)
     };
 }
 
-function decodeStepCompletePayload(memory, address) {
-    const view = new DataView(memory.buffer, address, IpcStepCompleteSize);
-    return {
-        magic: view.getUint32(0, true),
-        type: view.getUint32(4, true),
-        hr: view.getInt32(32, true),
-        flags: view.getUint32(36, true),
-        stepToken: view.getBigUint64(40, true),
-        originalStepRequestToken: view.getBigUint64(48, true),
-        funcMetadataToken: view.getUint32(56, true),
-        ilOffset: view.getUint32(60, true),
-        isIL: view.getUint32(72, true),
-        codeStartAddress: view.getBigUint64(88, true)
-    };
-}
-
-async function loadDebugger(debuggerJsPath, sendToRuntime) {
+async function loadDebugger(debuggerJsPath) {
     const debuggerDirectory = path.dirname(debuggerJsPath);
     const source = fs.readFileSync(debuggerJsPath, "utf8");
     let instance;
@@ -122,12 +106,14 @@ async function loadDebugger(debuggerJsPath, sendToRuntime) {
                     if (typeof globalThis.CoreClrWasmDebugReadTargetMemory !== "function") {
                         return -1;
                     }
+
                     return globalThis.CoreClrWasmDebugReadTargetMemory(targetAddress >>> 0, debuggerAddress >>> 0, byteCount >>> 0);
                 },
                 get_symbol_address(baseAddress, symbolNameAddress, symbolNameLength, addressOutAddress) {
                     if (typeof globalThis.CoreClrWasmDebugGetSymbolAddress !== "function") {
                         return -1;
                     }
+
                     return globalThis.CoreClrWasmDebugGetSymbolAddress(
                         baseAddress >>> 0,
                         symbolNameAddress >>> 0,
@@ -138,25 +124,20 @@ async function loadDebugger(debuggerJsPath, sendToRuntime) {
                     if (typeof globalThis.CoreClrWasmDebugGetTargetModuleBase !== "function") {
                         return -1;
                     }
+
                     return globalThis.CoreClrWasmDebugGetTargetModuleBase(
                         imageNameAddress >>> 0,
                         imageNameCharCount >>> 0,
                         addressOutAddress >>> 0);
                 },
-                send_ipc_to_runtime(messageAddress, messageLength) {
-                    return sendToRuntime(messageAddress >>> 0, messageLength >>> 0);
+                send_ipc_to_runtime() {
+                    return -1;
                 },
-                submit_continue_request(requestBytesAddress, requestBytesLength) {
-                    if (typeof globalThis.CoreClrWasmDebugSubmitContinueRequest !== "function") {
-                        return -1;
-                    }
-                    return globalThis.CoreClrWasmDebugSubmitContinueRequest(requestBytesAddress >>> 0, requestBytesLength >>> 0);
+                submit_continue_request() {
+                    return -1;
                 },
-                submit_step_into_request(requestBytesAddress, requestBytesLength) {
-                    if (typeof globalThis.CoreClrWasmDebugSubmitStepIntoRequest !== "function") {
-                        return -1;
-                    }
-                    return globalThis.CoreClrWasmDebugSubmitStepIntoRequest(requestBytesAddress >>> 0, requestBytesLength >>> 0);
+                submit_step_into_request() {
+                    return -1;
                 }
             };
 
@@ -180,9 +161,9 @@ async function loadDebugger(debuggerJsPath, sendToRuntime) {
     });
 }
 
-function buildHelloWorld(repoRoot) {
-    const testDirectory = path.join(repoRoot, "artifacts", "wasm-dbi-dac-smoke", "hello-step-out");
-    const assemblyName = "HelloStepOut";
+function buildHelloModuleLoad(repoRoot) {
+    const testDirectory = path.join(repoRoot, "artifacts", "wasm-dbi-dac-smoke", "hello-module-load");
+    const assemblyName = "HelloModuleLoad";
     fs.rmSync(testDirectory, { recursive: true, force: true });
     fs.mkdirSync(testDirectory, { recursive: true });
     const projectPath = path.join(testDirectory, `${assemblyName}.csproj`);
@@ -203,6 +184,7 @@ function buildHelloWorld(repoRoot) {
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 
 namespace HelloSmoke;
@@ -211,23 +193,17 @@ public static class Program
 {
     public static void Main()
     {
-        Console.WriteLine("before");
-        HelloBreakpointTarget.BreakHereOuter();
-        Console.WriteLine("after");
+        Console.WriteLine("before module load");
+        HelloModuleLoadTarget.BreakHere();
+        Assembly.Load(new AssemblyName("System.Text.Json"));
+        Console.WriteLine("after module load");
     }
 }
 
-public static class HelloBreakpointTarget
+public static class HelloModuleLoadTarget
 {
     [MethodImpl(MethodImplOptions.NoInlining)]
-    public static void BreakHereOuter()
-    {
-        BreakHereInner();
-        Console.WriteLine("after step out");
-    }
-
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    public static void BreakHereInner() => Console.WriteLine("inside inner");
+    public static void BreakHere() => Console.WriteLine("module-load smoke");
 }
 `);
 
@@ -238,7 +214,7 @@ public static class HelloBreakpointTarget
     if (result.status !== 0) {
         process.stdout.write(result.stdout);
         process.stderr.write(result.stderr);
-        fail(`failed to build ${assemblyName}: ${result.status}`);
+        fail(`failed to build HelloModuleLoad test app: ${result.status}`);
     }
 
     const outputMatch = [...result.stdout.matchAll(/-> (.*\.dll)$/gm)]
@@ -251,7 +227,7 @@ public static class HelloBreakpointTarget
     return path.join(testDirectory, "bin/Debug/net11.0", `${assemblyName}.dll`);
 }
 
-async function loadAndRunRuntime(runtimeJsPath, appPath, sharedFrameworkPath, onRuntimeInstantiated) {
+async function loadAndRunRuntime(runtimeJsPath, appPath, sharedFrameworkPath, onRuntimeInstantiated, runtimeOutput) {
     const runtimeDirectory = path.dirname(runtimeJsPath);
     let source = fs.readFileSync(runtimeJsPath, "utf8");
 
@@ -268,12 +244,25 @@ async function loadAndRunRuntime(runtimeJsPath, appPath, sharedFrameworkPath, on
     process.env.DOTNET_ReadyToRun = "0";
     try {
         await new Promise((resolve, reject) => {
+            let stdoutLine = "";
+            const appendRuntimeLine = line => {
+                runtimeOutput.push(line);
+                process.stdout.write(`${line}\n`);
+            };
             const moduleConfig = {
                 noExitRuntime: true,
                 arguments: ["-c", sharedFrameworkPath, appPath],
                 locateFile: fileName => path.join(runtimeDirectory, fileName),
                 print(text) {
-                    process.stdout.write(`${text}\n`);
+                    appendRuntimeLine(String(text));
+                },
+                stdout(charCode) {
+                    if (charCode === 10) {
+                        appendRuntimeLine(stdoutLine);
+                        stdoutLine = "";
+                    } else if (charCode !== 13) {
+                        stdoutLine += String.fromCharCode(charCode);
+                    }
                 },
                 printErr(text) {
                     if (!String(text).startsWith("program exited (with status: 0), but keepRuntimeAlive()")) {
@@ -287,9 +276,11 @@ async function loadAndRunRuntime(runtimeJsPath, appPath, sharedFrameworkPath, on
                         receiveInstance(instance, module);
                         resolve();
                     }).catch(reject);
+
                     return {};
                 }
             };
+
             moduleFactory.selfRun(moduleConfig);
         });
     } finally {
@@ -298,6 +289,7 @@ async function loadAndRunRuntime(runtimeJsPath, appPath, sharedFrameworkPath, on
         } else {
             process.env.DOTNET_InterpMode = oldInterpMode;
         }
+
         if (oldReadyToRun === undefined) {
             delete process.env.DOTNET_ReadyToRun;
         } else {
@@ -306,59 +298,30 @@ async function loadAndRunRuntime(runtimeJsPath, appPath, sharedFrameworkPath, on
     }
 }
 
-function pollDbiIpcEvent(debuggerInstance) {
+function pollDbiIpcModuleLoad(debuggerInstance) {
     const stack = debuggerInstance.exports.stackSave();
-    const eventAddress = debuggerInstance.exports.stackAlloc(96);
+    const eventAddress = debuggerInstance.exports.stackAlloc(IpcModuleLoadSize);
     const bytesWrittenAddress = debuggerInstance.exports.stackAlloc(4);
-    const pollResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_poll_ipc_event(eventAddress, 96, bytesWrittenAddress);
+    const pollResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_poll_ipc_module_load(eventAddress, IpcModuleLoadSize, bytesWrittenAddress);
     const bytesWritten = new DataView(debuggerInstance.module.HEAPU8.buffer, bytesWrittenAddress, 4).getUint32(0, true);
-    const payload = pollResult === 0 && bytesWritten === 96
-        ? decodeIpcBreakpointPayload(debuggerInstance.module.HEAPU8, eventAddress)
-        : null;
-    debuggerInstance.exports.stackRestore(stack);
-    return { pollResult, bytesWritten, payload };
-}
-
-function pollDbiIpcStepComplete(debuggerInstance) {
-    const stack = debuggerInstance.exports.stackSave();
-    const eventAddress = debuggerInstance.exports.stackAlloc(IpcStepCompleteSize);
-    const bytesWrittenAddress = debuggerInstance.exports.stackAlloc(4);
-    const pollResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_poll_ipc_step_complete(
-        eventAddress,
-        IpcStepCompleteSize,
-        bytesWrittenAddress);
-    const bytesWritten = new DataView(debuggerInstance.module.HEAPU8.buffer, bytesWrittenAddress, 4).getUint32(0, true);
-    const payload = pollResult === 0 && bytesWritten === IpcStepCompleteSize
-        ? decodeStepCompletePayload(debuggerInstance.module.HEAPU8, eventAddress)
-        : null;
-    debuggerInstance.exports.stackRestore(stack);
-    return { pollResult, bytesWritten, payload };
-}
-
-function enumerateBreakpoints(debuggerInstance) {
-    const recordSize = 8 + (16 * 88);
-    const stack = debuggerInstance.exports.stackSave();
-    const slotsAddress = debuggerInstance.exports.stackAlloc(recordSize);
-    const bytesWrittenAddress = debuggerInstance.exports.stackAlloc(4);
-    const enumerateResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints(
-        slotsAddress,
-        recordSize,
-        bytesWrittenAddress);
-    const view = new DataView(debuggerInstance.module.HEAPU8.buffer, slotsAddress, recordSize);
-    const activeCount = enumerateResult === 0 ? view.getUint32(4, true) : -1;
-    debuggerInstance.exports.stackRestore(stack);
-    return { enumerateResult, activeCount };
-}
-
-async function waitForStepComplete(stepCompleteEvents) {
-    const deadline = Date.now() + 5000;
-    while (Date.now() < deadline) {
-        if (stepCompleteEvents.length > 0) {
-            return true;
-        }
-        await new Promise(resolve => setTimeout(resolve, 10));
+    let payload = null;
+    if (pollResult === 0 && bytesWritten === IpcModuleLoadSize) {
+        payload = decodeIpcModuleLoadPayload(debuggerInstance.module.HEAPU8, eventAddress);
     }
-    return false;
+    debuggerInstance.exports.stackRestore(stack);
+
+    return { pollResult, bytesWritten, payload };
+}
+
+function readRuntimeIpcModuleLoad(runtimeExports, runtimeHeap) {
+    const stack = runtimeExports.stackSave();
+    const eventAddress = runtimeExports.stackAlloc(IpcModuleLoadSize);
+    const readBytes = runtimeExports.CoreClrWasmDebugReadLastIpcModuleLoad(eventAddress, IpcModuleLoadSize);
+    const payload = readBytes === IpcModuleLoadSize ? decodeIpcModuleLoadPayload(runtimeHeap, eventAddress) : null;
+    const secondReadBytes = runtimeExports.CoreClrWasmDebugReadLastIpcModuleLoad(eventAddress, IpcModuleLoadSize);
+    runtimeExports.stackRestore(stack);
+
+    return { readBytes, secondReadBytes, payload };
 }
 
 async function main() {
@@ -372,40 +335,48 @@ async function main() {
     requireFile(debuggerJsPath, "debugger JS wrapper");
     requireFile(sharedFrameworkPath, "browser-wasm testhost shared framework");
 
-    const appPath = buildHelloWorld(repoRoot);
+    const appPath = buildHelloModuleLoad(repoRoot);
 
     let runtimeExports;
     let debuggerInstance;
-    let callbackEvent = "";
-    let initialBreakpoint = null;
-    let stepRequestResult = -1;
-    let preStepBreakpointCount = -1;
-    let afterStepRequestBreakpointCount = -1;
-    let stepCompleteBreakpointCount = -1;
     let fireEventToPauseCount = 0;
-    let fireEventToPauseLastKind = "";
-    const stepCompleteEvents = [];
+    let fireEventToPauseLastLength = 0;
+    const moduleLoadEvents = [];
+    const runtimeModuleReads = [];
+    const runtimeOutput = [];
 
-    const getRuntimeHeap = () => new Uint8Array(runtimeExports.memory.buffer);
-    const getDebuggerHeap = () => new Uint8Array(debuggerInstance.exports.memory.buffer);
+    const getRuntimeHeap = () => {
+        if (typeof runtimeExports === "undefined" || !runtimeExports.memory) {
+            fail("getRuntimeHeap called before runtimeExports.memory was bound");
+        }
+        return new Uint8Array(runtimeExports.memory.buffer);
+    };
+    const getDebuggerHeap = () => {
+        if (typeof debuggerInstance === "undefined" || !debuggerInstance.exports.memory) {
+            fail("getDebuggerHeap called before debuggerInstance.exports.memory was bound");
+        }
+        return new Uint8Array(debuggerInstance.exports.memory.buffer);
+    };
 
-    debuggerInstance = await loadDebugger(debuggerJsPath, (messageAddress, messageLength) => {
-        const message = getDebuggerHeap().slice(messageAddress, messageAddress + messageLength);
-        const stack = runtimeExports.stackSave();
-        const runtimeMessageAddress = runtimeExports.stackAlloc(messageLength);
-        getRuntimeHeap().set(message, runtimeMessageAddress);
-        const result =
-            messageLength === CommandRecordSize &&
-            new DataView(message.buffer, message.byteOffset, message.byteLength).getUint32(0, true) === CommandRecordMagic
-                ? runtimeExports.CoreClrWasmDebugReceiveCommandRecord(runtimeMessageAddress, messageLength)
-                : runtimeExports.CoreClrWasmDebugReceiveCommand(runtimeMessageAddress, messageLength);
-        runtimeExports.stackRestore(stack);
-        return result;
-    });
+    debuggerInstance = await loadDebugger(debuggerJsPath);
+
+    if (typeof debuggerInstance.exports.memory === "undefined" || typeof debuggerInstance.exports.memory.buffer === "undefined") {
+        fail("debugger export 'memory' is missing or does not expose a buffer");
+    }
 
     try {
         await loadAndRunRuntime(runtimeJsPath, appPath, sharedFrameworkPath, instance => {
             runtimeExports = instance.exports;
+            if (typeof runtimeExports.memory === "undefined" || typeof runtimeExports.memory.buffer === "undefined") {
+                fail("runtime export 'memory' is missing or does not expose a buffer");
+            }
+            if (typeof runtimeExports.CoreClrWasmDebugGetLastIpcModuleLoadSize !== "function") {
+                fail("runtime export CoreClrWasmDebugGetLastIpcModuleLoadSize is missing");
+            }
+            if ((runtimeExports.CoreClrWasmDebugGetLastIpcModuleLoadSize() | 0) !== IpcModuleLoadSize) {
+                fail(`unexpected runtime IPC module-load size: ${runtimeExports.CoreClrWasmDebugGetLastIpcModuleLoadSize()}`);
+            }
+
             globalThis.CoreClrWasmDebugReadTargetMemory = (targetAddress, debuggerAddress, byteCount) => {
                 const runtimeHeap = getRuntimeHeap();
                 const debuggerHeap = getDebuggerHeap();
@@ -413,6 +384,7 @@ async function main() {
                     debuggerAddress + byteCount > debuggerHeap.length) {
                     return -1;
                 }
+
                 debuggerHeap.set(runtimeHeap.subarray(targetAddress, targetAddress + byteCount), debuggerAddress);
                 return 0;
             };
@@ -437,6 +409,7 @@ async function main() {
                 if (symbolAddress === 0 || addressOutAddress + 8 > debuggerHeap.length) {
                     return -1;
                 }
+
                 writeUint64(debuggerHeap, addressOutAddress, symbolAddress);
                 return 0;
             };
@@ -445,172 +418,115 @@ async function main() {
                 if (addressOutAddress + 8 > debuggerHeap.length) {
                     return -1;
                 }
+
                 writeUint64(debuggerHeap, addressOutAddress, 1);
                 return 0;
             };
-            globalThis.CoreClrWasmDebugSubmitContinueRequest = (requestBytesAddress, requestBytesLength) => {
-                const debuggerHeap = getDebuggerHeap();
-                const requestBytes = debuggerHeap.slice(requestBytesAddress, requestBytesAddress + requestBytesLength);
-                const savedRuntimeStack = runtimeExports.stackSave();
-                try {
-                    const runtimeRequestAddress = runtimeExports.stackAlloc(requestBytesLength);
-                    getRuntimeHeap().set(requestBytes, runtimeRequestAddress);
-                    return runtimeExports.CoreClrWasmDebugSubmitContinueRequest(runtimeRequestAddress, requestBytesLength) | 0;
-                } finally {
-                    runtimeExports.stackRestore(savedRuntimeStack);
-                }
-            };
-            globalThis.CoreClrWasmDebugSubmitStepIntoRequest = (requestBytesAddress, requestBytesLength) => {
-                const debuggerHeap = getDebuggerHeap();
-                const requestBytes = debuggerHeap.slice(requestBytesAddress, requestBytesAddress + requestBytesLength);
-                const savedRuntimeStack = runtimeExports.stackSave();
-                try {
-                    const runtimeRequestAddress = runtimeExports.stackAlloc(requestBytesLength);
-                    getRuntimeHeap().set(requestBytes, runtimeRequestAddress);
-                    return runtimeExports.CoreClrWasmDebugSubmitStepIntoRequest(runtimeRequestAddress, requestBytesLength) | 0;
-                } finally {
-                    runtimeExports.stackRestore(savedRuntimeStack);
-                }
-            };
             globalThis.coreClrDebugFireEventToPause = (eventAddress, eventLength) => {
-                if ((eventLength >>> 0) === IpcModuleLoadSize) {
-                    return 0;
-                }
                 fireEventToPauseCount++;
-                const runtimeHeap = getRuntimeHeap();
-                if (eventLength === IpcStepCompleteSize && eventAddress + eventLength <= runtimeHeap.length) {
-                    const view = new DataView(runtimeHeap.buffer, eventAddress >>> 0, eventLength >>> 0);
-                    if (view.getUint32(0, true) === IpcStepCompleteMagic) {
-                        fireEventToPauseLastKind = "step-complete";
-                        const stepComplete = pollDbiIpcStepComplete(debuggerInstance);
-                        if (stepComplete.payload !== null) {
-                            stepCompleteEvents.push(stepComplete.payload);
-                        }
-                        const active = enumerateBreakpoints(debuggerInstance);
-                        stepCompleteBreakpointCount = active.enumerateResult === 0 ? active.activeCount : -1;
-                        return 0;
-                    }
+                fireEventToPauseLastLength = eventLength >>> 0;
+                const moduleLoad = pollDbiIpcModuleLoad(debuggerInstance);
+                if (moduleLoad.payload !== null) {
+                    moduleLoadEvents.push(moduleLoad);
                 }
-                fireEventToPauseLastKind = "breakpoint";
-                return 0;
-            };
-            globalThis.CoreClrWasmDebugOnBreakpointHit = (eventAddress, eventLength) => {
-                const event = readAscii(getRuntimeHeap(), eventAddress >>> 0, eventLength >>> 0);
-                callbackEvent = event;
-                if (event.includes(`breakpoint-hit:name=${BreakpointMethodName}`) && initialBreakpoint === null) {
-                    const ipc = pollDbiIpcEvent(debuggerInstance);
-                    if (ipc.payload === null) {
-                        return -1;
-                    }
-                    initialBreakpoint = ipc.payload;
-                    preStepBreakpointCount = enumerateBreakpoints(debuggerInstance).activeCount;
-                    const stepToken = ipc.payload.breakpointToken;
-                    stepRequestResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request(
-                        Number(stepToken & 0xffffffffn),
-                        Number(stepToken >> 32n),
-                        StepKind);
-                    afterStepRequestBreakpointCount = enumerateBreakpoints(debuggerInstance).activeCount;
-                }
+                runtimeModuleReads.push(readRuntimeIpcModuleLoad(runtimeExports, getRuntimeHeap()));
                 return 0;
             };
 
             const ackResult = debuggerInstance.module._coreclr_wasm_dbi_dac_acknowledge_protocol(
-                ExpectedVersionBlobMagic,
-                ExpectedAbiVersion,
-                ExpectedProtocolBreakingChangeCounter);
+                ExpectedVersionBlobMagic, ExpectedAbiVersion, ExpectedProtocolBreakingChangeCounter);
             if (ackResult !== 0) {
                 fail(`failed to acknowledge sidecar protocol: ${ackResult}`);
             }
+
             const sessionCreateResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_session_create();
             if (sessionCreateResult !== 0) {
                 fail(`failed to create DBI session: ${sessionCreateResult}`);
             }
+
             const connectResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_connect_runtime(1);
             if (connectResult !== 0) {
                 fail(`failed to connect DBI session to runtime: ${connectResult}`);
             }
-            if (runtimeExports.CoreClrWasmDebugSetDebuggerConnected(1) !== 0) {
-                fail("runtime debugger connection gate was already set");
-            }
 
-            const methodName = new TextEncoder().encode(BreakpointMethodName);
-            const stack = debuggerInstance.exports.stackSave();
-            const methodNameAddress = debuggerInstance.exports.stackAlloc(methodName.length);
-            writeBytes(getDebuggerHeap(), methodNameAddress, methodName);
-            const breakpointResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_name(methodNameAddress, methodName.length);
-            debuggerInstance.exports.stackRestore(stack);
-            if (breakpointResult !== 0) {
-                fail(`failed to set breakpoint: ${breakpointResult}`);
+            const prevConnected = runtimeExports.CoreClrWasmDebugSetDebuggerConnected(1);
+            if (prevConnected !== 0) {
+                fail(`expected CoreClrWasmDebugSetDebuggerConnected to return 0, got ${prevConnected}`);
             }
-        });
+        }, runtimeOutput);
 
-        const stepCompleteSeen = await waitForStepComplete(stepCompleteEvents);
-        const stepComplete = stepCompleteEvents[0];
-        const continueCount = runtimeExports.CoreClrWasmDebugGetContinueCount();
+        const matchingEvent = moduleLoadEvents.find(event =>
+            event.payload?.magic === IpcModuleLoadMagic &&
+            event.payload?.type === IpcModuleLoadType &&
+            event.payload?.flags === 0 &&
+            event.payload?.moduleName.length > 0);
+        const matchingRuntimeRead = runtimeModuleReads.find(event =>
+            event.payload?.magic === IpcModuleLoadMagic &&
+            event.payload?.type === IpcModuleLoadType &&
+            event.payload?.moduleName.length > 0);
         const disconnectResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_disconnect_runtime();
         const sessionDestroyResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_session_destroy();
+
         const summary = {
-            stepKind: StepKindName,
-            initialMethodToken: initialBreakpoint?.funcMetadataToken,
-            initialOffset: initialBreakpoint?.offset,
-            initialToken: initialBreakpoint?.breakpointToken !== undefined ? `0x${initialBreakpoint.breakpointToken.toString(16)}` : null,
-            stepRequestResult,
-            preStepBreakpointCount,
-            afterStepRequestBreakpointCount,
-            stepCompleteBreakpointCount,
-            stepCompleteSeen,
-            stepComplete: stepComplete === undefined ? null : {
-                ...stepComplete,
-                stepToken: `0x${stepComplete.stepToken.toString(16)}`,
-                originalStepRequestToken: `0x${stepComplete.originalStepRequestToken.toString(16)}`,
-                codeStartAddress: `0x${stepComplete.codeStartAddress.toString(16)}`
-            },
-            continueCount,
             fireEventToPauseCount,
-            fireEventToPauseLastKind,
-            callbackEvent,
+            fireEventToPauseLastLength,
+            eventCount: moduleLoadEvents.length,
+            runtimeReadCount: runtimeModuleReads.length,
+            matchingEvent: matchingEvent?.payload !== undefined ? {
+                pollResult: matchingEvent.pollResult,
+                bytesWritten: matchingEvent.bytesWritten,
+                magic: `0x${matchingEvent.payload.magic.toString(16)}`,
+                type: `0x${matchingEvent.payload.type.toString(16)}`,
+                processId: matchingEvent.payload.processId,
+                threadId: matchingEvent.payload.threadId,
+                moduleToken: `0x${matchingEvent.payload.moduleToken.toString(16)}`,
+                flags: matchingEvent.payload.flags,
+                isDynamic: matchingEvent.payload.isDynamic,
+                moduleName: matchingEvent.payload.moduleName,
+                assemblyPath: matchingEvent.payload.assemblyPath
+            } : null,
+            matchingRuntimeRead: matchingRuntimeRead?.payload !== undefined ? {
+                readBytes: matchingRuntimeRead.readBytes,
+                secondReadBytes: matchingRuntimeRead.secondReadBytes,
+                magic: `0x${matchingRuntimeRead.payload.magic.toString(16)}`,
+                type: `0x${matchingRuntimeRead.payload.type.toString(16)}`,
+                moduleToken: `0x${matchingRuntimeRead.payload.moduleToken.toString(16)}`,
+                moduleName: matchingRuntimeRead.payload.moduleName
+            } : null,
+            runtimeOutput,
             disconnectResult,
             sessionDestroyResult
         };
         console.log(JSON.stringify(summary, null, 2));
 
-        if (initialBreakpoint === null ||
-            initialBreakpoint.magic !== 0x42435049 ||
-            initialBreakpoint.type !== 0x100 ||
-            initialBreakpoint.breakpointToken === 0n ||
-            stepRequestResult !== 0 ||
-            preStepBreakpointCount < 1 ||
-            afterStepRequestBreakpointCount !== preStepBreakpointCount + 1 ||
-            stepCompleteBreakpointCount !== preStepBreakpointCount ||
-            !stepCompleteSeen ||
-            stepComplete?.magic !== IpcStepCompleteMagic ||
-            stepComplete?.type !== IpcStepCompleteType ||
-            stepComplete?.hr !== 0 ||
-            stepComplete?.funcMetadataToken !== ExpectedLandingMethodToken ||
-            stepComplete?.funcMetadataToken === ForbiddenLandingMethodToken ||
-            stepComplete?.ilOffset <= initialBreakpoint.offset ||
-            stepComplete?.isIL !== 0 ||
-            stepComplete?.stepToken === 0n ||
-            stepComplete?.originalStepRequestToken !== initialBreakpoint.breakpointToken ||
-            continueCount !== 1 ||
-            fireEventToPauseCount < 2 ||
-            fireEventToPauseLastKind !== "breakpoint" ||
+        if (moduleLoadEvents.length < 1 ||
+            matchingEvent === undefined ||
+            matchingEvent.pollResult !== 0 ||
+            matchingEvent.bytesWritten !== IpcModuleLoadSize ||
+            matchingEvent.payload?.magic !== IpcModuleLoadMagic ||
+            matchingEvent.payload?.type !== IpcModuleLoadType ||
+            matchingEvent.payload?.processId !== 1 ||
+            matchingEvent.payload?.threadId !== 1 ||
+            matchingEvent.payload?.moduleToken === 0n ||
+            matchingEvent.payload?.moduleName.length === 0 ||
+            matchingRuntimeRead === undefined ||
+            matchingRuntimeRead.readBytes !== IpcModuleLoadSize ||
+            matchingRuntimeRead.secondReadBytes !== 0 ||
+            fireEventToPauseCount < 1 ||
+            fireEventToPauseLastLength !== IpcModuleLoadSize ||
             disconnectResult !== 0 ||
             sessionDestroyResult !== 0) {
-            fail(`HelloWorld ${StepKindName} did not land at the expected caller offset`);
+            fail("HelloWorld module-load event was not observed");
         }
     } finally {
-        delete globalThis.CoreClrWasmDebugOnBreakpointHit;
         delete globalThis.coreClrDebugFireEventToPause;
         delete globalThis.CoreClrWasmDebugGetTargetModuleBase;
         delete globalThis.CoreClrWasmDebugGetSymbolAddress;
         delete globalThis.CoreClrWasmDebugReadTargetMemory;
-        delete globalThis.CoreClrWasmDebugSubmitContinueRequest;
-        delete globalThis.CoreClrWasmDebugSubmitStepIntoRequest;
     }
 }
 
 main().catch(error => {
-    console.error(error.stack || error);
+    console.error(error && error.stack ? error.stack : error);
     process.exit(1);
 });

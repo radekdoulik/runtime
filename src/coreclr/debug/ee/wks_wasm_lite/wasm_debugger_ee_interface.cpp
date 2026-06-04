@@ -23,6 +23,7 @@
 #include "debugger.h"
 
 void EmitWasmDebugException(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, OBJECTREF exceptionObj);
+void EmitWasmDebugModuleLoad(Module* pModule, bool isLoad);
 extern "C" bool CoreClrWasmDebugIsStepIntoCallPending();
 extern "C" void CoreClrWasmDebugHandleMethodEnter(const int32_t* ip);
 
@@ -114,14 +115,16 @@ public:
         LIMITED_METHOD_CONTRACT;
     }
 
-    void LoadModule(Module*, LPCWSTR, DWORD, Assembly*, BOOL) override
+    void LoadModule(Module* pModule, LPCWSTR, DWORD, Assembly*, BOOL) override
     {
-        LIMITED_METHOD_CONTRACT;
+        WRAPPER_NO_CONTRACT;
+        EmitWasmDebugModuleLoad(pModule, true);
     }
 
-    void UnloadModule(Module*) override
+    void UnloadModule(Module* pModule) override
     {
-        LIMITED_METHOD_CONTRACT;
+        WRAPPER_NO_CONTRACT;
+        EmitWasmDebugModuleLoad(pModule, false);
     }
 
     void DestructModule(Module*) override

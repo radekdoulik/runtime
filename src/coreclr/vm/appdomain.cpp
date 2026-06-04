@@ -3533,10 +3533,19 @@ BOOL AppDomain::NotifyDebuggerLoad(int flags, BOOL attaching)
     return result;
 }
 
+#ifdef TARGET_WASM
+extern "C" bool CoreClrWasmDebugIsDebuggerConnectedForHooks();
+#endif
+
 void AppDomain::NotifyDebuggerUnload()
 {
     WRAPPER_NO_CONTRACT;
-    if (!IsDebuggerAttached())
+
+    if (!IsDebuggerAttached()
+#ifdef TARGET_WASM
+        && (g_pDebugInterface == nullptr || !CoreClrWasmDebugIsDebuggerConnectedForHooks())
+#endif
+        )
         return;
 
     LOG((LF_CORDB, LL_INFO10, "AD::NDD domain %#08x\n", this));

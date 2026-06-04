@@ -2948,6 +2948,15 @@ void Module::UpdateDynamicMetadataIfNeeded()
 
 #ifdef DEBUGGING_SUPPORTED
 
+#ifdef TARGET_WASM
+extern "C" bool CoreClrWasmDebugIsDebuggerConnectedForHooks();
+
+static bool ShouldNotifyWasmDebugModuleEvent()
+{
+    LIMITED_METHOD_CONTRACT;
+    return g_pDebugInterface != nullptr && CoreClrWasmDebugIsDebuggerConnectedForHooks();
+}
+#endif
 
 #endif // DEBUGGING_SUPPORTED
 
@@ -2966,7 +2975,11 @@ BOOL Module::NotifyDebuggerLoad(Assembly * pAssembly, int flags, BOOL attaching)
     // Remaining work is only needed if a debugger is attached
     //
     AppDomain* pDomain = AppDomain::GetCurrentDomain();
-    if (!attaching && !pDomain->IsDebuggerAttached())
+    if (!attaching && !pDomain->IsDebuggerAttached()
+#ifdef TARGET_WASM
+        && !ShouldNotifyWasmDebugModuleEvent()
+#endif
+        )
         return FALSE;
 
 
@@ -3004,7 +3017,11 @@ void Module::NotifyDebuggerUnload()
     LIMITED_METHOD_CONTRACT;
 
     AppDomain* pDomain = AppDomain::GetCurrentDomain();
-    if (!pDomain->IsDebuggerAttached())
+    if (!pDomain->IsDebuggerAttached()
+#ifdef TARGET_WASM
+        && !ShouldNotifyWasmDebugModuleEvent()
+#endif
+        )
         return;
 
     LookupMap<PTR_MethodTable>::Iterator typeDefIter(&m_TypeDefToMethodTableMap);

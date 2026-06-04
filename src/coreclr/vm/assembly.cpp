@@ -2460,11 +2460,19 @@ BOOL Assembly::NotifyDebuggerLoad(int flags, BOOL attaching)
     return result;
 }
 
+#ifdef TARGET_WASM
+extern "C" bool CoreClrWasmDebugIsDebuggerConnectedForHooks();
+#endif
+
 void Assembly::NotifyDebuggerUnload()
 {
     LIMITED_METHOD_CONTRACT;
 
-    if (!AppDomain::GetCurrentDomain()->IsDebuggerAttached())
+    if (!AppDomain::GetCurrentDomain()->IsDebuggerAttached()
+#ifdef TARGET_WASM
+        && (g_pDebugInterface == nullptr || !CoreClrWasmDebugIsDebuggerConnectedForHooks())
+#endif
+        )
         return;
 
     // Dispatch module unload for the module. Debugger is resilient in case we haven't dispatched

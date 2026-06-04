@@ -23,7 +23,8 @@ const CommandRecordSize = 80;
 // point will run (CORDBG_E_INCOMPATIBLE_PROTOCOL otherwise).
 const ExpectedVersionBlobMagic = 0x42564457; // 'WDVB' little-endian
 const ExpectedAbiVersion = 1;
-const ExpectedProtocolBreakingChangeCounter = 9;
+const ExpectedProtocolBreakingChangeCounter = 10;
+const IpcModuleLoadSize = 312;
 
 function fail(message) {
     throw new Error(message);
@@ -717,6 +718,8 @@ async function main() {
                     symbolName === "g_wasmDebugLastIpcExceptionValid" ? runtimeExports.Getg_wasmDebugLastIpcExceptionValid() >>> 0 :
                     symbolName === "g_wasmDebugLastIpcStepComplete" ? runtimeExports.Getg_wasmDebugLastIpcStepComplete() >>> 0 :
                     symbolName === "g_wasmDebugLastIpcStepCompleteValid" ? runtimeExports.Getg_wasmDebugLastIpcStepCompleteValid() >>> 0 :
+                    symbolName === "g_wasmDebugLastIpcModuleLoad" ? runtimeExports.Getg_wasmDebugLastIpcModuleLoad() >>> 0 :
+                    symbolName === "g_wasmDebugLastIpcModuleLoadValid" ? runtimeExports.Getg_wasmDebugLastIpcModuleLoadValid() >>> 0 :
                     symbolName === "g_wasmDebugBreakpoints" ? runtimeExports.Getg_wasmDebugBreakpoints() >>> 0 :
                     symbolName === "g_wasmDebugLastLocalsRecord" ? runtimeExports.Getg_wasmDebugLastLocalsRecord() >>> 0 :
                     0;
@@ -771,6 +774,9 @@ async function main() {
                 }
             };
             globalThis.coreClrDebugFireEventToPause = (eventAddress, eventLength) => {
+                if ((eventLength >>> 0) === IpcModuleLoadSize) {
+                    return 0;
+                }
                 fireEventToPauseCount++;
                 const runtimeHeap = getRuntimeHeap();
                 if (eventLength === IpcStepCompleteSize && eventAddress + eventLength <= runtimeHeap.length) {

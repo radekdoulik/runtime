@@ -218,6 +218,7 @@ acknowledged handshake returns `HrIncompatibleProtocol`.
 | `coreclr_wasm_dbi_dac_dbi_poll_event`               | Drain queued runtime event text into the supplied buffer. |
 | `coreclr_wasm_dbi_dac_dbi_poll_ipc_exception`       | Drain structured first-chance exception event (`WasmDbgIpcEventException`, 144 bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_poll_ipc_step_complete`   | Drain structured step-complete event (`WasmDbgIpcEventStepComplete`, 96 bytes) via DAC `ReadVirtual`. |
+| `coreclr_wasm_dbi_dac_dbi_poll_ipc_module_load`     | Drain structured module load/unload event (`WasmDbgIpcEventModuleLoad`, 312 bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints`    | Drain the runtime breakpoint slot table (`8 + 16 * 88` bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_locals`         | Drain the stopped-frame locals record (`16 + 32 * 48` bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_poll_event_record`        | Drain queued runtime event record (`WasmDebugEventRecord`, 340 bytes). |
@@ -255,6 +256,24 @@ offset  size  field
   76     4    Reserved0                 // 0
   80     8    NativeCodeMethodDescToken // reserved, 0 today
   88     8    CodeStartAddress          // interpreter IP that fired method-enter
+```
+
+#### `WasmDbgIpcEventModuleLoad` (312 bytes, little-endian)
+
+```text
+offset  size  field
+  0     4    Magic        // 'IPCM' = 0x4D435049 LE
+  4     4    Type         // 0x0105 load, 0x0106 unload
+  8     4    ProcessId    // 1 today
+  12     4    ThreadId     // 1 today
+  16     8    VmAppDomain  // reserved, 0 today
+  24     8    VmAssembly   // runtime Assembly*
+  32     8    VmModule     // runtime Module*
+  40     8    ModuleToken  // monotonic module event token
+  48     4    Flags        // 0 = load, 1 = unload
+  52     4    IsDynamic    // 1 for reflection-emit/dynamic modules
+  56   128    ModuleName   // null-terminated UTF-8, truncated
+ 184   128    AssemblyPath // null-terminated UTF-8, truncated
 ```
 
 ### Session teardown (product, ungated)
