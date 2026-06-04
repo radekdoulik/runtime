@@ -32,6 +32,15 @@ class MethodTable;
 
 struct CallStubHeader;
 
+struct WalkInterpMethodLocal
+{
+    uint32_t ILSlot;
+    uint32_t TypeTag;
+    uint32_t ByteOffset;
+    uint32_t ByteSize;
+    const char* Name;
+};
+
 struct InterpMethod
 {
 #if DEBUG
@@ -52,12 +61,15 @@ struct InterpMethod
     // INTOP_HANDLE_CONTINUATION_RESUME opcode from InterpByteCodeStart.
     int32_t numSuspensionPoints;
     int32_t* suspensionPointIPOffsets;
+    int32_t numLocals;
+    WalkInterpMethodLocal* locals;
 
 #ifdef INTERPRETER_COMPILER_INTERNAL
     InterpMethod(
         CORINFO_METHOD_HANDLE methodHnd, int32_t argsSize, int32_t allocaSize,
-        void** pDataItems, bool initLocals, bool unmanagedCallersOnly,
-        bool publishSecretStubParam, int32_t codeSize
+        void** pDataItems, int32_t numLocals, WalkInterpMethodLocal* locals,
+        bool initLocals, bool unmanagedCallersOnly, bool publishSecretStubParam,
+        int32_t codeSize
     )
     {
 #if DEBUG
@@ -73,11 +85,13 @@ struct InterpMethod
         this->codeSize = codeSize;
         this->numSuspensionPoints = 0;
         this->suspensionPointIPOffsets = NULL;
+        this->numLocals = numLocals;
+        this->locals = locals;
         pCallStub = NULL;
     }
 #endif
 
-    bool CheckIntegrity()
+    bool CheckIntegrity() const
     {
 #if DEBUG
         return this->self == this;
@@ -86,6 +100,8 @@ struct InterpMethod
 #endif
     }
 };
+
+INTERP_API int WalkInterpMethodLocals(const InterpMethod* method, WalkInterpMethodLocal* outBuffer, uint32_t bufferCapacity);
 
 struct InterpByteCodeStart
 {

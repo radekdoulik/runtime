@@ -24,6 +24,8 @@ struct InterpIntervalMapEntry;
 // ├────────────────────────────────────────┤
 // │ InterpMethod struct                    │
 // ├────────────────────────────────────────┤
+// │ WalkInterpMethodLocal descriptors      │
+// ├────────────────────────────────────────┤
 // │ DataItems array (void*[])              │
 // ├────────────────────────────────────────┤
 // │ InterpAsyncSuspendData structs         │
@@ -37,6 +39,7 @@ enum class InterpMethodDataSection : uint8_t
     Header,           // InterpByteCodeStart
     Bytecode,         // int32_t[] opcodes
     InterpMethod,     // InterpMethod struct
+    LocalDescriptors, // WalkInterpMethodLocal[] array
     DataItems,        // void*[] array
     AsyncSuspendData, // InterpAsyncSuspendData structs
     IntervalMaps,     // InterpIntervalMapEntry arrays
@@ -109,6 +112,9 @@ public:
 
     // Helper: Allocate InterpMethod and return its reference
     InterpSectionRef AllocateInterpMethod();
+
+    // Helper: Allocate local descriptor array
+    InterpSectionRef AllocateLocalDescriptors(int32_t count);
 
     // Helper: Allocate data items array
     InterpSectionRef AllocateDataItems(int32_t count);

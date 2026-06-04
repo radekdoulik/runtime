@@ -492,28 +492,37 @@ void SetWasmDebugBreakpointFrameRecord(MethodDesc* methodDesc, uint32_t ilOffset
     CopyWasmDebugString(g_wasmDebugLastFrameRecord.MethodName, sizeof(g_wasmDebugLastFrameRecord.MethodName), methodDesc->GetName());
 }
 
-void SetWasmDebugBreakpointLocalsRecord(MethodDesc* methodDesc, uintptr_t stackAddress)
+void SetWasmDebugBreakpointLocalsRecord(MethodDesc* methodDesc, InterpMethodContextFrame* frame)
 {
     memset(&g_wasmDebugLastLocalsRecord, 0, sizeof(g_wasmDebugLastLocalsRecord));
     g_wasmDebugLastLocalsRecord.Magic = WasmDebugLocalsRecordMagic;
     g_wasmDebugLastLocalsRecord.Version = 1;
     g_wasmDebugLastLocalsRecord.MethodToken = methodDesc->GetMemberDef();
 
-    // Phase 8 slice 1 intentionally snapshots a conservative placeholder.
-    // InterpMethod does not yet persist an IL-local descriptor table; the
-    // follow-up sidecar path will expose/walk real interpreter local
-    // metadata. Until then, publish the first 4-byte interpreter stack slot
-    // with stable shape so DBI/IDE callers can exercise the DAC enumeration
-    // path at a stopped frame.
-    if (stackAddress != 0)
+    if (frame == nullptr || frame->startIp == nullptr)
     {
-        WasmDebugLocalRecord& local = g_wasmDebugLastLocalsRecord.Locals[0];
-        local.ILSlot = 0;
-        local.TypeTag = static_cast<uint32_t>(ELEMENT_TYPE_I4);
-        local.ByteOffset = 0;
-        local.ByteSize = sizeof(int32_t);
-        CopyWasmDebugString(local.Name, sizeof(local.Name), "local0");
-        g_wasmDebugLastLocalsRecord.LocalCount = 1;
+        return;
+    }
+
+    WalkInterpMethodLocal locals[WasmDebugMaxLocalsPerFrame];
+    int localCount = WalkInterpMethodLocals(frame->startIp->Method, locals, WasmDebugMaxLocalsPerFrame);
+    if (localCount <= 0)
+    {
+        return;
+    }
+
+    g_wasmDebugLastLocalsRecord.LocalCount = static_cast<uint32_t>(localCount);
+    for (int i = 0; i < localCount; i++)
+    {
+        WasmDebugLocalRecord& local = g_wasmDebugLastLocalsRecord.Locals[i];
+        local.ILSlot = locals[i].ILSlot;
+        local.TypeTag = locals[i].TypeTag;
+        local.ByteOffset = locals[i].ByteOffset;
+        local.ByteSize = locals[i].ByteSize;
+        if (locals[i].Name != nullptr)
+        {
+            CopyWasmDebugString(local.Name, sizeof(local.Name), locals[i].Name);
+        }
     }
 }
 
@@ -1999,7 +2008,7 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     SetWasmDebugEvent(event);
     SetWasmDebugBreakpointEventRecord(methodDesc, effectiveILOffset);
     SetWasmDebugBreakpointFrameRecord(methodDesc, effectiveILOffset, ip, frameAddress, stackAddress);
-    SetWasmDebugBreakpointLocalsRecord(methodDesc, stackAddress);
+    SetWasmDebugBreakpointLocalsRecord(methodDesc, reinterpret_cast<InterpMethodContextFrame*>(frameAddress));
 
     // Phase 4 slice 2: populate the structured DebuggerIPCEvent payload
     // the sidecar can drain via CoreClrWasmDebugReadLastIpcEvent. This

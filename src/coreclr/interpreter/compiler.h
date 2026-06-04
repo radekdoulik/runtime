@@ -390,6 +390,7 @@ struct InterpVar
 {
     CORINFO_CLASS_HANDLE clsHnd = nullptr;
     InterpType interpType = (InterpType)0;
+    uint32_t typeTag = 0;
     int offset = 0;
     int size = 0;
     // live_start and live_end are used by the offset allocator
@@ -408,10 +409,11 @@ struct InterpVar
     unsigned int alive : 1; // Used internally by the var offset allocator
     unsigned int pinned : 1; // Indicates that the var had the 'pinned' modifier in IL
 
-    InterpVar(InterpType interpType, CORINFO_CLASS_HANDLE clsHnd, int size)
+    InterpVar(InterpType interpType, CORINFO_CLASS_HANDLE clsHnd, int size, uint32_t typeTag = 0)
     {
         this->interpType = interpType;
         this->clsHnd = clsHnd;
+        this->typeTag = typeTag;
         this->size = size;
         offset = UNALLOCATED_VAR_OFFSET;
         liveStart = NULL;
@@ -880,6 +882,8 @@ private:
     int32_t m_varsSize = 0;
     int32_t m_varsCapacity = 0;
     int32_t m_numILVars = 0;
+    int32_t m_numILArgs = 0;
+    int32_t m_numILLocals = 0;
     int32_t m_paramArgIndex = -1; // Index of the type parameter argument in the m_pVars array.
     // For each catch or filter clause, we create a variable that holds the exception object.
     // This is the index of the first such variable.
@@ -920,7 +924,7 @@ private:
     int32_t GetInterpTypeStackSize(CORINFO_CLASS_HANDLE clsHnd, InterpType interpType, int32_t *pAlign);
     void    CreateILVars();
 
-    void CreateNextLocalVar(int iArgToSet, CORINFO_CLASS_HANDLE argClass, InterpType interpType, int32_t *pOffset, bool pinned = false);
+    void CreateNextLocalVar(int iArgToSet, CORINFO_CLASS_HANDLE argClass, InterpType interpType, int32_t *pOffset, bool pinned = false, uint32_t typeTag = 0);
 
     // Stack
     StackInfo *m_pStackPointer, *m_pStackBase;

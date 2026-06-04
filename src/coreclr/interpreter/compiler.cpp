@@ -44,6 +44,7 @@ thread_local ICorJitInfo* t_InterpJitInfoTls = nullptr;
 static const char *g_stackTypeString[] = { "I4", "I8", "R4", "R8", "O ", "VT", "MP", "F ", "TP" };
 
 const char* CorInfoHelperToName(CorInfoHelpFunc helper);
+static uint32_t GetElementTypeForInterpType(InterpType interpType);
 
 #if MEASURE_MEM_ALLOC
 #include <minipal/mutex.h>
@@ -1937,6 +1938,12 @@ void InterpCompiler::PrepareInterpMethod()
     // InterpMethod section
     m_methodDataBuilder.AllocateInterpMethod();
 
+    // Local descriptors section
+    if (m_numILLocals > 0)
+    {
+        m_methodDataBuilder.AllocateLocalDescriptors(m_numILLocals);
+    }
+
     // DataItems section
     int numDataItems = m_dataItems.GetSize();
     if (numDataItems > 0)
@@ -1991,12 +1998,14 @@ InterpMethod* InterpCompiler::FinalizeMethodData(void* baseAddressRW, void* base
     uint32_t headerOffset = m_methodDataBuilder.GetSectionOffset(InterpMethodDataSection::Header);
     uint32_t bytecodeOffset = m_methodDataBuilder.GetSectionOffset(InterpMethodDataSection::Bytecode);
     uint32_t interpMethodOffset = m_methodDataBuilder.GetSectionOffset(InterpMethodDataSection::InterpMethod);
+    uint32_t localDescriptorsOffset = m_methodDataBuilder.GetSectionOffset(InterpMethodDataSection::LocalDescriptors);
     uint32_t dataItemsOffset = m_methodDataBuilder.GetSectionOffset(InterpMethodDataSection::DataItems);
     uint32_t asyncSuspendDataOffset = m_methodDataBuilder.GetSectionOffset(InterpMethodDataSection::AsyncSuspendData);
     uint32_t intervalMapsOffset = m_methodDataBuilder.GetSectionOffset(InterpMethodDataSection::IntervalMaps);
 
     const uint32_t bytecodeSectionSize = m_methodDataBuilder.GetSectionSize(InterpMethodDataSection::Bytecode);
     const uint32_t interpMethodSectionSize = m_methodDataBuilder.GetSectionSize(InterpMethodDataSection::InterpMethod);
+    const uint32_t localDescriptorsSectionSize = m_methodDataBuilder.GetSectionSize(InterpMethodDataSection::LocalDescriptors);
     const uint32_t dataItemsSectionSize = m_methodDataBuilder.GetSectionSize(InterpMethodDataSection::DataItems);
     const uint32_t asyncSuspendDataSectionSize = m_methodDataBuilder.GetSectionSize(InterpMethodDataSection::AsyncSuspendData);
     const uint32_t intervalMapsSectionSize = m_methodDataBuilder.GetSectionSize(InterpMethodDataSection::IntervalMaps);
@@ -2023,12 +2032,36 @@ InterpMethod* InterpCompiler::FinalizeMethodData(void* baseAddressRW, void* base
         }
     }
 
+    WalkInterpMethodLocal* pLocalDescriptors = nullptr;
+    if (m_numILLocals > 0)
+    {
+        assert((uint64_t)m_numILLocals * sizeof(WalkInterpMethodLocal) <= localDescriptorsSectionSize);
+        assert(m_numILArgs >= 0);
+        assert(m_numILArgs + m_numILLocals <= m_varsSize);
+        WalkInterpMethodLocal* pLocalDescriptorsRW = (WalkInterpMethodLocal*)(rwBase + localDescriptorsOffset);
+        pLocalDescriptors = (WalkInterpMethodLocal*)(rxBase + localDescriptorsOffset);
+        for (int32_t i = 0; i < m_numILLocals; i++)
+        {
+            const InterpVar& localVar = m_pVars[m_numILArgs + i];
+            assert(localVar.offset >= 0);
+            assert(localVar.size > 0);
+            pLocalDescriptorsRW[i] = {};
+            pLocalDescriptorsRW[i].ILSlot = static_cast<uint32_t>(i);
+            pLocalDescriptorsRW[i].TypeTag = localVar.typeTag != 0
+                ? localVar.typeTag
+                : GetElementTypeForInterpType(localVar.interpType);
+            pLocalDescriptorsRW[i].ByteOffset = static_cast<uint32_t>(localVar.offset);
+            pLocalDescriptorsRW[i].ByteSize = static_cast<uint32_t>(localVar.size);
+            pLocalDescriptorsRW[i].Name = nullptr;
+        }
+    }
+
     // Construct InterpMethod in the final allocation
     InterpMethod* pMethodRW = (InterpMethod*)(rwBase + interpMethodOffset);
     InterpMethod* pMethodRX = (InterpMethod*)(rxBase + interpMethodOffset);
     new (pMethodRW) InterpMethod(m_methodHnd, m_ILLocalsOffset, m_totalVarsStackSize, pDataItems,
-                                  m_initLocals, m_unmanagedCallersOnly, m_publishSecretStubParam,
-                                  m_methodCodeSize);
+                                  m_numILLocals, pLocalDescriptors, m_initLocals, m_unmanagedCallersOnly,
+                                  m_publishSecretStubParam, m_methodCodeSize);
 
     // Copy async suspend data and fix up pointers
     uint32_t currentAsyncOffset = asyncSuspendDataOffset;
@@ -2374,6 +2407,86 @@ static InterpType GetInterpType(CorInfoType corInfoType)
     return InterpTypeVoid;
 }
 
+static uint32_t GetElementTypeForCorInfoType(CorInfoType corInfoType)
+{
+    switch (corInfoType)
+    {
+        case CORINFO_TYPE_VOID:
+            return static_cast<uint32_t>(ELEMENT_TYPE_VOID);
+        case CORINFO_TYPE_BOOL:
+            return static_cast<uint32_t>(ELEMENT_TYPE_BOOLEAN);
+        case CORINFO_TYPE_CHAR:
+            return static_cast<uint32_t>(ELEMENT_TYPE_CHAR);
+        case CORINFO_TYPE_BYTE:
+            return static_cast<uint32_t>(ELEMENT_TYPE_I1);
+        case CORINFO_TYPE_UBYTE:
+            return static_cast<uint32_t>(ELEMENT_TYPE_U1);
+        case CORINFO_TYPE_SHORT:
+            return static_cast<uint32_t>(ELEMENT_TYPE_I2);
+        case CORINFO_TYPE_USHORT:
+            return static_cast<uint32_t>(ELEMENT_TYPE_U2);
+        case CORINFO_TYPE_INT:
+            return static_cast<uint32_t>(ELEMENT_TYPE_I4);
+        case CORINFO_TYPE_UINT:
+            return static_cast<uint32_t>(ELEMENT_TYPE_U4);
+        case CORINFO_TYPE_LONG:
+            return static_cast<uint32_t>(ELEMENT_TYPE_I8);
+        case CORINFO_TYPE_ULONG:
+            return static_cast<uint32_t>(ELEMENT_TYPE_U8);
+        case CORINFO_TYPE_NATIVEINT:
+            return static_cast<uint32_t>(ELEMENT_TYPE_I);
+        case CORINFO_TYPE_NATIVEUINT:
+            return static_cast<uint32_t>(ELEMENT_TYPE_U);
+        case CORINFO_TYPE_FLOAT:
+            return static_cast<uint32_t>(ELEMENT_TYPE_R4);
+        case CORINFO_TYPE_DOUBLE:
+            return static_cast<uint32_t>(ELEMENT_TYPE_R8);
+        case CORINFO_TYPE_PTR:
+            return static_cast<uint32_t>(ELEMENT_TYPE_PTR);
+        case CORINFO_TYPE_BYREF:
+            return static_cast<uint32_t>(ELEMENT_TYPE_BYREF);
+        case CORINFO_TYPE_VALUECLASS:
+            return static_cast<uint32_t>(ELEMENT_TYPE_VALUETYPE);
+        case CORINFO_TYPE_CLASS:
+            return static_cast<uint32_t>(ELEMENT_TYPE_CLASS);
+        default:
+            return static_cast<uint32_t>(ELEMENT_TYPE_END);
+    }
+}
+
+static uint32_t GetElementTypeForInterpType(InterpType interpType)
+{
+    switch (interpType)
+    {
+        case InterpTypeI1:
+            return static_cast<uint32_t>(ELEMENT_TYPE_I1);
+        case InterpTypeU1:
+            return static_cast<uint32_t>(ELEMENT_TYPE_U1);
+        case InterpTypeI2:
+            return static_cast<uint32_t>(ELEMENT_TYPE_I2);
+        case InterpTypeU2:
+            return static_cast<uint32_t>(ELEMENT_TYPE_U2);
+        case InterpTypeI4:
+            return static_cast<uint32_t>(ELEMENT_TYPE_I4);
+        case InterpTypeI8:
+            return static_cast<uint32_t>(ELEMENT_TYPE_I8);
+        case InterpTypeR4:
+            return static_cast<uint32_t>(ELEMENT_TYPE_R4);
+        case InterpTypeR8:
+            return static_cast<uint32_t>(ELEMENT_TYPE_R8);
+        case InterpTypeO:
+            return static_cast<uint32_t>(ELEMENT_TYPE_OBJECT);
+        case InterpTypeVT:
+            return static_cast<uint32_t>(ELEMENT_TYPE_VALUETYPE);
+        case InterpTypeByRef:
+            return static_cast<uint32_t>(ELEMENT_TYPE_BYREF);
+        case InterpTypeVoid:
+            return static_cast<uint32_t>(ELEMENT_TYPE_VOID);
+        default:
+            return static_cast<uint32_t>(ELEMENT_TYPE_END);
+    }
+}
+
 int32_t InterpCompiler::GetInterpTypeStackSize(CORINFO_CLASS_HANDLE clsHnd, InterpType interpType, int32_t *pAlign)
 {
     int32_t size, align;
@@ -2413,6 +2526,8 @@ void InterpCompiler::CreateILVars()
     int numArgs = hasThis + m_methodInfo->args.numArgs;
     int numILLocals = m_methodInfo->locals.numArgs;
     m_numILVars = numArgs + numILLocals;
+    m_numILArgs = numArgs;
+    m_numILLocals = numILLocals;
 
     // add some starting extra space for new vars
     m_varsCapacity = m_numILVars + getEHcount(m_methodInfo) + 64;
@@ -2472,7 +2587,7 @@ void InterpCompiler::CreateILVars()
         CorInfoType argCorType = strip(m_compHnd->getArgType(&m_methodInfo->args, sigArg, &argClass));
         InterpType interpType = GetInterpType(argCorType);
         sigArg = m_compHnd->getArgNext(sigArg);
-        CreateNextLocalVar(i, argClass, interpType, &offset);
+        CreateNextLocalVar(i, argClass, interpType, &offset, false, GetElementTypeForCorInfoType(argCorType));
         INTERP_DUMP("alloc arg var %d var (var %d) to offset %d\n", i, i, m_pVars[i].offset);
     }
     offset = ALIGN_UP_TO(offset, INTERP_STACK_ALIGNMENT);
@@ -2487,7 +2602,7 @@ void InterpCompiler::CreateILVars()
         CorInfoType argCorType = strip(argCorTypeWithFlags);
         bool pinned = (argCorTypeWithFlags & CORINFO_TYPE_MOD_PINNED) == CORINFO_TYPE_MOD_PINNED;
         InterpType interpType = GetInterpType(argCorType);
-        CreateNextLocalVar(index, argClass, interpType, &offset, pinned);
+        CreateNextLocalVar(index, argClass, interpType, &offset, pinned, GetElementTypeForCorInfoType(argCorType));
         INTERP_DUMP("alloc il local var %d var (var %d) to offset %d\n", i, index, m_pVars[index].offset);
         sigArg = m_compHnd->getArgNext(sigArg);
         index++;
@@ -2555,12 +2670,16 @@ void InterpCompiler::CreateILVars()
     m_totalVarsStackSize = offset;
 }
 
-void InterpCompiler::CreateNextLocalVar(int iArgToSet, CORINFO_CLASS_HANDLE argClass, InterpType interpType, int32_t *pOffset, bool pinned)
+void InterpCompiler::CreateNextLocalVar(int iArgToSet, CORINFO_CLASS_HANDLE argClass, InterpType interpType, int32_t *pOffset, bool pinned, uint32_t typeTag)
 {
     int32_t align;
     int32_t size = GetInterpTypeStackSize(argClass, interpType, &align);
+    if (typeTag == 0)
+    {
+        typeTag = GetElementTypeForInterpType(interpType);
+    }
 
-    new (&m_pVars[iArgToSet]) InterpVar(interpType, argClass, size);
+    new (&m_pVars[iArgToSet]) InterpVar(interpType, argClass, size, typeTag);
 
     m_pVars[iArgToSet].global = true;
     m_pVars[iArgToSet].ILGlobal = true;
@@ -4743,8 +4862,9 @@ void InterpCompiler::EmitLoadPointer(intptr_t ptrValue)
     else
     {
         AddIns(INTOP_LDC_I8);
-        m_pLastNewIns->data[0] = (int32_t)(ptrValue & 0xFFFFFFFF);
-        m_pLastNewIns->data[1] = (int32_t)((ptrValue >> 32) & 0xFFFFFFFF);
+        uint64_t unsignedPtrValue = static_cast<uint64_t>(ptrValue);
+        m_pLastNewIns->data[0] = (int32_t)(unsignedPtrValue & 0xFFFFFFFF);
+        m_pLastNewIns->data[1] = (int32_t)((unsignedPtrValue >> 32) & 0xFFFFFFFF);
         PushStackType(StackTypeI8, NULL);
         m_pLastNewIns->SetDVar(m_pStackPointer[-1].var);
     }

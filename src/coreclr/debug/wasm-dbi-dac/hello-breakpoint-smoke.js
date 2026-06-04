@@ -8,9 +8,10 @@ const { performance } = require("perf_hooks");
 const { pathToFileURL } = require("url");
 const { spawnSync } = require("child_process");
 
-const BreakpointMethodName = "BreakHere";
+const BreakpointMethodName = "BreakHereWithLocals";
 const CommandRecordMagic = 0x434d4457;
 const CommandRecordSize = 80;
+const ExpectedLocalTypeTags = [0x08, 0x0a, 0x0d]; // int, long, double
 
 // Must match VersionBlob in dbi_dac_wasm.cpp / smoke-test.js. The host has
 // to acknowledge the protocol once per session before any gated DBI entry
@@ -196,7 +197,7 @@ public static class Program
     public static void Main()
     {
         Console.WriteLine("before");
-        HelloBreakpointTarget.BreakHere();
+        HelloBreakpointTarget.BreakHereWithLocals();
         Console.WriteLine("after");
     }
 }
@@ -205,6 +206,19 @@ public static class HelloBreakpointTarget
 {
     [MethodImpl(MethodImplOptions.NoInlining)]
     public static void BreakHere() => Console.WriteLine("break here");
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static void BreakHereWithLocals()
+    {
+        int localInt = 42;
+        long localLong = localInt + 1L;
+        double localDouble = localLong + 0.5;
+        Consume(localInt, localLong, localDouble);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void Consume(int localInt, long localLong, double localDouble)
+        => Console.WriteLine($"break here {localInt} {localLong} {localDouble}");
 }
 `);
 
@@ -695,7 +709,7 @@ async function main() {
                 const receiveResult = debuggerInstance.module._coreclr_wasm_dbi_dac_receive_runtime_event(debuggerEventAddress, eventBytes.length);
                 debuggerInstance.exports.stackRestore(stack);
 
-                if (event.includes("breakpoint-hit:name=BreakHere")) {
+                if (event.includes(`breakpoint-hit:name=${BreakpointMethodName}`)) {
                     const recordSize = runtimeExports.CoreClrWasmDebugGetLastEventRecordSize();
                     const runtimeStack = runtimeExports.stackSave();
                     const runtimeRecordAddress = runtimeExports.stackAlloc(recordSize);
@@ -884,17 +898,17 @@ async function main() {
 
         if (result.hitCount !== 1 ||
             result.copyResult !== 0 ||
-            !result.event.includes("breakpoint-hit:name=BreakHere") ||
+            !result.event.includes(`breakpoint-hit:name=${BreakpointMethodName}`) ||
             dbiEventDuringCallback.pollResult !== 0 ||
-            !dbiEventDuringCallback.event.includes("breakpoint-hit:name=BreakHere") ||
+            !dbiEventDuringCallback.event.includes(`breakpoint-hit:name=${BreakpointMethodName}`) ||
             dbiEventRecordDuringCallback.pollResult !== 0 ||
             dbiEventRecordDuringCallback.bytesWritten !== 340 ||
             dbiEventRecordDuringCallback.record?.kind !== 1 ||
-            dbiEventRecordDuringCallback.record?.methodName !== "BreakHere" ||
+            dbiEventRecordDuringCallback.record?.methodName !== BreakpointMethodName ||
             dbiEventRecordDuringCallback.record?.message !== result.event ||
             dbiFrameRecordDuringCallback.pollResult !== 0 ||
             dbiFrameRecordDuringCallback.bytesWritten !== 88 ||
-            dbiFrameRecordDuringCallback.record?.methodName !== "BreakHere" ||
+            dbiFrameRecordDuringCallback.record?.methodName !== BreakpointMethodName ||
             dbiFrameRecordDuringCallback.record?.methodToken !== dbiEventRecordDuringCallback.record?.methodToken ||
             dbiFrameRecordDuringCallback.record?.ilOffset !== 0 ||
             dbiFrameRecordDuringCallback.record?.interpreterIP === 0 ||
@@ -905,9 +919,12 @@ async function main() {
             dbiLocalsDuringCallback.record?.magic !== 0x524C4457 ||
             dbiLocalsDuringCallback.record?.version !== 1 ||
             dbiLocalsDuringCallback.record?.methodToken !== dbiEventRecordDuringCallback.record?.methodToken ||
-            dbiLocalsDuringCallback.record?.localCount < 1 ||
-            dbiLocalsDuringCallback.record?.locals[0]?.name !== "local0" ||
-            dbiLocalsDuringCallback.record?.locals[0]?.byteSize <= 0 ||
+            dbiLocalsDuringCallback.record?.localCount !== ExpectedLocalTypeTags.length ||
+            !ExpectedLocalTypeTags.every((typeTag, index) =>
+                dbiLocalsDuringCallback.record?.locals[index]?.ilSlot === index &&
+                dbiLocalsDuringCallback.record?.locals[index]?.typeTag === typeTag &&
+                dbiLocalsDuringCallback.record?.locals[index]?.typeTag !== 0 &&
+                dbiLocalsDuringCallback.record?.locals[index]?.byteSize > 0) ||
             dbiProcessStateDuringCallback.pollResult !== 0 ||
             dbiProcessStateDuringCallback.bytesWritten !== 40 ||
             dbiProcessStateDuringCallback.state?.sessionCreated !== 1 ||
@@ -929,7 +946,7 @@ async function main() {
             sessionDestroyResult !== 0 ||
             !sawBreakpointBeforeContinue ||
             fireEventToPauseCount !== 1 ||
-            !fireEventToPauseLastEvent.includes("breakpoint-hit:name=BreakHere") ||
+            !fireEventToPauseLastEvent.includes(`breakpoint-hit:name=${BreakpointMethodName}`) ||
             ipcEventDuringCallback.readBytes !== 96 ||
             ipcEventDuringCallback.magic !== 0x42435049 ||
             ipcEventDuringCallback.type !== 0x100 ||

@@ -17,6 +17,7 @@ InterpMethodDataBuilder::InterpMethodDataBuilder()
     m_sections[(int)InterpMethodDataSection::Header].alignment = sizeof(void*);
     m_sections[(int)InterpMethodDataSection::Bytecode].alignment = sizeof(int32_t);
     m_sections[(int)InterpMethodDataSection::InterpMethod].alignment = sizeof(void*);
+    m_sections[(int)InterpMethodDataSection::LocalDescriptors].alignment = sizeof(void*);
     m_sections[(int)InterpMethodDataSection::DataItems].alignment = sizeof(void*);
     m_sections[(int)InterpMethodDataSection::AsyncSuspendData].alignment = sizeof(void*);
     m_sections[(int)InterpMethodDataSection::IntervalMaps].alignment = sizeof(uint32_t);
@@ -115,6 +116,11 @@ InterpSectionRef InterpMethodDataBuilder::AllocateInterpMethod()
     return AllocateInSection(InterpMethodDataSection::InterpMethod, sizeof(InterpMethod));
 }
 
+InterpSectionRef InterpMethodDataBuilder::AllocateLocalDescriptors(int32_t count)
+{
+    return AllocateInSection(InterpMethodDataSection::LocalDescriptors, count * sizeof(WalkInterpMethodLocal));
+}
+
 InterpSectionRef InterpMethodDataBuilder::AllocateDataItems(int32_t count)
 {
     return AllocateInSection(InterpMethodDataSection::DataItems, count * sizeof(void*));
@@ -128,4 +134,35 @@ InterpSectionRef InterpMethodDataBuilder::AllocateAsyncSuspendData()
 InterpSectionRef InterpMethodDataBuilder::AllocateIntervalMap(int32_t count)
 {
     return AllocateInSection(InterpMethodDataSection::IntervalMaps, count * sizeof(InterpIntervalMapEntry));
+}
+
+INTERP_API int WalkInterpMethodLocals(const InterpMethod* method, WalkInterpMethodLocal* outBuffer, uint32_t bufferCapacity)
+{
+    if (method == nullptr || !method->CheckIntegrity() || method->numLocals < 0)
+    {
+        return -1;
+    }
+
+    if (bufferCapacity != 0 && outBuffer == nullptr)
+    {
+        return -1;
+    }
+
+    if (method->numLocals != 0 && method->locals == nullptr)
+    {
+        return -1;
+    }
+
+    uint32_t localCount = static_cast<uint32_t>(method->numLocals);
+    if (localCount > bufferCapacity)
+    {
+        localCount = bufferCapacity;
+    }
+
+    for (uint32_t i = 0; i < localCount; i++)
+    {
+        outBuffer[i] = method->locals[i];
+    }
+
+    return static_cast<int>(localCount);
 }
