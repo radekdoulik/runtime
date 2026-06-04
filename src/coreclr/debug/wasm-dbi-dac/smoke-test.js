@@ -6,12 +6,13 @@ const path = require("path");
 const vm = require("vm");
 const { performance } = require("perf_hooks");
 const { pathToFileURL } = require("url");
+const { spawnSync } = require("child_process");
 
 const ExpectedAbiVersion = 1;
 const ExpectedComponentMask = 0xf;
 const ExpectedVersionBlobMagic = 0x42564457;
 const ExpectedVersionBlobSize = 32;
-const ExpectedProtocolBreakingChangeCounter = 10;
+const ExpectedProtocolBreakingChangeCounter = 11;
 const HrIncompatibleProtocol = 0x8013134b | 0;
 const ContractDescriptorMagic = 0x0043414443434e44n;
 const TestDataMagic = 0x43445744;
@@ -36,17 +37,106 @@ function requireFile(filePath, description) {
     }
 }
 
-async function loadRuntime(runtimeJsPath) {
+function buildTypeSystemEnumerationApp(repoRoot) {
+    const testDirectory = path.join(repoRoot, "artifacts", "wasm-dbi-dac-smoke", "type-system-enumeration");
+    const assemblyName = "TypeSystemEnumeration";
+    fs.rmSync(testDirectory, { recursive: true, force: true });
+    fs.mkdirSync(testDirectory, { recursive: true });
+
+    const projectPath = path.join(testDirectory, `${assemblyName}.csproj`);
+    const programPath = path.join(testDirectory, "Program.cs");
+    fs.writeFileSync(projectPath, `<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>${assemblyName}</AssemblyName>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+</Project>
+`);
+
+    fs.writeFileSync(programPath, `// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System;
+using System.Reflection;
+
+namespace TypeSystemEnumerationSmoke;
+
+public static class Program
+{
+    public static void Main()
+    {
+        string[] assemblyNames =
+        [
+            "System.Console",
+            "System.Linq",
+            "System.Text.Json",
+            "System.Text.RegularExpressions",
+            "System.Net.Http",
+            "System.Xml.XDocument",
+            "System.Runtime.Numerics",
+            "System.IO.Compression",
+            "System.Collections.Concurrent",
+            "System.Threading.Channels",
+            "System.Diagnostics.TraceSource",
+            "System.Private.Uri",
+            "System.ComponentModel.Primitives",
+        ];
+
+        foreach (string assemblyName in assemblyNames)
+        {
+            try
+            {
+                Assembly.Load(new AssemblyName(assemblyName));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"load-failed:{assemblyName}:{ex.GetType().Name}");
+            }
+        }
+
+        Console.WriteLine("type-system-enumeration-smoke");
+    }
+}
+`);
+
+    const result = spawnSync(
+        path.join(repoRoot, "dotnet.sh"),
+        ["build", projectPath, "-c", "Debug", "-v:minimal"],
+        { encoding: "utf8" });
+    if (result.status !== 0) {
+        process.stdout.write(result.stdout);
+        process.stderr.write(result.stderr);
+        fail(`failed to build type-system enumeration test app: ${result.status}`);
+    }
+
+    const outputMatch = [...result.stdout.matchAll(/-> (.*\.dll)$/gm)]
+        .map(match => match[1])
+        .find(outputPath => path.basename(outputPath) === `${assemblyName}.dll`);
+    if (outputMatch !== undefined) {
+        return outputMatch;
+    }
+
+    return path.join(testDirectory, "bin/Debug/net11.0", `${assemblyName}.dll`);
+}
+
+async function loadRuntime(runtimeJsPath, runtimeArguments) {
     const runtimeDirectory = path.dirname(runtimeJsPath);
     let source = fs.readFileSync(runtimeJsPath, "utf8");
 
     source = source.replaceAll("import.meta.url", JSON.stringify(pathToFileURL(runtimeJsPath).href));
+    source = source.replaceAll(
+        "dotnetLogger = {};",
+        "dotnetLogger = { debug() {}, info() {}, warn() {}, error() {} };");
     source = source.replace(/if \(_isNode\) \{\s*selfRun\(\);\s*\}\s*$/m, "");
 
     let instance;
     const moduleFactory = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
     const moduleConfig = {
-        noInitialRun: true,
+        noExitRuntime: true,
+        arguments: runtimeArguments,
         locateFile: fileName => path.join(runtimeDirectory, fileName),
         print() {},
         printErr() {},
@@ -194,6 +284,65 @@ function readBreakpointEnumeration(memory, address, capacity, slotSize) {
     };
 }
 
+function readAppDomainEnumeration(memory, address) {
+    const view = new DataView(memory.buffer);
+    const count = view.getUint32(address + 4, true);
+    const entries = [];
+    for (let index = 0; index < count; index++) {
+        const entryAddress = address + 8 + (index * 68);
+        entries.push({
+            id: view.getUint32(entryAddress, true),
+            name: readNullTerminatedAscii(memory, entryAddress + 4, 64)
+        });
+    }
+
+    return {
+        capacity: view.getUint32(address, true),
+        count,
+        entries
+    };
+}
+
+function readAssemblyEnumeration(memory, address) {
+    const view = new DataView(memory.buffer);
+    const count = view.getUint32(address + 4, true);
+    const entries = [];
+    for (let index = 0; index < count; index++) {
+        const entryAddress = address + 8 + (index * 264);
+        entries.push({
+            address: view.getBigUint64(entryAddress, true),
+            name: readNullTerminatedAscii(memory, entryAddress + 8, 128),
+            path: readNullTerminatedAscii(memory, entryAddress + 136, 128)
+        });
+    }
+
+    return {
+        capacity: view.getUint32(address, true),
+        count,
+        entries
+    };
+}
+
+function readModuleEnumeration(memory, address) {
+    const view = new DataView(memory.buffer);
+    const count = view.getUint32(address + 4, true);
+    const entries = [];
+    for (let index = 0; index < count; index++) {
+        const entryAddress = address + 8 + (index * 144);
+        entries.push({
+            address: view.getBigUint64(entryAddress, true),
+            assemblyAddress: view.getBigUint64(entryAddress + 8, true),
+            name: readNullTerminatedAscii(memory, entryAddress + 16, 128)
+        });
+    }
+
+    return {
+        capacity: view.getUint32(address, true),
+        count,
+        entries
+    };
+}
+
 function readPageCacheStats(memory, address) {
     const view = new DataView(memory.buffer, address, 24);
     return {
@@ -207,15 +356,20 @@ function readPageCacheStats(memory, address) {
 
 async function main() {
     const coreclrObjDirectory = resolvePath(process.argv[2] ?? "artifacts/obj/coreclr/browser.wasm.Debug");
+    const repoRoot = path.resolve(__dirname, "../../../..");
     const runtimeJsPath = resolvePath(process.argv[3] ?? path.join(coreclrObjDirectory, "hosts/corerun/corerun.js"));
     const debuggerJsPath = resolvePath(process.argv[4] ?? path.join(coreclrObjDirectory, "debug/wasm-dbi-dac/coreclr-dbi-dac-tests.js"));
+    const sharedFrameworkPath = path.join(repoRoot, "artifacts/bin/testhost/net11.0-browser-Debug-wasm/shared/Microsoft.NETCore.App/11.0.0");
 
     requireFile(runtimeJsPath, "runtime JS wrapper");
     requireFile(`${runtimeJsPath.slice(0, -3)}.wasm`, "runtime WASM module");
     requireFile(debuggerJsPath, "debugger JS wrapper");
     requireFile(`${debuggerJsPath.slice(0, -3)}.wasm`, "debugger WASM module");
+    requireFile(sharedFrameworkPath, "browser-wasm testhost shared framework");
 
-    const runtime = await loadRuntime(runtimeJsPath);
+    const typeSystemAppPath = buildTypeSystemEnumerationApp(repoRoot);
+
+    const runtime = await loadRuntime(runtimeJsPath, ["-c", sharedFrameworkPath, typeSystemAppPath]);
     const runtimeExports = runtime.exports;
 
     if (typeof runtimeExports.memory === "undefined" || typeof runtimeExports.memory.buffer === "undefined") {
@@ -928,6 +1082,169 @@ async function main() {
     const multiBpDisconnectResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_disconnect_runtime() | 0;
     const multiBpSessionDestroyResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_session_destroy() | 0;
     debuggerExports.stackRestore(multiBpEnumerationStack);
+
+    // Type-system enumeration probe: exercise the legacy DAC
+    // IXCLRDataProcess cursor APIs through sidecar exports.
+    const typeSystemAppRunResult = 0;
+    const AppDomainEntrySize = 68;
+    const AssemblyEntrySize = 264;
+    const ModuleEntrySize = 144;
+    const EnumerationHeaderSize = 8;
+    const AppDomainEnumerationCapacity = 16;
+    const AssemblyEnumerationCapacity = 128;
+    const ModuleEnumerationCapacity = 8;
+    const appDomainsEnumerationLength = EnumerationHeaderSize + (AppDomainEnumerationCapacity * AppDomainEntrySize);
+    const assembliesEnumerationLength = EnumerationHeaderSize + (AssemblyEnumerationCapacity * AssemblyEntrySize);
+    const modulesEnumerationLength = EnumerationHeaderSize + (ModuleEnumerationCapacity * ModuleEntrySize);
+    const typeSystemStack = debuggerExports.stackSave();
+    const appDomainsBufferAddress = debuggerExports.stackAlloc(appDomainsEnumerationLength);
+    const assembliesBufferAddress = debuggerExports.stackAlloc(assembliesEnumerationLength);
+    const modulesBufferAddress = debuggerExports.stackAlloc(modulesEnumerationLength);
+    const typeSystemBytesWrittenAddress = debuggerExports.stackAlloc(4);
+    const typeSystemAckResult = debuggerModule._coreclr_wasm_dbi_dac_acknowledge_protocol(
+        ExpectedVersionBlobMagic, ExpectedAbiVersion, ExpectedProtocolBreakingChangeCounter) | 0;
+    const typeSystemSessionCreateResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_session_create() | 0;
+    const typeSystemSessionConnectResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_connect_runtime(1) | 0;
+    const appDomainsResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_enumerate_appdomains(
+        appDomainsBufferAddress,
+        appDomainsEnumerationLength,
+        typeSystemBytesWrittenAddress) | 0;
+    const appDomainsBytesWritten = new DataView(
+        getDebuggerHeap().buffer,
+        typeSystemBytesWrittenAddress,
+        4).getUint32(0, true);
+    const appDomainsEnumeration = readAppDomainEnumeration(getDebuggerHeap(), appDomainsBufferAddress);
+    const defaultAppDomain = appDomainsEnumeration.entries.find(domain => domain.name.includes("Default")) ??
+        appDomainsEnumeration.entries[0];
+    const assemblyEnumerations = [];
+    for (const appDomain of appDomainsEnumeration.entries) {
+        const enumerateAssembliesResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_enumerate_assemblies(
+            appDomain.id,
+            assembliesBufferAddress,
+            assembliesEnumerationLength,
+            typeSystemBytesWrittenAddress) | 0;
+        const enumerateAssembliesBytesWritten = new DataView(
+            getDebuggerHeap().buffer,
+            typeSystemBytesWrittenAddress,
+            4).getUint32(0, true);
+        assemblyEnumerations.push({
+            appDomain,
+            result: enumerateAssembliesResult,
+            bytesWritten: enumerateAssembliesBytesWritten,
+            enumeration: readAssemblyEnumeration(getDebuggerHeap(), assembliesBufferAddress)
+        });
+    }
+    const defaultAssemblyEnumeration = assemblyEnumerations.find(entry => entry.appDomain.id === defaultAppDomain.id)?.enumeration ??
+        { count: 0, entries: [] };
+    const defaultAssemblies = defaultAssemblyEnumeration.entries;
+    const coreLibAssembly = defaultAssemblies.find(assembly =>
+        assembly.name === "System.Private.CoreLib" ||
+        assembly.path.includes("System.Private.CoreLib"));
+    const userAssembly = defaultAssemblies.find(assembly =>
+        coreLibAssembly === undefined || assembly.address !== coreLibAssembly.address);
+    const enumerateCoreLibModulesResult = coreLibAssembly
+        ? debuggerModule._coreclr_wasm_dbi_dac_dbi_enumerate_modules(
+            Number(coreLibAssembly.address & 0xffffffffn),
+            modulesBufferAddress,
+            modulesEnumerationLength,
+            typeSystemBytesWrittenAddress) | 0
+        : -1;
+    const enumerateCoreLibModulesBytesWritten = new DataView(
+        getDebuggerHeap().buffer,
+        typeSystemBytesWrittenAddress,
+        4).getUint32(0, true);
+    const coreLibModulesEnumeration = coreLibAssembly
+        ? readModuleEnumeration(getDebuggerHeap(), modulesBufferAddress)
+        : { capacity: 0, count: 0, entries: [] };
+    const enumerateUserModulesResult = userAssembly
+        ? debuggerModule._coreclr_wasm_dbi_dac_dbi_enumerate_modules(
+            Number(userAssembly.address & 0xffffffffn),
+            modulesBufferAddress,
+            modulesEnumerationLength,
+            typeSystemBytesWrittenAddress) | 0
+        : -1;
+    const enumerateUserModulesBytesWritten = new DataView(
+        getDebuggerHeap().buffer,
+        typeSystemBytesWrittenAddress,
+        4).getUint32(0, true);
+    const userModulesEnumeration = userAssembly
+        ? readModuleEnumeration(getDebuggerHeap(), modulesBufferAddress)
+        : { capacity: 0, count: 0, entries: [] };
+    const typeSystemDisconnectResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_disconnect_runtime() | 0;
+    const typeSystemSessionDestroyResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_session_destroy() | 0;
+    debuggerExports.stackRestore(typeSystemStack);
+    const assemblyEnumerationsAllSucceeded = assemblyEnumerations.every(entry => entry.result === 0);
+    const assemblyNamesAndPathsNonEmpty = defaultAssemblies.every(assembly =>
+        assembly.address !== 0n && assembly.name.length > 0 && assembly.path.length > 0);
+    const coreLibModulesNonEmpty = coreLibModulesEnumeration.entries.every(module =>
+        module.address !== 0n &&
+        module.assemblyAddress === (coreLibAssembly?.address ?? 0n) &&
+        module.name.length > 0);
+    const userModulesNonEmpty = userModulesEnumeration.entries.every(module =>
+        module.address !== 0n &&
+        module.assemblyAddress === (userAssembly?.address ?? 0n) &&
+        module.name.length > 0);
+    const typeSystemEnumeration = {
+        appRunResult: typeSystemAppRunResult,
+        ackResult: typeSystemAckResult,
+        sessionCreateResult: typeSystemSessionCreateResult,
+        sessionConnectResult: typeSystemSessionConnectResult,
+        appDomainsResult,
+        appDomainsBytesWritten,
+        appDomains: appDomainsEnumeration,
+        assemblyEnumerations: assemblyEnumerations.map(entry => ({
+            appDomain: entry.appDomain,
+            result: entry.result,
+            bytesWritten: entry.bytesWritten,
+            capacity: entry.enumeration.capacity,
+            count: entry.enumeration.count,
+            assemblies: entry.enumeration.entries.map(assembly => ({
+                address: `0x${assembly.address.toString(16)}`,
+                name: assembly.name,
+                path: assembly.path
+            }))
+        })),
+        defaultAppDomain,
+        coreLibAssembly: coreLibAssembly ? {
+            address: `0x${coreLibAssembly.address.toString(16)}`,
+            name: coreLibAssembly.name,
+            path: coreLibAssembly.path
+        } : null,
+        userAssembly: userAssembly ? {
+            address: `0x${userAssembly.address.toString(16)}`,
+            name: userAssembly.name,
+            path: userAssembly.path
+        } : null,
+        coreLibModules: {
+            result: enumerateCoreLibModulesResult,
+            bytesWritten: enumerateCoreLibModulesBytesWritten,
+            capacity: coreLibModulesEnumeration.capacity,
+            count: coreLibModulesEnumeration.count,
+            modules: coreLibModulesEnumeration.entries.map(module => ({
+                address: `0x${module.address.toString(16)}`,
+                assemblyAddress: `0x${module.assemblyAddress.toString(16)}`,
+                name: module.name
+            }))
+        },
+        userModules: {
+            result: enumerateUserModulesResult,
+            bytesWritten: enumerateUserModulesBytesWritten,
+            capacity: userModulesEnumeration.capacity,
+            count: userModulesEnumeration.count,
+            modules: userModulesEnumeration.entries.map(module => ({
+                address: `0x${module.address.toString(16)}`,
+                assemblyAddress: `0x${module.assemblyAddress.toString(16)}`,
+                name: module.name
+            }))
+        },
+        assemblyEnumerationsAllSucceeded,
+        assemblyNamesAndPathsNonEmpty,
+        coreLibModulesNonEmpty,
+        userModulesNonEmpty,
+        disconnectResult: typeSystemDisconnectResult,
+        sessionDestroyResult: typeSystemSessionDestroyResult
+    };
+
     // No-such-name clear must succeed and report 0 cleared. We use a
     // distinct name that cannot match any existing slot to avoid wiping
     // an unrelated bp that some future smoke section might have left.
@@ -1189,7 +1506,8 @@ async function main() {
         dacGlobalsProbeResult,
         dacGlobalsAllNonZero,
         dacGlobals,
-        multiBpProbe
+        multiBpProbe,
+        typeSystemEnumeration
     };
 
     console.log(JSON.stringify(result, null, 2));
@@ -1359,6 +1677,31 @@ async function main() {
         !multiBpExpectedNamesCleared ||
         multiBpDisconnectResult !== 0 ||
         multiBpSessionDestroyResult !== 0 ||
+        typeSystemAppRunResult !== 0 ||
+        typeSystemAckResult !== 0 ||
+        typeSystemSessionCreateResult !== 0 ||
+        typeSystemSessionConnectResult !== 0 ||
+        appDomainsResult !== 0 ||
+        appDomainsBytesWritten !== EnumerationHeaderSize + (appDomainsEnumeration.count * AppDomainEntrySize) ||
+        appDomainsEnumeration.capacity !== AppDomainEnumerationCapacity ||
+        appDomainsEnumeration.count < 1 ||
+        defaultAppDomain === undefined ||
+        assemblyEnumerations.length !== appDomainsEnumeration.count ||
+        !assemblyEnumerationsAllSucceeded ||
+        defaultAssemblyEnumeration.count <= 10 ||
+        !assemblyNamesAndPathsNonEmpty ||
+        coreLibAssembly === undefined ||
+        enumerateCoreLibModulesResult !== 0 ||
+        enumerateCoreLibModulesBytesWritten !== EnumerationHeaderSize + (coreLibModulesEnumeration.count * ModuleEntrySize) ||
+        coreLibModulesEnumeration.count < 1 ||
+        !coreLibModulesNonEmpty ||
+        userAssembly === undefined ||
+        enumerateUserModulesResult !== 0 ||
+        enumerateUserModulesBytesWritten !== EnumerationHeaderSize + (userModulesEnumeration.count * ModuleEntrySize) ||
+        userModulesEnumeration.count !== 1 ||
+        !userModulesNonEmpty ||
+        typeSystemDisconnectResult !== 0 ||
+        typeSystemSessionDestroyResult !== 0 ||
         multiBpClearedMissing !== 0 ||
         fillerSendNonZero !== 0 ||
         exhaustionOverflowRc !== -1 ||

@@ -82,7 +82,8 @@ constexpr uint32_t WasmDbiDacVersionBlobMagic = 0x42564457;
 //   8 - repurpose StepIntoRequest.Reserved0 as StepKind (into/over/out).
 //   9 - add dbi_async_break_request facade for CDP Debugger.pause hosts.
 //   10 - add structured module load/unload event drain path.
-constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 10;
+//   11 - add DAC-backed type-system enumeration exports.
+constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 11;
 
 // Sidecar build version - encoded VS_FIXEDFILEINFO-style as two 32-bit
 // words. Reserved for future use; today's PoC sidecar reports 0/0 so
@@ -478,6 +479,50 @@ struct WasmDbiProcessState
     uint32_t ContinueCount;
 };
 
+struct WasmDbiAppDomainEntry
+{
+    uint32_t Id;
+    char Name[64];
+};
+
+struct WasmDbiAppDomainsHeader
+{
+    uint32_t Capacity;
+    uint32_t Count;
+};
+
+struct WasmDbiAssemblyEntry
+{
+    uint64_t Address;
+    char Name[128];
+    char Path[128];
+};
+
+struct WasmDbiAssembliesHeader
+{
+    uint32_t Capacity;
+    uint32_t Count;
+};
+
+struct WasmDbiModuleEntry
+{
+    uint64_t Address;
+    uint64_t AssemblyAddress;
+    char Name[128];
+};
+
+struct WasmDbiModulesHeader
+{
+    uint32_t Capacity;
+    uint32_t Count;
+};
+
+struct WasmDacpGetModuleAddress
+{
+    CLRDATA_ADDRESS ModulePtr;
+};
+
+constexpr uint32_t DacDataModulePrivRequestGetModulePtr = 0xf0000000;
 constexpr uint32_t WasmDebugBreakpointSlotMirrorSize = static_cast<uint32_t>(sizeof(WasmDebugBreakpointSlotMirror));
 constexpr uint32_t WasmDebugBreakpointEnumerationSize =
     WasmDebugBreakpointEnumerationHeaderSize +
@@ -501,6 +546,13 @@ static_assert(sizeof(WasmDbgIpcEventModuleLoad) == 312);
 static_assert(sizeof(WasmDbgIpcEventContinueRequest) == 32);
 static_assert(sizeof(WasmDbgIpcEventStepIntoRequest) == 32);
 static_assert(sizeof(WasmDbiProcessState) == 40);
+static_assert(sizeof(WasmDbiAppDomainEntry) == 68);
+static_assert(sizeof(WasmDbiAppDomainsHeader) == 8);
+static_assert(sizeof(WasmDbiAssemblyEntry) == 264);
+static_assert(sizeof(WasmDbiAssembliesHeader) == 8);
+static_assert(sizeof(WasmDbiModuleEntry) == 144);
+static_assert(sizeof(WasmDbiModulesHeader) == 8);
+static_assert(sizeof(WasmDacpGetModuleAddress) == 8);
 static_assert(sizeof(void*) == sizeof(uint32_t));
 
 // Page cache for ReadTargetMemory results. Most DAC reads are small
@@ -1220,6 +1272,783 @@ int32_t SendRuntimeCommandRecord(const WasmDebugCommandRecord& command)
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&command)),
         sizeof(command));
     return result == Success ? Success : result;
+}
+
+void CopyAsciiString(const char* source, char* destination, uint32_t destinationBytes)
+{
+    if (destinationBytes == 0)
+    {
+        return;
+    }
+
+    uint32_t index = 0;
+    if (source != nullptr)
+    {
+        for (; index + 1 < destinationBytes && source[index] != 0; index++)
+        {
+            destination[index] = source[index];
+        }
+    }
+
+    destination[index] = 0;
+}
+
+void CopyWideStringToAscii(const WCHAR* source, uint32_t sourceChars, char* destination, uint32_t destinationBytes)
+{
+    if (destinationBytes == 0)
+    {
+        return;
+    }
+
+    uint32_t outIndex = 0;
+    if (source != nullptr)
+    {
+        for (uint32_t inIndex = 0;
+             inIndex < sourceChars && source[inIndex] != 0 && outIndex + 1 < destinationBytes;
+             inIndex++)
+        {
+            uint32_t ch = static_cast<uint32_t>(source[inIndex]);
+            destination[outIndex++] = ch <= 0x7f ? static_cast<char>(ch) : '?';
+        }
+    }
+
+    destination[outIndex] = 0;
+}
+
+bool TryComputeEnumerationSize(uint32_t count, uint32_t entrySize, uint32_t* requiredBytes)
+{
+    if (requiredBytes == nullptr || count > (UINT32_MAX - sizeof(WasmDbiAppDomainsHeader)) / entrySize)
+    {
+        return false;
+    }
+
+    *requiredBytes = static_cast<uint32_t>(sizeof(WasmDbiAppDomainsHeader) + (count * entrySize));
+    return true;
+}
+
+uint32_t GetEnumerationCapacity(uint32_t bufferLength, uint32_t entrySize)
+{
+    if (bufferLength < sizeof(WasmDbiAppDomainsHeader))
+    {
+        return 0;
+    }
+
+    return (bufferLength - static_cast<uint32_t>(sizeof(WasmDbiAppDomainsHeader))) / entrySize;
+}
+
+HRESULT CreateClrDataProcess(IXCLRDataProcess** process)
+{
+    if (process == nullptr)
+    {
+        return E_POINTER;
+    }
+
+    *process = nullptr;
+
+    WasmDacDataTarget* dataTarget = new (std::nothrow) WasmDacDataTarget(g_connectedRuntimeBase);
+    if (dataTarget == nullptr)
+    {
+        return E_OUTOFMEMORY;
+    }
+
+    void* dataProcess = nullptr;
+    HRESULT hr = CLRDataCreateInstance(__uuidof(IXCLRDataProcess), dataTarget, &dataProcess);
+    dataTarget->Release();
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    if (dataProcess == nullptr)
+    {
+        return E_FAIL;
+    }
+
+    *process = static_cast<IXCLRDataProcess*>(dataProcess);
+    return S_OK;
+}
+
+HRESULT GetModuleAddress(IXCLRDataModule* module, uint64_t* address)
+{
+    if (module == nullptr || address == nullptr)
+    {
+        return E_POINTER;
+    }
+
+    WasmDacpGetModuleAddress moduleAddress{};
+    HRESULT hr = module->Request(
+        DacDataModulePrivRequestGetModulePtr,
+        0,
+        nullptr,
+        sizeof(moduleAddress),
+        reinterpret_cast<BYTE*>(&moduleAddress));
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    if (moduleAddress.ModulePtr == 0)
+    {
+        return E_FAIL;
+    }
+
+    *address = moduleAddress.ModulePtr;
+    return S_OK;
+}
+
+HRESULT GetAssemblyPrimaryModuleAddress(IXCLRDataAssembly* assembly, uint64_t* address)
+{
+    if (assembly == nullptr || address == nullptr)
+    {
+        return E_POINTER;
+    }
+
+    *address = 0;
+
+    CLRDATA_ENUM handle = 0;
+    HRESULT hr = assembly->StartEnumModules(&handle);
+    if (hr == S_FALSE)
+    {
+        return S_FALSE;
+    }
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    IXCLRDataModule* module = nullptr;
+    hr = assembly->EnumModule(&handle, &module);
+    if (hr == S_OK && module != nullptr)
+    {
+        hr = GetModuleAddress(module, address);
+        module->Release();
+    }
+    else if (hr == S_OK)
+    {
+        hr = E_FAIL;
+    }
+
+    HRESULT endHr = assembly->EndEnumModules(handle);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+    if (FAILED(endHr))
+    {
+        return endHr;
+    }
+
+    return hr == S_FALSE ? S_FALSE : S_OK;
+}
+
+HRESULT CopyAppDomainName(IXCLRDataAppDomain* appDomain, char* destination, uint32_t destinationBytes)
+{
+    WCHAR wideName[64]{};
+    ULONG32 nameLen = 0;
+    HRESULT hr = appDomain->GetName(64, &nameLen, wideName);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    CopyWideStringToAscii(wideName, 64, destination, destinationBytes);
+    return S_OK;
+}
+
+HRESULT CopyAssemblyNameAndPath(IXCLRDataAssembly* assembly, WasmDbiAssemblyEntry* entry)
+{
+    WCHAR wideName[128]{};
+    ULONG32 nameLen = 0;
+    HRESULT hr = assembly->GetName(128, &nameLen, wideName);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    CopyWideStringToAscii(wideName, 128, entry->Name, sizeof(entry->Name));
+
+    WCHAR widePath[512]{};
+    ULONG32 pathLen = 0;
+    hr = assembly->GetFileName(512, &pathLen, widePath);
+    if (SUCCEEDED(hr))
+    {
+        CopyWideStringToAscii(widePath, 512, entry->Path, sizeof(entry->Path));
+    }
+
+    if (entry->Name[0] == 0 && entry->Path[0] != 0)
+    {
+        CopyAsciiString(entry->Path, entry->Name, sizeof(entry->Name));
+    }
+    if (entry->Name[0] == 0)
+    {
+        CopyAsciiString("<unnamed>", entry->Name, sizeof(entry->Name));
+    }
+    if (entry->Path[0] == 0)
+    {
+        CopyAsciiString(entry->Name, entry->Path, sizeof(entry->Path));
+    }
+
+    return S_OK;
+}
+
+HRESULT CopyModuleName(IXCLRDataModule* module, char* destination, uint32_t destinationBytes)
+{
+    WCHAR wideName[128]{};
+    ULONG32 nameLen = 0;
+    HRESULT hr = module->GetName(128, &nameLen, wideName);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    CopyWideStringToAscii(wideName, 128, destination, destinationBytes);
+    if (destination[0] == 0)
+    {
+        CopyAsciiString("<unnamed>", destination, destinationBytes);
+    }
+
+    return S_OK;
+}
+
+HRESULT CountAppDomains(IXCLRDataProcess* process, uint32_t* count)
+{
+    *count = 0;
+
+    CLRDATA_ENUM handle = 0;
+    HRESULT hr = process->StartEnumAppDomains(&handle);
+    if (hr == S_FALSE)
+    {
+        return S_OK;
+    }
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    for (;;)
+    {
+        IXCLRDataAppDomain* appDomain = nullptr;
+        hr = process->EnumAppDomain(&handle, &appDomain);
+        if (hr == S_FALSE)
+        {
+            hr = S_OK;
+            break;
+        }
+        if (FAILED(hr))
+        {
+            break;
+        }
+        if (appDomain == nullptr)
+        {
+            hr = E_FAIL;
+            break;
+        }
+
+        if (*count == UINT32_MAX)
+        {
+            appDomain->Release();
+            hr = E_FAIL;
+            break;
+        }
+
+        (*count)++;
+        appDomain->Release();
+    }
+
+    HRESULT endHr = process->EndEnumAppDomains(handle);
+    return FAILED(hr) ? hr : (FAILED(endHr) ? endHr : S_OK);
+}
+
+HRESULT ValidateAppDomainId(IXCLRDataProcess* process, uint32_t appDomainId)
+{
+    if (appDomainId == 0)
+    {
+        return S_OK;
+    }
+
+    CLRDATA_ENUM handle = 0;
+    HRESULT hr = process->StartEnumAppDomains(&handle);
+    if (hr == S_FALSE)
+    {
+        return E_INVALIDARG;
+    }
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    bool found = false;
+    for (;;)
+    {
+        IXCLRDataAppDomain* appDomain = nullptr;
+        hr = process->EnumAppDomain(&handle, &appDomain);
+        if (hr == S_FALSE)
+        {
+            hr = S_OK;
+            break;
+        }
+        if (FAILED(hr))
+        {
+            break;
+        }
+        if (appDomain == nullptr)
+        {
+            hr = E_FAIL;
+            break;
+        }
+
+        ULONG64 id = 0;
+        HRESULT idHr = appDomain->GetUniqueID(&id);
+        appDomain->Release();
+        if (FAILED(idHr))
+        {
+            hr = idHr;
+            break;
+        }
+        if (id == appDomainId)
+        {
+            found = true;
+            break;
+        }
+    }
+
+    HRESULT endHr = process->EndEnumAppDomains(handle);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+    if (FAILED(endHr))
+    {
+        return endHr;
+    }
+
+    return found ? S_OK : E_INVALIDARG;
+}
+
+HRESULT WriteAppDomainEntries(IXCLRDataProcess* process, WasmDbiAppDomainEntry* entries, uint32_t capacity, uint32_t* count)
+{
+    *count = 0;
+
+    CLRDATA_ENUM handle = 0;
+    HRESULT hr = process->StartEnumAppDomains(&handle);
+    if (hr == S_FALSE)
+    {
+        return S_OK;
+    }
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    for (;;)
+    {
+        IXCLRDataAppDomain* appDomain = nullptr;
+        hr = process->EnumAppDomain(&handle, &appDomain);
+        if (hr == S_FALSE)
+        {
+            hr = S_OK;
+            break;
+        }
+        if (FAILED(hr))
+        {
+            break;
+        }
+        if (appDomain == nullptr)
+        {
+            hr = E_FAIL;
+            break;
+        }
+        if (*count >= capacity)
+        {
+            appDomain->Release();
+            hr = E_FAIL;
+            break;
+        }
+
+        ULONG64 id = 0;
+        hr = appDomain->GetUniqueID(&id);
+        if (SUCCEEDED(hr))
+        {
+            if (id > UINT32_MAX)
+            {
+                hr = E_FAIL;
+            }
+            else
+            {
+                WasmDbiAppDomainEntry& entry = entries[*count];
+                memset(&entry, 0, sizeof(entry));
+                entry.Id = static_cast<uint32_t>(id);
+                hr = CopyAppDomainName(appDomain, entry.Name, sizeof(entry.Name));
+            }
+        }
+
+        appDomain->Release();
+        if (FAILED(hr))
+        {
+            break;
+        }
+
+        (*count)++;
+    }
+
+    HRESULT endHr = process->EndEnumAppDomains(handle);
+    return FAILED(hr) ? hr : (FAILED(endHr) ? endHr : S_OK);
+}
+
+HRESULT CountAssemblies(IXCLRDataProcess* process, uint32_t* count)
+{
+    *count = 0;
+
+    CLRDATA_ENUM handle = 0;
+    HRESULT hr = process->StartEnumAssemblies(&handle);
+    if (hr == S_FALSE)
+    {
+        return S_OK;
+    }
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    for (;;)
+    {
+        IXCLRDataAssembly* assembly = nullptr;
+        hr = process->EnumAssembly(&handle, &assembly);
+        if (hr == S_FALSE)
+        {
+            hr = S_OK;
+            break;
+        }
+        if (FAILED(hr))
+        {
+            break;
+        }
+        if (assembly == nullptr)
+        {
+            hr = E_FAIL;
+            break;
+        }
+
+        uint64_t address = 0;
+        hr = GetAssemblyPrimaryModuleAddress(assembly, &address);
+        assembly->Release();
+        if (FAILED(hr))
+        {
+            break;
+        }
+        if (hr != S_FALSE)
+        {
+            if (*count == UINT32_MAX)
+            {
+                hr = E_FAIL;
+                break;
+            }
+            (*count)++;
+        }
+    }
+
+    HRESULT endHr = process->EndEnumAssemblies(handle);
+    return FAILED(hr) ? hr : (FAILED(endHr) ? endHr : S_OK);
+}
+
+HRESULT WriteAssemblyEntries(IXCLRDataProcess* process, WasmDbiAssemblyEntry* entries, uint32_t capacity, uint32_t* count)
+{
+    *count = 0;
+
+    CLRDATA_ENUM handle = 0;
+    HRESULT hr = process->StartEnumAssemblies(&handle);
+    if (hr == S_FALSE)
+    {
+        return S_OK;
+    }
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    for (;;)
+    {
+        IXCLRDataAssembly* assembly = nullptr;
+        hr = process->EnumAssembly(&handle, &assembly);
+        if (hr == S_FALSE)
+        {
+            hr = S_OK;
+            break;
+        }
+        if (FAILED(hr))
+        {
+            break;
+        }
+        if (assembly == nullptr)
+        {
+            hr = E_FAIL;
+            break;
+        }
+
+        uint64_t address = 0;
+        hr = GetAssemblyPrimaryModuleAddress(assembly, &address);
+        if (SUCCEEDED(hr) && hr != S_FALSE)
+        {
+            if (*count >= capacity)
+            {
+                hr = E_FAIL;
+            }
+            else
+            {
+                WasmDbiAssemblyEntry& entry = entries[*count];
+                memset(&entry, 0, sizeof(entry));
+                entry.Address = address;
+                hr = CopyAssemblyNameAndPath(assembly, &entry);
+                if (SUCCEEDED(hr))
+                {
+                    (*count)++;
+                }
+            }
+        }
+
+        assembly->Release();
+        if (FAILED(hr))
+        {
+            break;
+        }
+    }
+
+    HRESULT endHr = process->EndEnumAssemblies(handle);
+    return FAILED(hr) ? hr : (FAILED(endHr) ? endHr : S_OK);
+}
+
+HRESULT CountModules(IXCLRDataAssembly* assembly, uint32_t* count)
+{
+    *count = 0;
+
+    CLRDATA_ENUM handle = 0;
+    HRESULT hr = assembly->StartEnumModules(&handle);
+    if (hr == S_FALSE)
+    {
+        return S_OK;
+    }
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    for (;;)
+    {
+        IXCLRDataModule* module = nullptr;
+        hr = assembly->EnumModule(&handle, &module);
+        if (hr == S_FALSE)
+        {
+            hr = S_OK;
+            break;
+        }
+        if (FAILED(hr))
+        {
+            break;
+        }
+        if (module == nullptr)
+        {
+            hr = E_FAIL;
+            break;
+        }
+
+        if (*count == UINT32_MAX)
+        {
+            module->Release();
+            hr = E_FAIL;
+            break;
+        }
+
+        (*count)++;
+        module->Release();
+    }
+
+    HRESULT endHr = assembly->EndEnumModules(handle);
+    return FAILED(hr) ? hr : (FAILED(endHr) ? endHr : S_OK);
+}
+
+HRESULT WriteModuleEntries(
+    IXCLRDataAssembly* assembly,
+    uint64_t assemblyAddress,
+    WasmDbiModuleEntry* entries,
+    uint32_t capacity,
+    uint32_t* count)
+{
+    *count = 0;
+
+    CLRDATA_ENUM handle = 0;
+    HRESULT hr = assembly->StartEnumModules(&handle);
+    if (hr == S_FALSE)
+    {
+        return S_OK;
+    }
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    for (;;)
+    {
+        IXCLRDataModule* module = nullptr;
+        hr = assembly->EnumModule(&handle, &module);
+        if (hr == S_FALSE)
+        {
+            hr = S_OK;
+            break;
+        }
+        if (FAILED(hr))
+        {
+            break;
+        }
+        if (module == nullptr)
+        {
+            hr = E_FAIL;
+            break;
+        }
+        if (*count >= capacity)
+        {
+            module->Release();
+            hr = E_FAIL;
+            break;
+        }
+
+        WasmDbiModuleEntry& entry = entries[*count];
+        memset(&entry, 0, sizeof(entry));
+        entry.AssemblyAddress = assemblyAddress;
+        hr = GetModuleAddress(module, &entry.Address);
+        if (SUCCEEDED(hr))
+        {
+            hr = CopyModuleName(module, entry.Name, sizeof(entry.Name));
+        }
+
+        module->Release();
+        if (FAILED(hr))
+        {
+            break;
+        }
+
+        (*count)++;
+    }
+
+    HRESULT endHr = assembly->EndEnumModules(handle);
+    return FAILED(hr) ? hr : (FAILED(endHr) ? endHr : S_OK);
+}
+
+HRESULT CountModulesForAssemblyAddress(IXCLRDataProcess* process, uint64_t assemblyAddress, uint32_t* count, bool* found)
+{
+    *count = 0;
+    *found = false;
+
+    CLRDATA_ENUM handle = 0;
+    HRESULT hr = process->StartEnumAssemblies(&handle);
+    if (hr == S_FALSE)
+    {
+        return S_OK;
+    }
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    for (;;)
+    {
+        IXCLRDataAssembly* assembly = nullptr;
+        hr = process->EnumAssembly(&handle, &assembly);
+        if (hr == S_FALSE)
+        {
+            hr = S_OK;
+            break;
+        }
+        if (FAILED(hr))
+        {
+            break;
+        }
+        if (assembly == nullptr)
+        {
+            hr = E_FAIL;
+            break;
+        }
+
+        uint64_t currentAddress = 0;
+        hr = GetAssemblyPrimaryModuleAddress(assembly, &currentAddress);
+        if (SUCCEEDED(hr) && hr != S_FALSE && currentAddress == assemblyAddress)
+        {
+            *found = true;
+            hr = CountModules(assembly, count);
+            assembly->Release();
+            break;
+        }
+
+        assembly->Release();
+        if (FAILED(hr))
+        {
+            break;
+        }
+    }
+
+    HRESULT endHr = process->EndEnumAssemblies(handle);
+    return FAILED(hr) ? hr : (FAILED(endHr) ? endHr : S_OK);
+}
+
+HRESULT WriteModulesForAssemblyAddress(
+    IXCLRDataProcess* process,
+    uint64_t assemblyAddress,
+    WasmDbiModuleEntry* entries,
+    uint32_t capacity,
+    uint32_t* count,
+    bool* found)
+{
+    *count = 0;
+    *found = false;
+
+    CLRDATA_ENUM handle = 0;
+    HRESULT hr = process->StartEnumAssemblies(&handle);
+    if (hr == S_FALSE)
+    {
+        return S_OK;
+    }
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    for (;;)
+    {
+        IXCLRDataAssembly* assembly = nullptr;
+        hr = process->EnumAssembly(&handle, &assembly);
+        if (hr == S_FALSE)
+        {
+            hr = S_OK;
+            break;
+        }
+        if (FAILED(hr))
+        {
+            break;
+        }
+        if (assembly == nullptr)
+        {
+            hr = E_FAIL;
+            break;
+        }
+
+        uint64_t currentAddress = 0;
+        hr = GetAssemblyPrimaryModuleAddress(assembly, &currentAddress);
+        if (SUCCEEDED(hr) && hr != S_FALSE && currentAddress == assemblyAddress)
+        {
+            *found = true;
+            hr = WriteModuleEntries(assembly, assemblyAddress, entries, capacity, count);
+            assembly->Release();
+            break;
+        }
+
+        assembly->Release();
+        if (FAILED(hr))
+        {
+            break;
+        }
+    }
+
+    HRESULT endHr = process->EndEnumAssemblies(handle);
+    return FAILED(hr) ? hr : (FAILED(endHr) ? endHr : S_OK);
 }
 }
 
@@ -2979,6 +3808,240 @@ int32_t coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints(uint32_t bufferAddress, u
     memcpy(out, header, sizeof(header));
     memcpy(out + sizeof(header), slots, sizeof(slots));
 
+    return S_OK;
+}
+
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_enumerate_appdomains)
+int32_t coreclr_wasm_dbi_dac_dbi_enumerate_appdomains(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
+{
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
+    if (g_cordb == nullptr || !g_connectedToRuntime)
+    {
+        return E_FAIL;
+    }
+
+    if (bytesWrittenAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    InvalidatePageCache();
+
+    IXCLRDataProcess* process = nullptr;
+    HRESULT hr = CreateClrDataProcess(&process);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    uint32_t count = 0;
+    hr = CountAppDomains(process, &count);
+    if (FAILED(hr))
+    {
+        process->Release();
+        return hr;
+    }
+
+    uint32_t required = 0;
+    if (!TryComputeEnumerationSize(count, sizeof(WasmDbiAppDomainEntry), &required))
+    {
+        process->Release();
+        return E_FAIL;
+    }
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &required, sizeof(required));
+
+    if (bufferAddress == 0)
+    {
+        process->Release();
+        return InvalidArgument;
+    }
+
+    if (bufferLength < required)
+    {
+        process->Release();
+        return BufferTooSmall;
+    }
+
+    uint32_t capacity = GetEnumerationCapacity(bufferLength, sizeof(WasmDbiAppDomainEntry));
+    WasmDbiAppDomainsHeader header{ capacity, 0 };
+    WasmDbiAppDomainEntry* entries = reinterpret_cast<WasmDbiAppDomainEntry*>(
+        static_cast<uintptr_t>(bufferAddress + sizeof(header)));
+    hr = WriteAppDomainEntries(process, entries, capacity, &header.Count);
+    process->Release();
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bufferAddress)), &header, sizeof(header));
+    return S_OK;
+}
+
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_enumerate_assemblies)
+int32_t coreclr_wasm_dbi_dac_dbi_enumerate_assemblies(uint32_t appDomainAddress, uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
+{
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
+    if (g_cordb == nullptr || !g_connectedToRuntime)
+    {
+        return E_FAIL;
+    }
+
+    if (bytesWrittenAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    InvalidatePageCache();
+
+    IXCLRDataProcess* process = nullptr;
+    HRESULT hr = CreateClrDataProcess(&process);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    hr = ValidateAppDomainId(process, appDomainAddress);
+    if (FAILED(hr))
+    {
+        process->Release();
+        return hr;
+    }
+
+    uint32_t count = 0;
+    hr = CountAssemblies(process, &count);
+    if (FAILED(hr))
+    {
+        process->Release();
+        return hr;
+    }
+
+    uint32_t required = 0;
+    if (!TryComputeEnumerationSize(count, sizeof(WasmDbiAssemblyEntry), &required))
+    {
+        process->Release();
+        return E_FAIL;
+    }
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &required, sizeof(required));
+
+    if (bufferAddress == 0)
+    {
+        process->Release();
+        return InvalidArgument;
+    }
+
+    if (bufferLength < required)
+    {
+        process->Release();
+        return BufferTooSmall;
+    }
+
+    uint32_t capacity = GetEnumerationCapacity(bufferLength, sizeof(WasmDbiAssemblyEntry));
+    WasmDbiAssembliesHeader header{ capacity, 0 };
+    WasmDbiAssemblyEntry* entries = reinterpret_cast<WasmDbiAssemblyEntry*>(
+        static_cast<uintptr_t>(bufferAddress + sizeof(header)));
+    hr = WriteAssemblyEntries(process, entries, capacity, &header.Count);
+    process->Release();
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bufferAddress)), &header, sizeof(header));
+    return S_OK;
+}
+
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_enumerate_modules)
+int32_t coreclr_wasm_dbi_dac_dbi_enumerate_modules(uint32_t assemblyAddress, uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
+{
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
+    if (g_cordb == nullptr || !g_connectedToRuntime || assemblyAddress == 0)
+    {
+        return E_FAIL;
+    }
+
+    if (bytesWrittenAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    InvalidatePageCache();
+
+    IXCLRDataProcess* process = nullptr;
+    HRESULT hr = CreateClrDataProcess(&process);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    uint32_t count = 0;
+    bool found = false;
+    hr = CountModulesForAssemblyAddress(process, assemblyAddress, &count, &found);
+    if (FAILED(hr))
+    {
+        process->Release();
+        return hr;
+    }
+    if (!found)
+    {
+        process->Release();
+        return E_INVALIDARG;
+    }
+
+    uint32_t required = 0;
+    if (!TryComputeEnumerationSize(count, sizeof(WasmDbiModuleEntry), &required))
+    {
+        process->Release();
+        return E_FAIL;
+    }
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &required, sizeof(required));
+
+    if (bufferAddress == 0)
+    {
+        process->Release();
+        return InvalidArgument;
+    }
+
+    if (bufferLength < required)
+    {
+        process->Release();
+        return BufferTooSmall;
+    }
+
+    uint32_t capacity = GetEnumerationCapacity(bufferLength, sizeof(WasmDbiModuleEntry));
+    WasmDbiModulesHeader header{ capacity, 0 };
+    WasmDbiModuleEntry* entries = reinterpret_cast<WasmDbiModuleEntry*>(
+        static_cast<uintptr_t>(bufferAddress + sizeof(header)));
+    found = false;
+    hr = WriteModulesForAssemblyAddress(process, assemblyAddress, entries, capacity, &header.Count, &found);
+    process->Release();
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+    if (!found)
+    {
+        return E_INVALIDARG;
+    }
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bufferAddress)), &header, sizeof(header));
     return S_OK;
 }
 

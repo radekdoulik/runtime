@@ -221,6 +221,9 @@ acknowledged handshake returns `HrIncompatibleProtocol`.
 | `coreclr_wasm_dbi_dac_dbi_poll_ipc_module_load`     | Drain structured module load/unload event (`WasmDbgIpcEventModuleLoad`, 312 bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints`    | Drain the runtime breakpoint slot table (`8 + 16 * 88` bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_locals`         | Drain the stopped-frame locals record (`16 + 32 * 48` bytes) via DAC `ReadVirtual`. |
+| `coreclr_wasm_dbi_dac_dbi_enumerate_appdomains`     | Enumerate DAC `IXCLRDataProcess` AppDomains (`8 + Count * 68` bytes). |
+| `coreclr_wasm_dbi_dac_dbi_enumerate_assemblies`     | Enumerate DAC assemblies for the selected AppDomain (`8 + Count * 264` bytes). |
+| `coreclr_wasm_dbi_dac_dbi_enumerate_modules`        | Enumerate DAC modules for the selected assembly (`8 + Count * 144` bytes). |
 | `coreclr_wasm_dbi_dac_dbi_poll_event_record`        | Drain queued runtime event record (`WasmDebugEventRecord`, 340 bytes). |
 | `coreclr_wasm_dbi_dac_dbi_poll_frame_record`        | Drain frame record (`WasmDebugFrameRecord`, 88 bytes). |
 | `coreclr_wasm_dbi_dac_dbi_poll_process_state`       | Drain process state snapshot (`WasmDbiProcessState`, 40 bytes). |
@@ -275,6 +278,51 @@ offset  size  field
   56   128    ModuleName   // null-terminated UTF-8, truncated
  184   128    AssemblyPath // null-terminated UTF-8, truncated
 ```
+
+#### Type-system enumeration records (little-endian)
+
+All three exports use the existing legacy DAC `IXCLRDataProcess`
+cursor APIs (`StartEnum*` / `Enum*` / `EndEnum*`). On success,
+`bytesWrittenAddress` receives `8 + Count * sizeof(entry)`. When the
+caller's buffer is too small, the same required size is written and the
+export returns `BufferTooSmall`.
+
+```text
+WasmDbiAppDomainsHeader (8 bytes)
+offset  size  field
+  0      4    Capacity
+  4      4    Count
+
+WasmDbiAppDomainEntry (68 bytes)
+offset  size  field
+  0      4    Id
+  4     64    Name
+
+WasmDbiAssembliesHeader (8 bytes)
+offset  size  field
+  0      4    Capacity
+  4      4    Count
+
+WasmDbiAssemblyEntry (264 bytes)
+offset  size  field
+  0      8    Address       // wasm target handle; primary module address today
+  8    128    Name
+136    128    Path
+
+WasmDbiModulesHeader (8 bytes)
+offset  size  field
+  0      4    Capacity
+  4      4    Count
+
+WasmDbiModuleEntry (144 bytes)
+offset  size  field
+  0      8    Address
+  8      8    AssemblyAddress
+ 16    128    Name
+```
+
+MethodTable enumeration is intentionally deferred: method tables are
+numerous and need a paged cursor rather than a single fixed buffer.
 
 ### Session teardown (product, ungated)
 
