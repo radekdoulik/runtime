@@ -12,7 +12,7 @@ const CommandRecordMagic = 0x434d4457;
 const CommandRecordSize = 80;
 const ExpectedVersionBlobMagic = 0x42564457;
 const ExpectedAbiVersion = 1;
-const ExpectedProtocolBreakingChangeCounter = 12;
+const ExpectedProtocolBreakingChangeCounter = 13;
 const IpcModuleLoadSize = 312;
 const IpcExceptionSize = 144;
 const IpcExceptionMagic = 0x58435049;
@@ -160,6 +160,9 @@ async function loadDebugger(debuggerJsPath, sendToRuntime) {
                     return globalThis.CoreClrWasmDebugSubmitStepIntoRequest(
                         requestBytesAddress >>> 0,
                         requestBytesLength >>> 0);
+                },
+                lookup_source_location() {
+                    return -1;
                 }
             };
 

@@ -84,7 +84,8 @@ constexpr uint32_t WasmDbiDacVersionBlobMagic = 0x42564457;
 //   10 - add structured module load/unload event drain path.
 //   11 - add DAC-backed type-system enumeration exports.
 //   12 - add DAC-backed read-only local-value inspection export.
-constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 12;
+//   13 - add managed-BCL source-location lookup bridge.
+constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 13;
 
 // Sidecar build version - encoded VS_FIXEDFILEINFO-style as two 32-bit
 // words. Reserved for future use; today's PoC sidecar reports 0/0 so
@@ -151,6 +152,7 @@ constexpr uint32_t WasmTargetPointerSize = sizeof(uint32_t);
 constexpr uint32_t InterpMethodContextFrameStackOffset = 2 * WasmTargetPointerSize;
 constexpr uint32_t WasmDbgValueInlineByteCapacity = 64;
 constexpr uint32_t WasmDbgValueFlagReadFailed = 1;
+constexpr uint32_t WasmSourceLocationMaxFileBytes = 4096;
 
 // Validate a wasm32 target read of [address, address + byteCount) and
 // matching debugger-side write at [debuggerAddress, debuggerAddress +
@@ -203,6 +205,16 @@ inline bool IsValidSymbolNameRange(uint32_t symbolNameAddress, uint32_t symbolNa
         return false;
     }
     return true;
+}
+
+inline bool IsValidWasmMemoryRange(uint32_t address, uint32_t byteCount)
+{
+    if (byteCount == 0 || address == 0)
+    {
+        return false;
+    }
+
+    return address <= UINT32_MAX - (byteCount - 1);
 }
 
 struct ContractDescriptorLayout
@@ -1086,6 +1098,15 @@ extern "C" int32_t coreclr_wasm_dbi_dac_submit_continue_request(uint32_t request
 
 extern "C" int32_t coreclr_wasm_dbi_dac_submit_step_into_request(uint32_t requestBytesAddress, uint32_t requestBytesLength)
     __attribute__((import_module("coreclr_dbi_dac"), import_name("submit_step_into_request")));
+
+extern "C" int32_t coreclr_wasm_dbi_dac_lookup_source_location(
+    uint32_t methodToken,
+    uint32_t ilOffset,
+    uint32_t outFileAddress,
+    uint32_t outFileCapacity,
+    uint32_t outLineAddress,
+    uint32_t outColumnAddress)
+    __attribute__((import_module("coreclr_dbi_dac"), import_name("lookup_source_location")));
 
 extern "C" HRESULT CLRDataCreateInstance(REFIID iid, ICLRDataTarget* legacyTarget, void** iface);
 
@@ -4309,6 +4330,49 @@ int32_t coreclr_wasm_dbi_dac_dbi_read_local_value(
 
     memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outBufferAddress)), &record, sizeof(record));
     return S_OK;
+}
+
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_lookup_source_location)
+int32_t coreclr_wasm_dbi_dac_dbi_lookup_source_location(
+    uint32_t methodToken,
+    uint32_t ilOffset,
+    uint32_t outFileAddress,
+    uint32_t outFileCapacity,
+    uint32_t outLineAddress,
+    uint32_t outColumnAddress)
+{
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
+    if (g_cordb == nullptr || !g_connectedToRuntime)
+    {
+        return E_FAIL;
+    }
+
+    if (methodToken == 0 ||
+        outFileCapacity == 0 ||
+        outFileCapacity > WasmSourceLocationMaxFileBytes ||
+        !IsValidWasmMemoryRange(outFileAddress, outFileCapacity) ||
+        !IsValidWasmMemoryRange(outLineAddress, sizeof(uint32_t)) ||
+        !IsValidWasmMemoryRange(outColumnAddress, sizeof(uint32_t)))
+    {
+        return InvalidArgument;
+    }
+
+    *reinterpret_cast<char*>(static_cast<uintptr_t>(outFileAddress)) = '\0';
+    *reinterpret_cast<uint32_t*>(static_cast<uintptr_t>(outLineAddress)) = 0;
+    *reinterpret_cast<uint32_t*>(static_cast<uintptr_t>(outColumnAddress)) = 0;
+
+    return coreclr_wasm_dbi_dac_lookup_source_location(
+        methodToken,
+        ilOffset,
+        outFileAddress,
+        outFileCapacity,
+        outLineAddress,
+        outColumnAddress);
 }
 
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_poll_event_record)

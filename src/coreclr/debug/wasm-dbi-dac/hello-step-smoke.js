@@ -17,7 +17,7 @@ const CommandRecordSize = 80;
 // point will run (CORDBG_E_INCOMPATIBLE_PROTOCOL otherwise).
 const ExpectedVersionBlobMagic = 0x42564457; // 'WDVB' little-endian
 const ExpectedAbiVersion = 1;
-const ExpectedProtocolBreakingChangeCounter = 12;
+const ExpectedProtocolBreakingChangeCounter = 13;
 const IpcModuleLoadSize = 312;
 
 function fail(message) {
@@ -142,6 +142,9 @@ async function loadDebugger(debuggerJsPath, sendToRuntime) {
                     return globalThis.CoreClrWasmDebugSubmitStepIntoRequest(
                         requestBytesAddress >>> 0,
                         requestBytesLength >>> 0);
+                },
+                lookup_source_location() {
+                    return -1;
                 }
             };
 

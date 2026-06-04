@@ -63,6 +63,7 @@ sidecar declares them in `dbi_dac_wasm.cpp` near line 740 with
 | `send_ipc_to_runtime`             | `int32_t (uint32_t messageAddress, uint32_t messageLength)`                          | DBI session/breakpoint flow |
 | `submit_continue_request`         | `int32_t (uint32_t requestBytesAddress, uint32_t requestBytesLength)`                 | Structured DBI continue flow |
 | `submit_step_into_request`        | `int32_t (uint32_t requestBytesAddress, uint32_t requestBytesLength)`                 | Structured DBI step request flow (into/over/out) |
+| `lookup_source_location`          | `int32_t (uint32_t methodToken, uint32_t ilOffset, uint32_t outFileAddress, uint32_t outFileCapacity, uint32_t outLineAddress, uint32_t outColumnAddress)` | Source lookup flow |
 
 ### `read_target_memory(targetAddress, debuggerAddress, byteCount)`
 
@@ -168,6 +169,26 @@ export synchronously.
   step-into behavior.
 - Returns `0` on success, non-zero on validation or transport failure.
 
+### `lookup_source_location(methodToken, ilOffset, outFileAddress, outFileCapacity, outLineAddress, outColumnAddress)`
+
+Resolve the source location for a stopped interpreted method token + IL
+offset. The host forwards to the runtime's
+`CoreClrWasmDebugLookupSourceLocation` export, which delegates Portable PDB
+parsing to a managed BCL consumer. On success, the host writes a
+NUL-terminated UTF-8 path into sidecar memory at `outFileAddress`, writes a
+32-bit line to `outLineAddress`, writes a 32-bit column to
+`outColumnAddress`, and returns `0`.
+
+**Required semantics**:
+
+- `methodToken` is the `mdMethodDef` reported by the current stop event.
+- `outFileCapacity` is in bytes and includes the trailing NUL; the smoke
+  harness uses 256 bytes.
+- The host **must** re-fetch runtime and sidecar memory views before copying
+  data because either memory can grow.
+- Returns `0` on success, non-zero when the runtime lookup fails or the host
+  cannot copy the result.
+
 ## Sidecar exports (sidecar → JS)
 
 Exports group into several families. All are visible in the `tests`
@@ -222,6 +243,7 @@ acknowledged handshake returns `HrIncompatibleProtocol`.
 | `coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints`    | Drain the runtime breakpoint slot table (`8 + 16 * 88` bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_locals`         | Drain the stopped-frame locals record (`16 + 32 * 48` bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_read_local_value`         | Read a stopped-frame local slot (`WasmDbgValueRecord`, 104 bytes) via DAC `ReadVirtual`. |
+| `coreclr_wasm_dbi_dac_dbi_lookup_source_location`   | Resolve source `(file, line, column)` for the stopped method token + IL offset through the managed-BCL host bridge. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_appdomains`     | Enumerate DAC `IXCLRDataProcess` AppDomains (`8 + Count * 68` bytes). |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_assemblies`     | Enumerate DAC assemblies for the selected AppDomain (`8 + Count * 264` bytes). |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_modules`        | Enumerate DAC modules for the selected assembly (`8 + Count * 144` bytes). |
@@ -443,7 +465,7 @@ legacy `ICLRDataTarget` / `ICLRRuntimeLocator` interfaces. Filling out
 A well-behaved host follows this sequence at session start:
 
 1. Instantiate `coreclr-dbi-dac.wasm` (or `-tests.wasm`) and wire all
-   six host imports.
+   seven host imports.
 2. Call `get_abi_version` and `get_component_mask` to detect a
    completely unknown sidecar build before doing anything else.
 3. Call `get_version_blob(out, sizeof(out), &written)` and validate

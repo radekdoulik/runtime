@@ -21,7 +21,7 @@ const IpcStepCompleteType = 0x0104;
 
 const ExpectedVersionBlobMagic = 0x42564457;
 const ExpectedAbiVersion = 1;
-const ExpectedProtocolBreakingChangeCounter = 12;
+const ExpectedProtocolBreakingChangeCounter = 13;
 const IpcModuleLoadSize = 312;
 
 function fail(message) {
@@ -157,6 +157,9 @@ async function loadDebugger(debuggerJsPath, sendToRuntime) {
                         return -1;
                     }
                     return globalThis.CoreClrWasmDebugSubmitStepIntoRequest(requestBytesAddress >>> 0, requestBytesLength >>> 0);
+                },
+                lookup_source_location() {
+                    return -1;
                 }
             };
 

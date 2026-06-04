@@ -41,6 +41,19 @@ function libCoreRunFactory() {
 
             return 0;
         },
+        coreClrDebugLookupSourceLocation: (methodToken, ilOffset, outFileAddress, outFileCapacity, outLineAddress, outColumnAddress) => {
+            if (typeof globalThis.coreClrDebugLookupSourceLocation === "function") {
+                return globalThis.coreClrDebugLookupSourceLocation(
+                    methodToken >>> 0,
+                    ilOffset >>> 0,
+                    outFileAddress >>> 0,
+                    outFileCapacity >>> 0,
+                    outLineAddress >>> 0,
+                    outColumnAddress >>> 0) | 0;
+            }
+
+            return -1;
+        },
         // Phase 6 stop trigger (Mono pattern). The runtime calls this when a
         // managed event (breakpoint / step / exception) needs the IDE to
         // stop. In browser context the `debugger;` statement halts V8 if an

@@ -18,10 +18,11 @@ const ExpectedLocalTypeTags = [0x08, 0x0a, 0x0d]; // int, long, double
 // point will run (CORDBG_E_INCOMPATIBLE_PROTOCOL otherwise).
 const ExpectedVersionBlobMagic = 0x42564457; // 'WDVB' little-endian
 const ExpectedAbiVersion = 1;
-const ExpectedProtocolBreakingChangeCounter = 12;
+const ExpectedProtocolBreakingChangeCounter = 13;
 const IpcModuleLoadSize = 312;
 const ValueRecordSize = 104;
 const ValueRecordFlagReadFailed = 1;
+const SourceLocationFileCapacity = 256;
 
 function fail(message) {
     throw new Error(message);
@@ -39,6 +40,10 @@ function writeBytes(memory, address, bytes) {
 
 function writeUint64(memory, address, value) {
     new DataView(memory.buffer).setBigUint64(address, BigInt(value), true);
+}
+
+function writeUint32(memory, address, value) {
+    new DataView(memory.buffer).setUint32(address, value >>> 0, true);
 }
 
 function readAscii(memory, address, byteCount) {
@@ -145,6 +150,19 @@ async function loadDebugger(debuggerJsPath, sendToRuntime) {
                     return globalThis.CoreClrWasmDebugSubmitStepIntoRequest(
                         requestBytesAddress >>> 0,
                         requestBytesLength >>> 0);
+                },
+                lookup_source_location(methodToken, ilOffset, outFileAddress, outFileCapacity, outLineAddress, outColumnAddress) {
+                    if (typeof globalThis.CoreClrWasmDebugLookupSourceLocation !== "function") {
+                        return -1;
+                    }
+
+                    return globalThis.CoreClrWasmDebugLookupSourceLocation(
+                        methodToken >>> 0,
+                        ilOffset >>> 0,
+                        outFileAddress >>> 0,
+                        outFileCapacity >>> 0,
+                        outLineAddress >>> 0,
+                        outColumnAddress >>> 0);
                 }
             };
 
@@ -181,6 +199,7 @@ function buildHelloWorld(repoRoot) {
     <OutputType>Exe</OutputType>
     <AssemblyName>${assemblyName}</AssemblyName>
     <TargetFramework>net11.0</TargetFramework>
+    <DebugType>portable</DebugType>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
@@ -238,11 +257,174 @@ public static class HelloBreakpointTarget
     const outputMatch = [...result.stdout.matchAll(/-> (.*\.dll)$/gm)]
         .map(match => match[1])
         .find(outputPath => path.basename(outputPath) === `${assemblyName}.dll`);
+    const appPath = outputMatch !== undefined
+        ? outputMatch
+        : path.join(testDirectory, "bin/Debug/net11.0", `${assemblyName}.dll`);
+    const pdbPath = appPath.replace(/\.dll$/i, ".pdb");
+    requireFile(pdbPath, "HelloBreakpoint portable PDB");
+    const pdbSignature = fs.readFileSync(pdbPath).subarray(0, 4).toString("ascii");
+    if (pdbSignature !== "BSJB") {
+        fail(`HelloBreakpoint PDB has unexpected signature: ${pdbSignature}`);
+    }
+
+    return appPath;
+}
+
+function buildPdbLookupHelper(repoRoot) {
+    const helperDirectory = path.join(repoRoot, "artifacts", "wasm-dbi-dac-smoke", "pdb-lookup-helper");
+    const assemblyName = "PdbLookupHelper";
+    fs.rmSync(helperDirectory, { recursive: true, force: true });
+    fs.mkdirSync(helperDirectory, { recursive: true });
+    const projectPath = path.join(helperDirectory, `${assemblyName}.csproj`);
+    const programPath = path.join(helperDirectory, "Program.cs");
+
+    fs.writeFileSync(projectPath, `<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>${assemblyName}</AssemblyName>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+</Project>
+`);
+
+    fs.writeFileSync(programPath, `// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System;
+using System.Globalization;
+using System.IO;
+using System.Reflection.Metadata;
+using System.Reflection.Metadata.Ecma335;
+using System.Reflection.PortableExecutable;
+using System.Text;
+
+static Stream? TryOpenFile(string path)
+{
+    return File.Exists(path) ? File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete) : null;
+}
+
+static MetadataReaderProvider? TryOpenPortablePdb(PEReader peReader, string assemblyPath)
+{
+    if (peReader.TryOpenAssociatedPortablePdb(assemblyPath, TryOpenFile, out MetadataReaderProvider? provider, out string? _))
+    {
+        return provider;
+    }
+
+    foreach (DebugDirectoryEntry entry in peReader.ReadDebugDirectory())
+    {
+        if (entry.Type == DebugDirectoryEntryType.EmbeddedPortablePdb)
+        {
+            return peReader.ReadEmbeddedPortablePdbDebugDirectoryData(entry);
+        }
+    }
+
+    return null;
+}
+
+try
+{
+    if (args.Length != 3)
+    {
+        return 2;
+    }
+
+    string assemblyPath = args[0];
+    int methodToken = unchecked((int)uint.Parse(args[1], CultureInfo.InvariantCulture));
+    int ilOffset = int.Parse(args[2], CultureInfo.InvariantCulture);
+
+    using FileStream peStream = File.Open(assemblyPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+    using PEReader peReader = new PEReader(peStream);
+    using MetadataReaderProvider? provider = TryOpenPortablePdb(peReader, assemblyPath);
+    if (provider is null)
+    {
+        return 3;
+    }
+
+    MetadataReader reader = provider.GetMetadataReader();
+    Handle handle = MetadataTokens.Handle(methodToken);
+    if (handle.IsNil || handle.Kind != HandleKind.MethodDefinition)
+    {
+        return 4;
+    }
+
+    MethodDebugInformation methodInfo = reader.GetMethodDebugInformation(((MethodDefinitionHandle)handle).ToDebugInformationHandle());
+    if (methodInfo.SequencePointsBlob.IsNil)
+    {
+        return 5;
+    }
+
+    SequencePoint? bestPoint = null;
+    foreach (SequencePoint point in methodInfo.GetSequencePoints())
+    {
+        if (point.Offset > ilOffset)
+        {
+            break;
+        }
+
+        if (point.StartLine != SequencePoint.HiddenLine)
+        {
+            bestPoint = point;
+        }
+    }
+
+    if (bestPoint is null)
+    {
+        return 6;
+    }
+
+    string sourceFile = reader.GetString(reader.GetDocument(bestPoint.Value.Document).Name);
+    Console.WriteLine($"{bestPoint.Value.StartLine}\\t{bestPoint.Value.StartColumn}\\t{Convert.ToBase64String(Encoding.UTF8.GetBytes(sourceFile))}");
+    return 0;
+}
+catch (Exception ex)
+{
+    Console.Error.WriteLine(ex);
+    return 7;
+}
+`);
+
+    const result = spawnSync(
+        path.join(repoRoot, "dotnet.sh"),
+        ["build", projectPath, "-c", "Debug", "-v:minimal"],
+        { encoding: "utf8" });
+    if (result.status !== 0) {
+        process.stdout.write(result.stdout);
+        process.stderr.write(result.stderr);
+        fail(`failed to build PDB lookup helper: ${result.status}`);
+    }
+
+    const outputMatch = [...result.stdout.matchAll(/-> (.*\.dll)$/gm)]
+        .map(match => match[1])
+        .find(outputPath => path.basename(outputPath) === `${assemblyName}.dll`);
     if (outputMatch !== undefined) {
         return outputMatch;
     }
 
-    return path.join(testDirectory, "bin/Debug/net11.0", `${assemblyName}.dll`);
+    return path.join(repoRoot, "artifacts", "bin", assemblyName, "Debug", "net11.0", `${assemblyName}.dll`);
+}
+
+function lookupSourceLocation(repoRoot, helperPath, assemblyPath, methodToken, ilOffset) {
+    const result = spawnSync(
+        path.join(repoRoot, "dotnet.sh"),
+        ["exec", helperPath, assemblyPath, String(methodToken >>> 0), String(ilOffset >>> 0)],
+        { encoding: "utf8" });
+    if (result.status !== 0) {
+        return null;
+    }
+
+    const line = result.stdout.trim().split(/\r?\n/).pop();
+    const parts = line?.split("\t") ?? [];
+    if (parts.length !== 3) {
+        return null;
+    }
+
+    return {
+        line: Number(parts[0]),
+        column: Number(parts[1]),
+        file: Buffer.from(parts[2], "base64").toString("utf8")
+    };
 }
 
 async function loadAndRunRuntime(runtimeJsPath, appPath, sharedFrameworkPath, onRuntimeInstantiated) {
@@ -509,6 +691,28 @@ function readDbiLocalValues(debuggerInstance, frameRecord, localsRecord) {
     return localsRecord.locals.map(local => readDbiLocalValue(debuggerInstance, frameRecord.frameAddress, local));
 }
 
+function lookupDbiSourceLocation(debuggerInstance, methodToken, ilOffset) {
+    const stack = debuggerInstance.exports.stackSave();
+    const fileAddress = debuggerInstance.exports.stackAlloc(SourceLocationFileCapacity);
+    const lineAddress = debuggerInstance.exports.stackAlloc(4);
+    const columnAddress = debuggerInstance.exports.stackAlloc(4);
+    debuggerInstance.module.HEAPU8.fill(0, fileAddress, fileAddress + SourceLocationFileCapacity);
+    const lookupResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_lookup_source_location(
+        methodToken >>> 0,
+        ilOffset >>> 0,
+        fileAddress,
+        SourceLocationFileCapacity,
+        lineAddress,
+        columnAddress);
+    const file = lookupResult === 0 ? readNullTerminatedAscii(debuggerInstance.module.HEAPU8, fileAddress, SourceLocationFileCapacity) : "";
+    const view = new DataView(debuggerInstance.module.HEAPU8.buffer);
+    const line = lookupResult === 0 ? view.getUint32(lineAddress, true) : 0;
+    const column = lookupResult === 0 ? view.getUint32(columnAddress, true) : 0;
+    debuggerInstance.exports.stackRestore(stack);
+
+    return { lookupResult, file, line, column };
+}
+
 function pollDbiProcessState(debuggerInstance) {
     const stack = debuggerInstance.exports.stackSave();
     const stateAddress = debuggerInstance.exports.stackAlloc(40);
@@ -571,6 +775,7 @@ async function main() {
     requireFile(sharedFrameworkPath, "browser-wasm testhost shared framework");
 
     const appPath = buildHelloWorld(repoRoot);
+    const sourceLookupHelperPath = buildPdbLookupHelper(repoRoot);
 
     let runtimeExports;
     let debuggerInstance;
@@ -588,6 +793,7 @@ async function main() {
     let dbiFrameRecordDuringCallback = { pollResult: -1, bytesWritten: 0, record: null };
     let dbiLocalsDuringCallback = { pollResult: -1, bytesWritten: 0, record: null };
     let dbiLocalValuesDuringCallback = [];
+    let sourceLocationDuringCallback = { lookupResult: -1, file: "", line: 0, column: 0 };
     let dbiProcessStateDuringCallback = { pollResult: -1, bytesWritten: 0, state: null };
     let testDataDuringCallback = { readResult: -1, testData: null };
     let dbiIpcEventDuringCallback = { pollResult: -1, bytesWritten: 0, payload: null };
@@ -635,6 +841,7 @@ async function main() {
         }
         return new Uint8Array(debuggerInstance.exports.memory.buffer);
     };
+    const sourceLocationCache = new Map();
 
     debuggerInstance = await loadDebugger(debuggerJsPath, (messageAddress, messageLength) => {
         const message = getDebuggerHeap().slice(messageAddress, messageAddress + messageLength);
@@ -744,6 +951,72 @@ async function main() {
                     runtimeExports.stackRestore(savedRuntimeStack);
                 }
             };
+            globalThis.coreClrDebugLookupSourceLocation = (methodToken, ilOffset, outFileAddress, outFileCapacity, outLineAddress, outColumnAddress) => {
+                const runtimeHeap = getRuntimeHeap();
+                if (outFileCapacity === 0 ||
+                    outFileAddress + outFileCapacity > runtimeHeap.length ||
+                    outLineAddress + 4 > runtimeHeap.length ||
+                    outColumnAddress + 4 > runtimeHeap.length) {
+                    return -1;
+                }
+
+                const cacheKey = `${methodToken >>> 0}:${ilOffset >>> 0}`;
+                let location = sourceLocationCache.get(cacheKey);
+                if (location === undefined) {
+                    location = lookupSourceLocation(repoRoot, sourceLookupHelperPath, appPath, methodToken >>> 0, ilOffset >>> 0);
+                    sourceLocationCache.set(cacheKey, location);
+                }
+                if (location === null ||
+                    !Number.isFinite(location.line) ||
+                    !Number.isFinite(location.column) ||
+                    location.line <= 0 ||
+                    location.column < 0) {
+                    return -1;
+                }
+
+                runtimeHeap.fill(0, outFileAddress, outFileAddress + outFileCapacity);
+                const fileBytes = new TextEncoder().encode(location.file);
+                const bytesToCopy = Math.min(fileBytes.length, outFileCapacity - 1);
+                runtimeHeap.set(fileBytes.subarray(0, bytesToCopy), outFileAddress);
+                writeUint32(runtimeHeap, outLineAddress, location.line);
+                writeUint32(runtimeHeap, outColumnAddress, location.column);
+                return 0;
+            };
+            globalThis.CoreClrWasmDebugLookupSourceLocation = (methodToken, ilOffset, outFileAddress, outFileCapacity, outLineAddress, outColumnAddress) => {
+                const debuggerHeap = getDebuggerHeap();
+                if (outFileCapacity === 0 ||
+                    outFileAddress + outFileCapacity > debuggerHeap.length ||
+                    outLineAddress + 4 > debuggerHeap.length ||
+                    outColumnAddress + 4 > debuggerHeap.length ||
+                    typeof runtimeExports.CoreClrWasmDebugLookupSourceLocation !== "function") {
+                    return -1;
+                }
+
+                const savedRuntimeStack = runtimeExports.stackSave();
+                try {
+                    const runtimeFileAddress = runtimeExports.stackAlloc(outFileCapacity);
+                    const runtimeLineAddress = runtimeExports.stackAlloc(4);
+                    const runtimeColumnAddress = runtimeExports.stackAlloc(4);
+                    const result = runtimeExports.CoreClrWasmDebugLookupSourceLocation(
+                        methodToken >>> 0,
+                        ilOffset >>> 0,
+                        runtimeFileAddress,
+                        outFileCapacity,
+                        runtimeLineAddress,
+                        runtimeColumnAddress) | 0;
+                    if (result !== 0) {
+                        return result;
+                    }
+
+                    const runtimeHeap = getRuntimeHeap();
+                    debuggerHeap.set(runtimeHeap.subarray(runtimeFileAddress, runtimeFileAddress + outFileCapacity), outFileAddress);
+                    debuggerHeap.set(runtimeHeap.subarray(runtimeLineAddress, runtimeLineAddress + 4), outLineAddress);
+                    debuggerHeap.set(runtimeHeap.subarray(runtimeColumnAddress, runtimeColumnAddress + 4), outColumnAddress);
+                    return 0;
+                } finally {
+                    runtimeExports.stackRestore(savedRuntimeStack);
+                }
+            };
             globalThis.coreClrDebugFireEventToPause = (eventAddress, eventLength) => {
                 if ((eventLength >>> 0) === IpcModuleLoadSize) {
                     return 0;
@@ -820,6 +1093,10 @@ async function main() {
                         debuggerInstance,
                         dbiFrameRecordDuringCallback.record,
                         dbiLocalsDuringCallback.record);
+                    sourceLocationDuringCallback = lookupDbiSourceLocation(
+                        debuggerInstance,
+                        dbiFrameRecordDuringCallback.record?.methodToken ?? 0,
+                        dbiFrameRecordDuringCallback.record?.ilOffset ?? 0);
                     // Phase 4 slice 2: drain the structured DebuggerIPCEvent
                     // payload directly from the runtime via
                     // CoreClrWasmDebugReadLastIpcEvent. This is the runtime
@@ -930,6 +1207,7 @@ async function main() {
             methodTableAddress: value.record?.methodTableAddress !== undefined ? `0x${value.record.methodTableAddress.toString(16)}` : null,
             inlineBytes: value.record?.inlineBytes.slice(0, Math.min(value.local.byteSize, 16))
         }));
+        result.sourceLocationDuringCallback = sourceLocationDuringCallback;
         result.dbiProcessState = dbiProcessStateDuringCallback;
         result.testDataAtBreakpoint = testDataDuringCallback;
         result.continueDuringCallbackResult = continueDuringCallbackResult;
@@ -1024,6 +1302,10 @@ async function main() {
             !primitiveLocalValuesValid ||
             firstLocalValueI32 !== dbiFrameRecordDuringCallback.record?.firstStackSlotI32 ||
             !referenceLocalValuesValid ||
+            sourceLocationDuringCallback.lookupResult !== 0 ||
+            !(sourceLocationDuringCallback.file.endsWith(".cs") || sourceLocationDuringCallback.file.endsWith(".dll")) ||
+            sourceLocationDuringCallback.line <= 0 ||
+            sourceLocationDuringCallback.column < 0 ||
             dbiProcessStateDuringCallback.pollResult !== 0 ||
             dbiProcessStateDuringCallback.bytesWritten !== 40 ||
             dbiProcessStateDuringCallback.state?.sessionCreated !== 1 ||
@@ -1071,6 +1353,8 @@ async function main() {
         delete globalThis.CoreClrWasmDebugReadTargetMemory;
         delete globalThis.CoreClrWasmDebugSubmitContinueRequest;
         delete globalThis.CoreClrWasmDebugSubmitStepIntoRequest;
+        delete globalThis.CoreClrWasmDebugLookupSourceLocation;
+        delete globalThis.coreClrDebugLookupSourceLocation;
     }
 }
 

@@ -10,7 +10,7 @@ const { spawnSync } = require("child_process");
 
 const ExpectedVersionBlobMagic = 0x42564457;
 const ExpectedAbiVersion = 1;
-const ExpectedProtocolBreakingChangeCounter = 12;
+const ExpectedProtocolBreakingChangeCounter = 13;
 const IpcModuleLoadSize = 312;
 const IpcModuleLoadMagic = 0x4D435049;
 const IpcModuleLoadType = 0x0105;
@@ -137,6 +137,9 @@ async function loadDebugger(debuggerJsPath) {
                     return -1;
                 },
                 submit_step_into_request() {
+                    return -1;
+                },
+                lookup_source_location() {
                     return -1;
                 }
             };

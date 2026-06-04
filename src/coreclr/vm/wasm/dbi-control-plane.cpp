@@ -31,6 +31,13 @@
 #include <string.h>
 
 extern "C" int32_t CoreClrWasmDebugOnBreakpointHit(uint32_t eventAddress, uint32_t eventLength);
+extern "C" int32_t coreClrDebugLookupSourceLocation(
+    uint32_t methodToken,
+    uint32_t ilOffset,
+    uint32_t outFileAddress,
+    uint32_t outFileCapacity,
+    uint32_t outLineAddress,
+    uint32_t outColumnAddress);
 
 // Phase 6 stop-trigger JS import. Mirrors Mono
 // mono_wasm_fire_debugger_agent_message_with_data_to_pause
@@ -641,6 +648,11 @@ void EmitWasmDebugException(MethodDesc* methodDesc, uint32_t ilOffset, const int
     g_wasmDebugLastIpcException.FuncMetadataToken = methodDesc->GetMemberDef();
     g_wasmDebugLastIpcException.ILOffset = ilOffset;
     g_wasmDebugLastIpcException.ExceptionAddress = reinterpret_cast<uintptr_t>(ip);
+
+    g_wasmDebugLastStoppedMethodDesc = methodDesc;
+    g_wasmDebugLastStoppedIP = ip;
+    g_wasmDebugLastStoppedILOffset = ilOffset;
+    g_wasmDebugLastStoppedFrame = nullptr;
 
     if (exceptionObj != NULL)
     {
@@ -1280,6 +1292,42 @@ extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugBreakpoints()
 extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastLocalsRecord()
 {
     return &g_wasmDebugLastLocalsRecord;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugLookupSourceLocation(
+    uint32_t methodToken,
+    uint32_t ilOffset,
+    char* outFile,
+    uint32_t outFileCapacity,
+    uint32_t* outLine,
+    uint32_t* outColumn)
+{
+    if (methodToken == 0 ||
+        outFile == nullptr ||
+        outFileCapacity == 0 ||
+        outLine == nullptr ||
+        outColumn == nullptr)
+    {
+        return -1;
+    }
+
+    outFile[0] = '\0';
+    *outLine = 0;
+    *outColumn = 0;
+
+    MethodDesc* stoppedMethodDesc = g_wasmDebugLastStoppedMethodDesc;
+    if (stoppedMethodDesc == nullptr || stoppedMethodDesc->GetMemberDef() != methodToken)
+    {
+        return -1;
+    }
+
+    return coreClrDebugLookupSourceLocation(
+        methodToken,
+        ilOffset,
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(outFile)),
+        outFileCapacity,
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(outLine)),
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(outColumn)));
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetBreakpointSlotSize()

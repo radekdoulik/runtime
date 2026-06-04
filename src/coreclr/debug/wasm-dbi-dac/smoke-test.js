@@ -12,7 +12,7 @@ const ExpectedAbiVersion = 1;
 const ExpectedComponentMask = 0xf;
 const ExpectedVersionBlobMagic = 0x42564457;
 const ExpectedVersionBlobSize = 32;
-const ExpectedProtocolBreakingChangeCounter = 12;
+const ExpectedProtocolBreakingChangeCounter = 13;
 const HrIncompatibleProtocol = 0x8013134b | 0;
 const ContractDescriptorMagic = 0x0043414443434e44n;
 const TestDataMagic = 0x43445744;
@@ -569,6 +569,7 @@ async function main() {
             runtime.exports.stackRestore(savedRuntimeStack);
         }
     };
+    hostImports.lookup_source_location = () => -1;
 
     const debuggerInstance = await loadDebugger(debuggerJsPath, imports => {
         Object.assign(imports.env, hostImports);
