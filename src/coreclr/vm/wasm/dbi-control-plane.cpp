@@ -275,6 +275,7 @@ static_assert(sizeof(WasmDebugEventRecord) == 340);
 static_assert(sizeof(WasmDebugFrameRecord) == 88);
 static_assert(sizeof(WasmDebugLocalRecord) == 48);
 static_assert(sizeof(WasmDebugLocalsRecord) == 16 + 32 * 48);
+static_assert(offsetof(InterpMethodContextFrame, pStack) == 2 * sizeof(void*));
 static_assert(sizeof(WasmDbgIpcEventBreakpointRuntime) == 96,
               "WasmDbgIpcEventBreakpointRuntime must mirror the sidecar's WasmDbgIpcEventBreakpoint byte-for-byte");
 static_assert(sizeof(WasmDbgIpcEventException) == 144,

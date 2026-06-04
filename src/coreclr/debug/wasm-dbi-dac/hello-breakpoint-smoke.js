@@ -18,8 +18,10 @@ const ExpectedLocalTypeTags = [0x08, 0x0a, 0x0d]; // int, long, double
 // point will run (CORDBG_E_INCOMPATIBLE_PROTOCOL otherwise).
 const ExpectedVersionBlobMagic = 0x42564457; // 'WDVB' little-endian
 const ExpectedAbiVersion = 1;
-const ExpectedProtocolBreakingChangeCounter = 11;
+const ExpectedProtocolBreakingChangeCounter = 12;
 const IpcModuleLoadSize = 312;
+const ValueRecordSize = 104;
+const ValueRecordFlagReadFailed = 1;
 
 function fail(message) {
     throw new Error(message);
@@ -463,6 +465,50 @@ function pollDbiLocals(debuggerInstance) {
     return { pollResult, bytesWritten, record };
 }
 
+function readValueRecord(memory, address) {
+    const view = new DataView(memory.buffer, address, ValueRecordSize);
+    return {
+        typeTag: view.getUint32(0, true),
+        byteSize: view.getUint32(4, true),
+        isRef: view.getUint32(8, true),
+        flags: view.getUint32(12, true),
+        objectAddress: view.getBigUint64(16, true),
+        methodTableAddress: view.getBigUint64(24, true),
+        inlineBytes: Array.from(memory.subarray(address + 32, address + 96)),
+        reserved: view.getBigUint64(96, true)
+    };
+}
+
+function readInt32LittleEndian(bytes) {
+    return bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24);
+}
+
+function readDbiLocalValue(debuggerInstance, frameAddress, local) {
+    const stack = debuggerInstance.exports.stackSave();
+    const recordAddress = debuggerInstance.exports.stackAlloc(ValueRecordSize);
+    // Emscripten legalizes the C uint64_t frameAddress into low/high i32 JS args.
+    const readResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_read_local_value(
+        frameAddress >>> 0,
+        0,
+        local.byteOffset,
+        local.byteSize,
+        local.typeTag,
+        recordAddress,
+        ValueRecordSize);
+    const record = readResult === 0 ? readValueRecord(debuggerInstance.module.HEAPU8, recordAddress) : null;
+    debuggerInstance.exports.stackRestore(stack);
+
+    return { readResult, local, record };
+}
+
+function readDbiLocalValues(debuggerInstance, frameRecord, localsRecord) {
+    if (frameRecord === null || localsRecord === null) {
+        return [];
+    }
+
+    return localsRecord.locals.map(local => readDbiLocalValue(debuggerInstance, frameRecord.frameAddress, local));
+}
+
 function pollDbiProcessState(debuggerInstance) {
     const stack = debuggerInstance.exports.stackSave();
     const stateAddress = debuggerInstance.exports.stackAlloc(40);
@@ -541,6 +587,7 @@ async function main() {
     let dbiEventRecordDuringCallback = { pollResult: -1, bytesWritten: 0, record: null };
     let dbiFrameRecordDuringCallback = { pollResult: -1, bytesWritten: 0, record: null };
     let dbiLocalsDuringCallback = { pollResult: -1, bytesWritten: 0, record: null };
+    let dbiLocalValuesDuringCallback = [];
     let dbiProcessStateDuringCallback = { pollResult: -1, bytesWritten: 0, state: null };
     let testDataDuringCallback = { readResult: -1, testData: null };
     let dbiIpcEventDuringCallback = { pollResult: -1, bytesWritten: 0, payload: null };
@@ -769,6 +816,10 @@ async function main() {
                     // sidecar reads it.
                     dbiIpcEventDuringCallback = pollDbiIpcEvent(debuggerInstance);
                     dbiLocalsDuringCallback = pollDbiLocals(debuggerInstance);
+                    dbiLocalValuesDuringCallback = readDbiLocalValues(
+                        debuggerInstance,
+                        dbiFrameRecordDuringCallback.record,
+                        dbiLocalsDuringCallback.record);
                     // Phase 4 slice 2: drain the structured DebuggerIPCEvent
                     // payload directly from the runtime via
                     // CoreClrWasmDebugReadLastIpcEvent. This is the runtime
@@ -868,6 +919,17 @@ async function main() {
         result.dbiEventRecord = dbiEventRecordDuringCallback;
         result.dbiFrameRecord = dbiFrameRecordDuringCallback;
         result.dbiLocalsDuringCallback = dbiLocalsDuringCallback;
+        result.dbiLocalValuesDuringCallback = dbiLocalValuesDuringCallback.map(value => ({
+            readResult: value.readResult,
+            ilSlot: value.local.ilSlot,
+            typeTag: value.record?.typeTag,
+            byteSize: value.record?.byteSize,
+            isRef: value.record?.isRef,
+            flags: value.record?.flags,
+            objectAddress: value.record?.objectAddress !== undefined ? `0x${value.record.objectAddress.toString(16)}` : null,
+            methodTableAddress: value.record?.methodTableAddress !== undefined ? `0x${value.record.methodTableAddress.toString(16)}` : null,
+            inlineBytes: value.record?.inlineBytes.slice(0, Math.min(value.local.byteSize, 16))
+        }));
         result.dbiProcessState = dbiProcessStateDuringCallback;
         result.testDataAtBreakpoint = testDataDuringCallback;
         result.continueDuringCallbackResult = continueDuringCallbackResult;
@@ -902,6 +964,32 @@ async function main() {
             : dbiIpcEventDuringCallback;
         console.log(JSON.stringify(result, null, 2));
 
+        const successfulLocalValueCount = dbiLocalValuesDuringCallback
+            .filter(value => value.readResult === 0 && value.record !== null && (value.record.flags & ValueRecordFlagReadFailed) === 0)
+            .length;
+        const primitiveLocalValuesValid = ExpectedLocalTypeTags.every((typeTag, index) => {
+            const value = dbiLocalValuesDuringCallback[index];
+            const local = dbiLocalsDuringCallback.record?.locals[index];
+            return value?.readResult === 0 &&
+                value.record?.typeTag === typeTag &&
+                value.record?.byteSize === local?.byteSize &&
+                value.record?.isRef === 0 &&
+                (value.record?.flags & ValueRecordFlagReadFailed) === 0 &&
+                value.record?.inlineBytes.length === 64 &&
+                Math.min(local?.byteSize ?? 0, 64) > 0;
+        });
+        const firstLocalRecord = dbiLocalValuesDuringCallback[0]?.record;
+        const firstLocalValueI32 = firstLocalRecord !== undefined && firstLocalRecord !== null
+            ? readInt32LittleEndian(firstLocalRecord.inlineBytes)
+            : 0;
+        // BreakHereWithLocals stops at method entry and currently exposes
+        // only primitive IL locals (int, long, double), so there are no
+        // initialized reference locals whose object/MethodTable addresses
+        // can be asserted in this smoke.
+        const referenceLocalValuesValid = dbiLocalValuesDuringCallback
+            .filter(value => value.record?.isRef === 1)
+            .every(value => value.record.objectAddress !== 0n && value.record.methodTableAddress !== 0n);
+
         if (result.hitCount !== 1 ||
             result.copyResult !== 0 ||
             !result.event.includes(`breakpoint-hit:name=${BreakpointMethodName}`) ||
@@ -931,6 +1019,11 @@ async function main() {
                 dbiLocalsDuringCallback.record?.locals[index]?.typeTag === typeTag &&
                 dbiLocalsDuringCallback.record?.locals[index]?.typeTag !== 0 &&
                 dbiLocalsDuringCallback.record?.locals[index]?.byteSize > 0) ||
+            dbiLocalValuesDuringCallback.length !== ExpectedLocalTypeTags.length ||
+            successfulLocalValueCount === 0 ||
+            !primitiveLocalValuesValid ||
+            firstLocalValueI32 !== dbiFrameRecordDuringCallback.record?.firstStackSlotI32 ||
+            !referenceLocalValuesValid ||
             dbiProcessStateDuringCallback.pollResult !== 0 ||
             dbiProcessStateDuringCallback.bytesWritten !== 40 ||
             dbiProcessStateDuringCallback.state?.sessionCreated !== 1 ||

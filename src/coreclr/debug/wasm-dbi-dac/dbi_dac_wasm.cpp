@@ -83,7 +83,8 @@ constexpr uint32_t WasmDbiDacVersionBlobMagic = 0x42564457;
 //   9 - add dbi_async_break_request facade for CDP Debugger.pause hosts.
 //   10 - add structured module load/unload event drain path.
 //   11 - add DAC-backed type-system enumeration exports.
-constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 11;
+//   12 - add DAC-backed read-only local-value inspection export.
+constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 12;
 
 // Sidecar build version - encoded VS_FIXEDFILEINFO-style as two 32-bit
 // words. Reserved for future use; today's PoC sidecar reports 0/0 so
@@ -145,6 +146,11 @@ constexpr uint32_t MaxReadVirtualBytes = 256u * 1024u * 1024u;
 // for "symbol resolution". Also defends against unbounded strlen()
 // scans on non-NUL-terminated input by anchoring strnlen at this limit.
 constexpr uint32_t MaxSymbolNameBytes = 256;
+constexpr uint32_t WasmTargetPointerSize = sizeof(uint32_t);
+// InterpMethodContextFrame begins with pParent, startIp, then pStack.
+constexpr uint32_t InterpMethodContextFrameStackOffset = 2 * WasmTargetPointerSize;
+constexpr uint32_t WasmDbgValueInlineByteCapacity = 64;
+constexpr uint32_t WasmDbgValueFlagReadFailed = 1;
 
 // Validate a wasm32 target read of [address, address + byteCount) and
 // matching debugger-side write at [debuggerAddress, debuggerAddress +
@@ -311,6 +317,18 @@ struct WasmDebugLocalsRecord
     uint32_t MethodToken;
     uint32_t LocalCount;
     WasmDebugLocalRecord Locals[WasmDebugMaxLocalsPerFrame];
+};
+
+struct WasmDbgValueRecord
+{
+    uint32_t TypeTag;
+    uint32_t ByteSize;
+    uint32_t IsRef;
+    uint32_t Flags;
+    uint64_t ObjectAddress;
+    uint64_t MethodTableAddress;
+    uint8_t InlineBytes[WasmDbgValueInlineByteCapacity];
+    uint64_t Reserved;
 };
 
 // Phase 4 first slice: a simplified wire-format mirror of
@@ -539,6 +557,7 @@ static_assert(sizeof(WasmDebugEventRecord) == 340);
 static_assert(sizeof(WasmDebugFrameRecord) == 88);
 static_assert(sizeof(WasmDebugLocalRecord) == 48);
 static_assert(sizeof(WasmDebugLocalsRecord) == 16 + 32 * 48);
+static_assert(sizeof(WasmDbgValueRecord) == 104);
 static_assert(sizeof(WasmDbgIpcEventBreakpoint) == 96);
 static_assert(sizeof(WasmDbgIpcEventException) == 144);
 static_assert(sizeof(WasmDbgIpcEventStepComplete) == 96);
@@ -1251,6 +1270,42 @@ int32_t ReadRuntimeContractDescriptor(
     }
 
     return Success;
+}
+
+bool IsPointerLikeElementType(uint32_t typeTag)
+{
+    switch (typeTag)
+    {
+        case ELEMENT_TYPE_PTR:
+        case ELEMENT_TYPE_BYREF:
+        case ELEMENT_TYPE_CLASS:
+        case ELEMENT_TYPE_VAR:
+        case ELEMENT_TYPE_ARRAY:
+        case ELEMENT_TYPE_GENERICINST:
+        case ELEMENT_TYPE_FNPTR:
+        case ELEMENT_TYPE_OBJECT:
+        case ELEMENT_TYPE_SZARRAY:
+        case ELEMENT_TYPE_MVAR:
+        case ELEMENT_TYPE_STRING:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool IsObjectReferenceElementType(uint32_t typeTag)
+{
+    switch (typeTag)
+    {
+        case ELEMENT_TYPE_CLASS:
+        case ELEMENT_TYPE_ARRAY:
+        case ELEMENT_TYPE_OBJECT:
+        case ELEMENT_TYPE_SZARRAY:
+        case ELEMENT_TYPE_STRING:
+            return true;
+        default:
+            return false;
+    }
 }
 
 int32_t SendRuntimeCommand(const char* command, uint32_t commandLength)
@@ -4119,6 +4174,140 @@ int32_t coreclr_wasm_dbi_dac_dbi_enumerate_locals(uint32_t bufferAddress, uint32
     }
 
     memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bufferAddress)), &payload, sizeof(payload));
+    return S_OK;
+}
+
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_read_local_value)
+int32_t coreclr_wasm_dbi_dac_dbi_read_local_value(
+    uint64_t frameAddress,
+    uint32_t byteOffset,
+    uint32_t byteSize,
+    uint32_t typeTag,
+    uint32_t outBufferAddress,
+    uint32_t outBufferLength)
+{
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
+    if (g_cordb == nullptr || !g_connectedToRuntime)
+    {
+        return E_FAIL;
+    }
+
+    if (outBufferAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    if (outBufferLength < sizeof(WasmDbgValueRecord))
+    {
+        return BufferTooSmall;
+    }
+
+    WasmDbgValueRecord record{};
+    record.TypeTag = typeTag;
+    record.ByteSize = byteSize;
+
+    bool readFailed =
+        frameAddress > UINT32_MAX ||
+        InterpMethodContextFrameStackOffset > (UINT32_MAX - static_cast<uint32_t>(frameAddress));
+
+    // Interpreter frame slots are mutable runtime memory. Force every value
+    // read through the host instead of reusing a pre-stop stack-page snapshot.
+    InvalidatePageCache();
+
+    WasmDacDataTarget dataTarget(g_connectedRuntimeBase);
+    uint32_t stackAddress = 0;
+    if (!readFailed)
+    {
+        ULONG32 bytesRead = 0;
+        HRESULT hr = dataTarget.ReadVirtual(
+            frameAddress + InterpMethodContextFrameStackOffset,
+            reinterpret_cast<BYTE*>(&stackAddress),
+            sizeof(stackAddress),
+            &bytesRead);
+        if (FAILED(hr) || bytesRead != sizeof(stackAddress) || stackAddress == 0)
+        {
+            readFailed = true;
+        }
+        else if (byteOffset > (UINT32_MAX - stackAddress))
+        {
+            readFailed = true;
+        }
+    }
+
+    uint64_t slotAddress = readFailed ? 0 : static_cast<uint64_t>(stackAddress) + byteOffset;
+    if (!readFailed && IsPointerLikeElementType(typeTag))
+    {
+        record.IsRef = 1;
+        if (byteSize < WasmTargetPointerSize)
+        {
+            readFailed = true;
+        }
+        else
+        {
+            uint32_t objectAddress = 0;
+            ULONG32 bytesRead = 0;
+            HRESULT hr = dataTarget.ReadVirtual(
+                slotAddress,
+                reinterpret_cast<BYTE*>(&objectAddress),
+                sizeof(objectAddress),
+                &bytesRead);
+            if (FAILED(hr) || bytesRead != sizeof(objectAddress))
+            {
+                readFailed = true;
+            }
+            else
+            {
+                record.ObjectAddress = objectAddress;
+                if (objectAddress != 0 && IsObjectReferenceElementType(typeTag))
+                {
+                    uint32_t methodTableAddress = 0;
+                    bytesRead = 0;
+                    hr = dataTarget.ReadVirtual(
+                        objectAddress,
+                        reinterpret_cast<BYTE*>(&methodTableAddress),
+                        sizeof(methodTableAddress),
+                        &bytesRead);
+                    if (FAILED(hr) || bytesRead != sizeof(methodTableAddress))
+                    {
+                        readFailed = true;
+                    }
+                    else
+                    {
+                        record.MethodTableAddress = methodTableAddress;
+                    }
+                }
+            }
+        }
+    }
+    else if (!readFailed)
+    {
+        uint32_t bytesToRead = byteSize < WasmDbgValueInlineByteCapacity ? byteSize : WasmDbgValueInlineByteCapacity;
+        if (bytesToRead != 0)
+        {
+            ULONG32 bytesRead = 0;
+            HRESULT hr = dataTarget.ReadVirtual(
+                slotAddress,
+                reinterpret_cast<BYTE*>(record.InlineBytes),
+                bytesToRead,
+                &bytesRead);
+            if (FAILED(hr) || bytesRead != bytesToRead)
+            {
+                readFailed = true;
+            }
+        }
+    }
+
+    if (readFailed)
+    {
+        record.Flags |= WasmDbgValueFlagReadFailed;
+    }
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outBufferAddress)), &record, sizeof(record));
     return S_OK;
 }
 

@@ -23,7 +23,7 @@ const CommandRecordSize = 80;
 // point will run (CORDBG_E_INCOMPATIBLE_PROTOCOL otherwise).
 const ExpectedVersionBlobMagic = 0x42564457; // 'WDVB' little-endian
 const ExpectedAbiVersion = 1;
-const ExpectedProtocolBreakingChangeCounter = 11;
+const ExpectedProtocolBreakingChangeCounter = 12;
 const IpcModuleLoadSize = 312;
 
 function fail(message) {

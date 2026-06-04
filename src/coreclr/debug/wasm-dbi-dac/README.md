@@ -221,6 +221,7 @@ acknowledged handshake returns `HrIncompatibleProtocol`.
 | `coreclr_wasm_dbi_dac_dbi_poll_ipc_module_load`     | Drain structured module load/unload event (`WasmDbgIpcEventModuleLoad`, 312 bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints`    | Drain the runtime breakpoint slot table (`8 + 16 * 88` bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_locals`         | Drain the stopped-frame locals record (`16 + 32 * 48` bytes) via DAC `ReadVirtual`. |
+| `coreclr_wasm_dbi_dac_dbi_read_local_value`         | Read a stopped-frame local slot (`WasmDbgValueRecord`, 104 bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_appdomains`     | Enumerate DAC `IXCLRDataProcess` AppDomains (`8 + Count * 68` bytes). |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_assemblies`     | Enumerate DAC assemblies for the selected AppDomain (`8 + Count * 264` bytes). |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_modules`        | Enumerate DAC modules for the selected assembly (`8 + Count * 144` bytes). |
@@ -323,6 +324,30 @@ offset  size  field
 
 MethodTable enumeration is intentionally deferred: method tables are
 numerous and need a paged cursor rather than a single fixed buffer.
+
+#### `WasmDbgValueRecord` (104 bytes, little-endian)
+
+`coreclr_wasm_dbi_dac_dbi_read_local_value(frameAddress, byteOffset,
+byteSize, typeTag, outBufferAddress, outBufferLength)` reads the
+`InterpMethodContextFrame::pStack` pointer from `frameAddress`, then
+reads the slot at `pStack + byteOffset` and writes this fixed record to
+the sidecar buffer. Pointer-like element types read the 32-bit wasm
+pointer from the frame slot. Object-reference element types also read the
+object's first word as the MethodTable address when the object pointer is
+non-null; non-object pointer-like element types leave MethodTableAddress
+zero. Inline values copy up to 64 bytes from the frame slot.
+
+```text
+offset  size  field
+   0      4   TypeTag             // CorElementType
+   4      4   ByteSize            // source slot size in the frame
+   8      4   IsRef               // 1 when the frame slot holds a pointer
+  12      4   Flags               // bit 0 = read failed
+  16      8   ObjectAddress       // zero-extended wasm32 object pointer
+  24      8   MethodTableAddress  // zero-extended wasm32 MethodTable pointer
+  32     64   InlineBytes         // inline frame bytes when IsRef == 0
+  96      8   Reserved            // zero today
+```
 
 ### Session teardown (product, ungated)
 
