@@ -1383,6 +1383,16 @@ extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastLocalsRecord()
     return &g_wasmDebugLastLocalsRecord;
 }
 
+// Exposed so an IDE-side DBI can write the async-break flag directly into
+// runtime memory while the runtime is V8-paused via CDP Debugger.pause —
+// the runtime wasm thread is frozen at that point so its own
+// CoreClrWasmDebugSetAsyncBreakInProgress export cannot be called, but JS
+// can still write to the runtime's WebAssembly.Memory ArrayBuffer.
+extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugAsyncBreakInProgressAddress()
+{
+    return &g_wasmDebugAsyncBreakInProgress;
+}
+
 extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugLookupSourceLocation(
     uint32_t methodToken,
     uint32_t ilOffset,

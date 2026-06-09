@@ -1,12 +1,31 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+// hello-async-break (browser) — passive runtime host.
+//
+// This file is a thin wrapper around the runtime + sidecar wasm. It does
+// NOT initiate the async-break itself. The whole point of this smoke is
+// to demonstrate the real IDE-driven flow:
+//
+//   ICorDebug (IDE) ──→ mscordbi/DAC (sidecar) ──CDP─→ browser
+//
+// In the browser harness:
+//   * Playwright's CDP session plays the IDE/DBI role.
+//   * The page loads the runtime + sidecar, starts a managed busy loop,
+//     and exposes a few `globalThis.__dbi_*` helpers so the DBI side
+//     can drive everything via `Runtime.evaluate`.
+//   * The DBI orchestrates: CDP `Debugger.pause` → set the runtime's
+//     async-break flag via direct memory write → CDP `Debugger.resume`
+//     → wait for the runtime's libCorerun.js `debugger;` halt at the
+//     next IL sequence point → poll the structured event + locals via
+//     the sidecar DAC → render the panel → hold 5 s → CDP
+//     `Debugger.resume` → loop completes.
+
 import {
     IpcAsyncBreakMagic,
     IpcAsyncBreakSize,
     IpcAsyncBreakType,
     acknowledgeProtocol,
-    assert,
     loadRuntime,
     loadSidecar,
     pollDbiIpcAsyncBreakComplete,
@@ -15,19 +34,8 @@ import {
     writeUint64
 } from './host.mjs';
 
-const AsyncBreakRequestDelayMs = 800;
-const AsyncBreakTimeoutMs = 30000;
-const CompletionTimeoutMs = 120000;
 const ExpectedKeepAliveIterations = 120;
-
-async function fetchJson(url) {
-    const response = await fetch(url);
-    if (!response.ok) {
-        throw new Error(`failed to fetch ${url}: ${response.status} ${response.statusText}`);
-    }
-
-    return response.json();
-}
+const CompletionTimeoutMs = 120000;
 
 function setStatus(text) {
     const status = document.getElementById('status');
@@ -43,26 +51,9 @@ function setTickCount(progress) {
     }
 }
 
-function setAsyncBreakInfo(tick, payload) {
-    const target = document.getElementById('async-break-info');
-    if (target === null) {
-        return;
-    }
-    if (payload === null) {
-        target.textContent = `paused at tick ${tick}; payload not yet drained`;
-        return;
-    }
-    target.innerHTML = `<strong>cooperative break captured at tick ${tick}:</strong> ` +
-        `token=0x${payload.asyncBreakToken.toString(16)}, ` +
-        `method=0x${payload.funcMetadataToken.toString(16)}, ` +
-        `ilOffset=${payload.ilOffset}, ` +
-        `interpreterIP=0x${payload.interpreterIP.toString(16)}`;
-}
-
 function describeTypeTag(typeTag) {
     // CorElementType subset relevant to the interpreter locals we exercise here.
-    // See src/coreclr/inc/corhdr.h: ELEMENT_TYPE_*. Keep the table conservative;
-    // any tag we don't know lands in "raw" which is fine for an inspection demo.
+    // See src/coreclr/inc/corhdr.h: ELEMENT_TYPE_*.
     switch (typeTag) {
         case 0x01: return 'void';
         case 0x02: return 'bool';
@@ -88,31 +79,6 @@ function describeTypeTag(typeTag) {
     }
 }
 
-function setSimulatedPausePanel(tick, payload, locals) {
-    const target = document.getElementById('simulated-pause');
-    if (target === null) {
-        return;
-    }
-    const localRows = locals !== null && locals.localCount > 0
-        ? locals.locals
-            .map(l => `  [${l.ilSlot.toString().padStart(2, ' ')}] ${l.name || '(anon)'} : ${describeTypeTag(l.typeTag)}` +
-                ` @stack+${l.byteOffset} size=${l.byteSize}`)
-            .join('\n')
-        : '  (no locals reported)';
-    target.innerHTML =
-        `<strong style="color: #b0530e;">⏸ Simulating IDE debug pause</strong> ` +
-        `<span style="color: #5c6473;">(runtime frozen by V8 via debugger; — resume issued by CDP after 5s)</span>` +
-        `\n\nasync-break payload @ tick ${tick}:` +
-        `\n  asyncBreakToken    = 0x${payload.asyncBreakToken.toString(16)}` +
-        `\n  funcMetadataToken  = 0x${payload.funcMetadataToken.toString(16)}` +
-        `\n  ilOffset           = ${payload.ilOffset}` +
-        `\n  interpreterIP      = 0x${payload.interpreterIP.toString(16)}` +
-        `\n\nlocals schema read from the runtime via DAC enumerate_locals` +
-        ` (method token 0x${(locals?.methodToken ?? 0).toString(16)}, count ${locals?.localCount ?? 0}):` +
-        `\n${localRows}`;
-    target.style.display = 'block';
-}
-
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -126,27 +92,19 @@ function withTimeout(promise, description, timeoutMs) {
     ]);
 }
 
-function toDisplayResult(result) {
-    return JSON.parse(JSON.stringify(result, (_, value) => typeof value === 'bigint' ? `0x${value.toString(16)}` : value));
-}
+async function fetchJson(url) {
+    const response = await fetch(url);
+    if (!response.ok) {
+        throw new Error(`failed to fetch ${url}: ${response.status} ${response.statusText}`);
+    }
 
-function readHex(memory, address, byteCount) {
-    return Array.from(memory.subarray(address, address + byteCount), value => value.toString(16).padStart(2, '0')).join('');
-}
-
-function isMethodDefToken(token) {
-    return ((token >>> 24) === 0x06) && (token & 0x00ffffff) !== 0;
-}
-
-function sendContinue(sidecar, token) {
-    return sidecar.module._coreclr_wasm_dbi_dac_dbi_send_ipc_continue_request(
-        Number(token & 0xffffffffn),
-        Number(token >> 32n)) | 0;
+    return response.json();
 }
 
 export async function runSmoke() {
     globalThis.__smokeProgress = 0;
     globalThis.__smokeResult = undefined;
+    globalThis.__dbiReady = false;
     setTickCount(0);
     setStatus('loading runtime');
 
@@ -155,47 +113,25 @@ export async function runSmoke() {
     let sessionCreated = false;
     let connected = false;
     let debuggerConnected = false;
-    let asyncBreakTimer = 0;
-    let asyncBreakRequestResult = undefined;
-    let asyncBreakRequestTickCount = -1;
-    let asyncBreakRequestElapsedMs = 0;
+    let asyncBreakFlagAddress = 0;
+    let fireEventToPauseCount = 0;
+    let asyncBreakFireEventToPauseCount = 0;
     let begin = false;
     let end = false;
     let final = false;
     let finalSink = 0;
     let tickCount = 0;
     let lastTick = -1;
-    let tickCountAtAsyncBreak = -1;
     let keepAliveMethodToken = 0;
     let keepAliveMoveNextToken = 0;
     let keepAliveMoveNextILBytes = 0;
-    let fireEventToPauseCount = 0;
-    let asyncBreakFireEventToPauseCount = 0;
-    let continueDuringCallbackResult = -1;
-    let asyncBreakEvent = { pollResult: -1, bytesWritten: 0, payload: null };
-    let localsAtAsyncBreak = { pollResult: -1, bytesWritten: 0, record: null };
-    let fireEventToPauseLastEvent = { address: 0, length: 0, headerHex: '' };
     const startedAt = performance.now();
     let completedAt = 0;
     let resolveComplete;
-    const completed = new Promise(resolve => {
-        resolveComplete = resolve;
-    });
-    let resolveAsyncBreakEvent;
-    let rejectAsyncBreakEvent;
-    const asyncBreakEventPromise = new Promise((resolve, reject) => {
-        resolveAsyncBreakEvent = resolve;
-        rejectAsyncBreakEvent = reject;
-    });
+    const completed = new Promise(resolve => { resolveComplete = resolve; });
 
-    const getRuntimeHeap = () => {
-        assert(runtimeExports?.memory, 'getRuntimeHeap called before runtimeExports.memory was bound');
-        return new Uint8Array(runtimeExports.memory.buffer);
-    };
-    const getDebuggerHeap = () => {
-        assert(sidecar?.exports?.memory, 'getDebuggerHeap called before sidecar memory was bound');
-        return new Uint8Array(sidecar.exports.memory.buffer);
-    };
+    const getRuntimeHeap = () => new Uint8Array(runtimeExports.memory.buffer);
+    const getDebuggerHeap = () => new Uint8Array(sidecar.exports.memory.buffer);
 
     function markComplete() {
         if (!final) {
@@ -218,28 +154,15 @@ export async function runSmoke() {
             return;
         }
 
-        const moveNextILBytesMatch = /^keepalive-movenext-il-bytes ([0-9]+)$/.exec(text);
-        if (moveNextILBytesMatch !== null) {
-            keepAliveMoveNextILBytes = Number.parseInt(moveNextILBytesMatch[1], 10) >>> 0;
+        const moveNextBytesMatch = /^keepalive-movenext-il-bytes (\d+)$/.exec(text);
+        if (moveNextBytesMatch !== null) {
+            keepAliveMoveNextILBytes = Number.parseInt(moveNextBytesMatch[1], 10);
             return;
         }
 
         if (text === 'keepalive-begin') {
             begin = true;
-            setStatus('running busy loop');
-            // Schedule the async-break request NOW that the loop has
-            // actually started. Scheduling it earlier (during onInstance)
-            // doesn't work: the wasm runtime's startup blocks the JS
-            // event loop for ~1.5-2s, so a setTimeout queued before
-            // loadRuntime fires only AFTER the loop has already begun
-            // — and the very first sequence point thereafter triggers
-            // the break at tick 0/1, not mid-loop. Anchoring the delay
-            // to keepalive-begin ensures we break around tick (delay /
-            // 10ms-per-tick) ≈ tick 60, which is mid-loop for the
-            // 120-iteration managed program.
-            if (asyncBreakTimer === 0) {
-                asyncBreakTimer = setTimeout(requestAsyncBreak, AsyncBreakRequestDelayMs);
-            }
+            setStatus('running busy loop — DBI may async-break at any time');
             return;
         }
 
@@ -267,27 +190,17 @@ export async function runSmoke() {
         }
     }
 
-    function requestAsyncBreak() {
-        asyncBreakRequestTickCount = tickCount;
-        asyncBreakRequestElapsedMs = Math.round(performance.now() - startedAt);
-        setStatus('requesting cooperative async-break');
-        asyncBreakRequestResult = sidecar.module._coreclr_wasm_dbi_dac_dbi_async_break_request() | 0;
-        if (asyncBreakRequestResult !== 0) {
-            rejectAsyncBreakEvent(new Error(`async-break request facade failed: ${asyncBreakRequestResult}`));
-        }
-    }
-
     try {
         const manifest = await fetchJson('/hello-async-break/manifest.json');
         sidecar = await loadSidecar(manifest.sidecarJsUrl);
 
+        // Standard DAC JS imports — runtime memory access for the sidecar.
         globalThis.CoreClrWasmDebugReadTargetMemory = (targetAddress, debuggerAddress, byteCount) => {
             const runtimeHeap = getRuntimeHeap();
             const debuggerHeap = getDebuggerHeap();
             if (targetAddress + byteCount > runtimeHeap.length || debuggerAddress + byteCount > debuggerHeap.length) {
                 return -1;
             }
-
             debuggerHeap.set(runtimeHeap.subarray(targetAddress, targetAddress + byteCount), debuggerAddress);
             return 0;
         };
@@ -314,7 +227,6 @@ export async function runSmoke() {
             if (symbolAddress === 0 || addressOutAddress + 8 > debuggerHeap.length) {
                 return -1;
             }
-
             writeUint64(debuggerHeap, addressOutAddress, symbolAddress);
             return 0;
         };
@@ -323,112 +235,44 @@ export async function runSmoke() {
             if (addressOutAddress + 8 > debuggerHeap.length) {
                 return -1;
             }
-
             writeUint64(debuggerHeap, addressOutAddress, 1);
             return 0;
         };
         globalThis.CoreClrWasmDebugSendIpcToRuntime = () => -1;
-        globalThis.CoreClrWasmDebugSubmitContinueRequest = (requestBytesAddress, requestBytesLength) => {
-            const debuggerHeap = getDebuggerHeap();
-            if (requestBytesAddress + requestBytesLength > debuggerHeap.length ||
-                typeof runtimeExports.CoreClrWasmDebugSubmitContinueRequest !== 'function') {
-                return -1;
-            }
-
-            const requestBytes = debuggerHeap.slice(requestBytesAddress, requestBytesAddress + requestBytesLength);
-            const savedRuntimeStack = runtimeExports.stackSave();
-            try {
-                const runtimeRequestAddress = runtimeExports.stackAlloc(requestBytesLength);
-                getRuntimeHeap().set(requestBytes, runtimeRequestAddress);
-                return runtimeExports.CoreClrWasmDebugSubmitContinueRequest(runtimeRequestAddress, requestBytesLength) | 0;
-            } finally {
-                runtimeExports.stackRestore(savedRuntimeStack);
-            }
-        };
-        globalThis.CoreClrWasmDebugSubmitAsyncBreakRequest = () => {
-            if (typeof runtimeExports?.CoreClrWasmDebugSetAsyncBreakInProgress !== 'function') {
-                return -1;
-            }
-
-            runtimeExports.CoreClrWasmDebugSetAsyncBreakInProgress(1);
-            return 0;
-        };
+        globalThis.CoreClrWasmDebugSubmitContinueRequest = () => -1;
+        // The PAGE does NOT request async-breaks itself. The DBI side (CDP)
+        // initiates the request by writing the flag directly into runtime
+        // memory while the runtime is V8-paused. This import is wired only
+        // so that the sidecar's facade reports a clean "not supported"
+        // rather than crashing if anyone calls it.
+        globalThis.CoreClrWasmDebugSubmitAsyncBreakRequest = () => -1;
         globalThis.CoreClrWasmDebugSubmitStepIntoRequest = () => -1;
         globalThis.CoreClrWasmDebugLookupSourceLocation = () => -1;
         globalThis.coreClrDebugLookupSourceLocation = () => -1;
+
+        // Minimal Mono-pattern stop trigger. We do almost nothing here —
+        // the heavy lifting (drain event, read locals, render DOM) is
+        // done by the DBI side AFTER the libCorerun.js wrapper's
+        // `debugger;` halts V8 at the cooperative break point.
+        //
+        // The only thing this handler does is TAG the upcoming pause so
+        // the DBI's CDP filter can distinguish the async-break stop
+        // from incidental libCorerun pauses (module load events fire
+        // through the same wrapper).
         globalThis.coreClrDebugFireEventToPause = (eventAddress, eventLength) => {
             fireEventToPauseCount++;
-            const address = eventAddress >>> 0;
             const length = eventLength >>> 0;
-            fireEventToPauseLastEvent = {
-                address,
-                length,
-                headerHex: readHex(getRuntimeHeap(), address, Math.min(length, 16))
-            };
             if (length !== IpcAsyncBreakSize) {
-                // Not an async-break event (module load, breakpoint, etc.).
-                // Tell the CDP-side spec to auto-resume the upcoming V8
-                // pause emitted by the libCorerun.js wrapper.
                 globalThis.__lastFiredEventKind = 'non-async-break';
                 return 0;
             }
-
             asyncBreakFireEventToPauseCount++;
-            tickCountAtAsyncBreak = tickCount;
-            setStatus(`cooperative break at tick ${tickCount} — reading runtime state via DAC`);
-            asyncBreakEvent = pollDbiIpcAsyncBreakComplete(sidecar);
-            setAsyncBreakInfo(tickCount, asyncBreakEvent.payload);
-            // Read the current frame's IL locals schema via the DAC.
-            // The runtime populated g_wasmDebugLastLocalsRecord during
-            // EmitWasmDebugAsyncBreak, so this round-trip exercises the
-            // same inspection surface a real IDE would use to populate
-            // its "Locals" pane while halted.
-            try {
-                localsAtAsyncBreak = pollDbiLocals(sidecar);
-            } catch (e) {
-                localsAtAsyncBreak = { pollResult: -1, bytesWritten: 0, record: null, error: String(e) };
-            }
-            setSimulatedPausePanel(tickCount, asyncBreakEvent.payload, localsAtAsyncBreak.record);
-            // Real cooperative async-break demo: yield to the IDE here.
-            //
-            // The cooperative path's contract is "halt the runtime at the
-            // next clean IL sequence point and hand control to the IDE
-            // until it explicitly resumes". Single-threaded wasm cannot
-            // spin-wait while staying responsive — but it can use V8's
-            // own debugger to halt: the libCorerun.js wrapper that V8
-            // calls on our behalf executes a `debugger;` statement
-            // IMMEDIATELY AFTER this user handler returns. With a CDP
-            // client attached (Chrome DevTools open, or a Playwright
-            // test that called `Debugger.enable`), V8 emits
-            // `Debugger.paused` at that statement and freezes the wasm
-            // caller until the client issues `Debugger.resume`. With no
-            // CDP client attached, `debugger;` is a no-op and the
-            // wrapper returns immediately (the loop appears to run
-            // uninterrupted).
-            //
-            // This is exactly the demo: the IDE async-breaks the
-            // runtime via CDP at a clean IL boundary; the cooperative
-            // event tells the IDE WHERE the break landed; the DAC
-            // surfaces the locals schema (and method/IL/IP) the IDE
-            // would render in its Locals/Stack pane; the IDE controls
-            // when to resume.
-            //
-            // We deliberately do NOT add another `debugger;` here —
-            // doing so would create a second pause point that the CDP
-            // client would have to dance around. The libCorerun
-            // wrapper's `debugger;` is the single source of truth.
-            setStatus(`paused at tick ${tickCount} — awaiting IDE resume (CDP)`);
-            console.log(`[smoke] cooperative break at tick ${tickCount}; ` +
-                `read ${localsAtAsyncBreak.record?.localCount ?? 0} locals via DAC; ` +
-                `handler returning — libCorerun debugger; will freeze V8 next`);
-            // Tag the upcoming V8 pause as the cooperative async-break so
-            // the CDP spec can distinguish it from incidental pauses
-            // (module load, etc.) and only apply the 5-second hold here.
             globalThis.__lastFiredEventKind = 'async-break';
-            if (asyncBreakEvent.payload !== null) {
-                continueDuringCallbackResult = sendContinue(sidecar, asyncBreakEvent.payload.asyncBreakToken);
-            }
-            resolveAsyncBreakEvent(asyncBreakEvent);
+            // tickCount here is the value the page-side line scanner has
+            // seen so far; we expose it so the DBI can correlate the
+            // break point with the loop position. NOT used by the page
+            // for any orchestration.
+            globalThis.__tickCountAtAsyncBreak = tickCount;
             return 0;
         };
 
@@ -447,35 +291,105 @@ export async function runSmoke() {
             onPrintErr: text => console.warn(`[runtime] ${text}`),
             onInstance(instance) {
                 runtimeExports = instance.exports;
-                assert(runtimeExports.memory?.buffer, "runtime export 'memory' is missing or does not expose a buffer");
-                assert(typeof runtimeExports.CoreClrWasmDebugSetDebuggerConnected === 'function', 'runtime export CoreClrWasmDebugSetDebuggerConnected is missing');
-                assert(typeof runtimeExports.CoreClrWasmDebugIsDebuggerConnected === 'function', 'runtime export CoreClrWasmDebugIsDebuggerConnected is missing');
-                assert(typeof runtimeExports.CoreClrWasmDebugSetAsyncBreakInProgress === 'function', 'runtime export CoreClrWasmDebugSetAsyncBreakInProgress is missing');
-                assert(typeof runtimeExports.CoreClrWasmDebugIsAsyncBreakInProgress === 'function', 'runtime export CoreClrWasmDebugIsAsyncBreakInProgress is missing');
                 acknowledgeProtocol(sidecar);
                 const sessionCreateResult = sidecar.module._coreclr_wasm_dbi_dac_dbi_session_create();
-                assert(sessionCreateResult === 0, `failed to create DBI session: ${sessionCreateResult}`);
+                if (sessionCreateResult !== 0) {
+                    throw new Error(`failed to create DBI session: ${sessionCreateResult}`);
+                }
                 sessionCreated = true;
                 const connectResult = sidecar.module._coreclr_wasm_dbi_dac_dbi_connect_runtime(1);
-                assert(connectResult === 0, `failed to connect DBI session to runtime: ${connectResult}`);
+                if (connectResult !== 0) {
+                    throw new Error(`failed to connect DBI session: ${connectResult}`);
+                }
                 connected = true;
-                const previousConnected = runtimeExports.CoreClrWasmDebugSetDebuggerConnected(1) | 0;
-                assert(previousConnected === 0, `expected CoreClrWasmDebugSetDebuggerConnected to return 0, got ${previousConnected}`);
-                assert(runtimeExports.CoreClrWasmDebugIsDebuggerConnected() === 1, 'debugger connected flag was not set');
+                runtimeExports.CoreClrWasmDebugSetDebuggerConnected(1);
                 debuggerConnected = true;
-                // NOTE: the async-break timer is now scheduled when the
-                // 'keepalive-begin' line is observed (see recordRuntimeLine
-                // above), not here, because wasm init blocks JS for ~1.5-2s
-                // and a setTimeout queued here would fire effectively
-                // immediately after the loop begins (tick 0/1 instead of
-                // mid-loop).
+                // Cache the runtime address of g_wasmDebugAsyncBreakInProgress.
+                // The DBI side will write this byte directly into runtime
+                // memory while V8 holds the runtime thread paused via CDP
+                // Debugger.pause — at that moment the runtime cannot run
+                // its own CoreClrWasmDebugSetAsyncBreakInProgress setter,
+                // so direct memory write is the only viable path.
+                asyncBreakFlagAddress = runtimeExports.Getg_wasmDebugAsyncBreakInProgressAddress() >>> 0;
+                if (asyncBreakFlagAddress === 0) {
+                    throw new Error('Getg_wasmDebugAsyncBreakInProgressAddress returned 0');
+                }
+                // Publish the small surface the DBI side calls via CDP
+                // Runtime.evaluate. Each helper is plain JS so it can run
+                // either while wasm is running OR while wasm is paused —
+                // none of these call back into runtime wasm functions.
+                globalThis.__dbi = {
+                    getState() {
+                        return {
+                            asyncBreakFlagAddress,
+                            asyncBreakFlagValue: getRuntimeHeap()[asyncBreakFlagAddress] | 0,
+                            tickCount,
+                            ready: true
+                        };
+                    },
+                    setAsyncBreakFlag(value) {
+                        // Direct memory write into the runtime's wasm
+                        // linear memory at the cached flag address. JS
+                        // can do this even while V8 holds the runtime
+                        // thread paused — the WebAssembly.Memory
+                        // ArrayBuffer is just JS-side bytes.
+                        const previous = getRuntimeHeap()[asyncBreakFlagAddress] | 0;
+                        getRuntimeHeap()[asyncBreakFlagAddress] = value & 0xff;
+                        return previous;
+                    },
+                    pollAsyncBreakEvent() {
+                        const event = pollDbiIpcAsyncBreakComplete(sidecar);
+                        return JSON.parse(JSON.stringify(event, (_, value) =>
+                            typeof value === 'bigint' ? `0x${value.toString(16)}` : value));
+                    },
+                    pollLocals() {
+                        const locals = pollDbiLocals(sidecar);
+                        return JSON.parse(JSON.stringify(locals));
+                    },
+                    describeTypeTag(typeTag) {
+                        return describeTypeTag(typeTag);
+                    },
+                    renderPausePanel(message, payload, locals) {
+                        const target = document.getElementById('simulated-pause');
+                        if (target === null) {
+                            return;
+                        }
+                        const localRows = locals && locals.localCount > 0
+                            ? locals.locals
+                                .map(l => `  [${String(l.ilSlot).padStart(2, ' ')}] ${l.name || '(anon)'} : ${describeTypeTag(l.typeTag)}` +
+                                    ` @stack+${l.byteOffset} size=${l.byteSize}`)
+                                .join('\n')
+                            : '  (no locals reported)';
+                        target.innerHTML =
+                            `<strong style="color: #b0530e;">⏸ ${message}</strong>` +
+                            `\n\nasync-break payload polled via sidecar DAC:` +
+                            `\n  asyncBreakToken    = ${payload.asyncBreakToken}` +
+                            `\n  funcMetadataToken  = ${payload.funcMetadataToken}` +
+                            `\n  ilOffset           = ${payload.ilOffset}` +
+                            `\n  interpreterIP      = ${payload.interpreterIP}` +
+                            `\n\nlocals schema polled via sidecar DAC enumerate_locals` +
+                            ` (method token 0x${(locals?.methodToken ?? 0).toString(16)}, count ${locals?.localCount ?? 0}):` +
+                            `\n${localRows}`;
+                        target.style.display = 'block';
+                        setStatus(message);
+                    }
+                };
+                // Surface the keepalive method tokens to the DBI side so
+                // tests can assert the break landed inside the expected
+                // managed method.
+                globalThis.__dbi.tokens = {
+                    get keepAliveMethodToken() { return keepAliveMethodToken; },
+                    get keepAliveMoveNextToken() { return keepAliveMoveNextToken; },
+                    get keepAliveMoveNextILBytes() { return keepAliveMoveNextILBytes; }
+                };
+                globalThis.__dbiReady = true;
             }
         });
 
-        await withTimeout(asyncBreakEventPromise, 'cooperative async-break event', AsyncBreakTimeoutMs);
+        // Now JUST run the busy loop to completion. No orchestration here.
         await withTimeout(completed, 'KeepAlive loop completion', CompletionTimeoutMs);
-        await sleep(0);
 
+        // Tear the session down so the runtime can exit cleanly.
         const disconnectResult = connected
             ? sidecar.module._coreclr_wasm_dbi_dac_dbi_disconnect_runtime()
             : 0;
@@ -484,88 +398,29 @@ export async function runSmoke() {
             ? sidecar.module._coreclr_wasm_dbi_dac_dbi_session_destroy()
             : 0;
         sessionCreated = false;
-        const debuggerConnectedPrevious = debuggerConnected
-            ? runtimeExports.CoreClrWasmDebugSetDebuggerConnected(0) | 0
-            : 0;
-        debuggerConnected = false;
-
-        const payload = asyncBreakEvent.payload;
-        assert(asyncBreakRequestResult === 0, `async-break request facade failed: ${asyncBreakRequestResult}`);
-        assert(fireEventToPauseCount >= 1 && asyncBreakFireEventToPauseCount >= 1, 'async-break fireEventToPause callback did not fire');
-        assert(asyncBreakEvent.pollResult === 0 && asyncBreakEvent.bytesWritten === IpcAsyncBreakSize && payload !== null, 'sidecar async-break event missing');
-        assert(payload.magic === IpcAsyncBreakMagic, `async-break magic mismatch: 0x${payload.magic.toString(16)}`);
-        assert(payload.type === IpcAsyncBreakType, `async-break type mismatch: 0x${payload.type.toString(16)}`);
-        assert(payload.processId === 1 && payload.threadId === 1, 'async-break process/thread mismatch');
-        assert(payload.hr === 0 && payload.flags === 0, 'async-break status mismatch');
-        assert(payload.asyncBreakToken > 0n, 'async-break token missing');
-        assert(isMethodDefToken(payload.funcMetadataToken), `async-break method token is not an mdMethodDef: 0x${payload.funcMetadataToken.toString(16)}`);
-        if (payload.funcMetadataToken === keepAliveMoveNextToken && keepAliveMoveNextILBytes !== 0) {
-            assert(payload.ilOffset < keepAliveMoveNextILBytes, 'async-break IL offset is outside KeepAlive.MoveNext');
-        } else {
-            assert(payload.ilOffset < 0x100000, `async-break IL offset is implausible: ${payload.ilOffset}`);
-        }
-        assert(payload.interpreterIP !== 0n, 'async-break interpreter IP missing');
-        assert(continueDuringCallbackResult === 0, `structured continue failed: ${continueDuringCallbackResult}`);
-        assert(begin, 'KeepAlive loop did not begin');
-        assert(end, 'KeepAlive loop did not end');
-        assert(final, 'KeepAlive final marker missing');
-        assert(tickCount === ExpectedKeepAliveIterations && lastTick === ExpectedKeepAliveIterations - 1, `unexpected tick progress: count=${tickCount} last=${lastTick}`);
-        // Cooperative async-break should land roughly mid-loop. The
-        // 800ms delay anchored at keepalive-begin (each tick ~13-14ms
-        // due to await Task.Delay(10) yields) puts the break in
-        // [40, 90] for the 120-iteration program. Tightening here
-        // catches accidental regressions (e.g., timer firing at
-        // page-load like before commit 0fb5a7bdaf8 + fed1209a375 era).
-        assert(tickCountAtAsyncBreak > 30 && tickCountAtAsyncBreak < ExpectedKeepAliveIterations - 30,
-            `async-break should land mid-loop, got ${tickCountAtAsyncBreak} of ${tickCount}`);
-        assert((runtimeExports.CoreClrWasmDebugIsAsyncBreakInProgress() | 0) === 0, 'async-break flag was not cleared');
-        assert(disconnectResult === 0 && sessionDestroyResult === 0, 'disconnect/session destroy failed');
-        assert(debuggerConnectedPrevious === 1, `debugger connected flag previous value mismatch: ${debuggerConnectedPrevious}`);
 
         const result = {
-            // tickCountAtAsyncBreak: the busy-loop tick count CAPTURED at the
-            // moment the cooperative async-break event fired. This is the
-            // value the user wants when asking "where did the break land?".
-            tickCountAtAsyncBreak,
-            // finalTickCount / finalLastTick: tick counts read AFTER the
-            // managed loop completed, i.e. AFTER continue resumed the
-            // runtime and the loop ran to its natural end. These are
-            // intentionally named with the "final" prefix so a casual
-            // reader cannot mistake them for "tick at break".
-            finalTickCount: tickCount,
-            finalLastTick: lastTick,
+            tickCount,
+            lastTick,
             finalSink,
-            localsAtAsyncBreak,
             elapsedMs: Math.round(completedAt - startedAt),
-            asyncBreakRequest: {
-                delayMs: AsyncBreakRequestDelayMs,
-                result: asyncBreakRequestResult,
-                tickCount: asyncBreakRequestTickCount,
-                elapsedMs: asyncBreakRequestElapsedMs
-            },
+            begin,
+            end,
+            final,
             fireEventToPauseCount,
             asyncBreakFireEventToPauseCount,
-            fireEventToPauseLastEvent,
             keepAliveMethodToken,
             keepAliveMoveNextToken,
             keepAliveMoveNextILBytes,
-            asyncBreakEvent: {
-                pollResult: asyncBreakEvent.pollResult,
-                bytesWritten: asyncBreakEvent.bytesWritten,
-                payload
-            },
-            continueDuringCallbackResult,
             disconnectResult,
             sessionDestroyResult
         };
-        const displayResult = toDisplayResult(result);
-        globalThis.__smokeResult = { passed: true, result: displayResult };
-        return displayResult;
+        globalThis.__smokeResult = { passed: true, result };
+        return result;
     } catch (error) {
         globalThis.__smokeResult = { passed: false, error: `${error.message}\n${error.stack}` };
         throw error;
     } finally {
-        clearTimeout(asyncBreakTimer);
         if (runtimeExports !== undefined &&
             typeof runtimeExports.CoreClrWasmDebugIsAsyncBreakInProgress === 'function' &&
             runtimeExports.CoreClrWasmDebugIsAsyncBreakInProgress() !== 0) {
@@ -580,15 +435,5 @@ export async function runSmoke() {
         if (sessionCreated) {
             sidecar.module._coreclr_wasm_dbi_dac_dbi_session_destroy();
         }
-        delete globalThis.coreClrDebugFireEventToPause;
-        delete globalThis.coreClrDebugLookupSourceLocation;
-        delete globalThis.CoreClrWasmDebugLookupSourceLocation;
-        delete globalThis.CoreClrWasmDebugGetTargetModuleBase;
-        delete globalThis.CoreClrWasmDebugGetSymbolAddress;
-        delete globalThis.CoreClrWasmDebugReadTargetMemory;
-        delete globalThis.CoreClrWasmDebugSendIpcToRuntime;
-        delete globalThis.CoreClrWasmDebugSubmitContinueRequest;
-        delete globalThis.CoreClrWasmDebugSubmitAsyncBreakRequest;
-        delete globalThis.CoreClrWasmDebugSubmitStepIntoRequest;
     }
 }
