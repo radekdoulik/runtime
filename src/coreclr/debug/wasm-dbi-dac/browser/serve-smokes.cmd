@@ -77,12 +77,12 @@ echo        http://localhost:%PORT%/hello-breakpoint.html
 echo        http://localhost:%PORT%/hello-cdp-pause.html
 echo        http://localhost:%PORT%/hello-async-break.html
 echo.
-echo ==^> For the visible IDE-driven async-break + locals-inspect demo:
-echo ==^>   1. Load extension\ as an unpacked Chrome extension
-echo ==^>      ^(chrome://extensions -^> Developer mode -^> Load unpacked^)
-echo ==^>   2. Open: http://localhost:%PORT%/hello-async-break.html?wait-for-external-dbi=1
-echo ==^>   3. Click the extension action icon -^> 'Run IDE-driven async-break demo'
-echo ==^> See extension\README.md for details.
+echo ==^> For the single-step IDE/DBI demo, run in another terminal:
+echo ==^>   demo-async-break.cmd
+echo ==^> (chrome --remote-debugging-port=9222 + cdp-driver.mjs orchestrator)
+echo.
+echo ==^> The Chrome extension at extension\ provides the same flow
+echo ==^> using chrome.debugger API; see extension\README.md.
 echo.
 
 dotnet serve -d "%ARTIFACT_DIR%" -p %PORT% -o:/index.html

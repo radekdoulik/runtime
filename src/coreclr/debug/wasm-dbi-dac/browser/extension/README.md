@@ -7,6 +7,17 @@ locals-inspect demo — exactly the flow a real ICorDebug-attached
 mscordbi adapter would take, just hosted inside the browser as an
 extension.
 
+## Alternative: single-command demo without an extension
+
+If you'd rather not install an unpacked extension, run
+`./demo-async-break.sh` from the parent `browser/` directory. It
+launches Chrome with `--remote-debugging-port=9222` and a temporary
+`--user-data-dir`, opens this page, and spawns `cdp-driver.mjs` (a
+zero-dependency Node script using native `WebSocket` + `fetch`) that
+connects to CDP and runs the same 8-step orchestration. Same code
+paths, no extension install. This is the equivalent of Mono's
+`BrowserDebugProxy` pattern bundled into one shell command.
+
 ## Loading the extension
 
 1. Build + stage the smoke harness once:
