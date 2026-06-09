@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>hello-breakpoint smoke (browser)</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; max-width: 1000px; margin: 2em auto; padding: 0 1em; }
+    .pass { color: #2a8a4a; } .fail { color: #c43030; }
+    pre { background: #f5f5f5; padding: 1em; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h1>hello-breakpoint smoke (browser)</h1>
+  <p>Status: <span id="status">running...</span></p>
+  <pre id="details"></pre>
+  <script type="module">
+    try {
+      const { runSmoke } = await import('./hello-breakpoint.mjs');
+      const result = await runSmoke();
+      globalThis.__smokeResult = { passed: true, result };
+      document.getElementById('status').innerHTML = '<span class="pass">PASS ✓</span>';
+      document.getElementById('details').textContent = JSON.stringify(result, null, 2);
+    } catch (e) {
+      const error = e instanceof Error ? `${e.message}\n${e.stack}` : String(e);
+      globalThis.__smokeResult = { passed: false, error };
+      document.getElementById('status').innerHTML = '<span class="fail">FAIL ✗</span>';
+      document.getElementById('details').textContent = error;
+    }
+  </script>
+</body>
+</html>
