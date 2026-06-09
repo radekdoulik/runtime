@@ -1,0 +1,40 @@
+<!doctype html>
+<!-- Licensed to the .NET Foundation under one or more agreements. -->
+<!-- The .NET Foundation licenses this file to you under the MIT license. -->
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>CoreCLR wasm DBI/DAC — browser smoke harness</title>
+    <style>
+        body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; max-width: 760px; margin: 2em auto; padding: 0 1em; color: #1f2733; }
+        h1 { font-size: 1.4em; margin-bottom: 0.1em; }
+        .subtitle { color: #5c6473; font-size: 0.9em; margin-top: 0; }
+        ul { list-style: none; padding: 0; }
+        li { background: #f5f7fb; border: 1px solid #c4cbd6; border-radius: 6px; padding: 1em 1.2em; margin: 0.6em 0; }
+        li a { font-weight: 600; color: #0a3a85; text-decoration: none; font-size: 1.05em; }
+        li a:hover { text-decoration: underline; }
+        .desc { display: block; color: #3b4250; font-size: 0.9em; margin-top: 0.3em; line-height: 1.4em; }
+        footer { margin-top: 2.5em; color: #6c7384; font-size: 0.85em; }
+        code { background: #eef1f6; padding: 1px 4px; border-radius: 3px; font-size: 0.9em; }
+    </style>
+</head>
+<body>
+    <h1>CoreCLR wasm DBI/DAC browser smokes</h1>
+    <p class="subtitle">Pick a smoke to run. Each page instantiates the wasm runtime + sidecar and reports PASS/FAIL inline.</p>
+
+    <ul>
+        <li>
+            <a href="hello-breakpoint.html">hello-breakpoint</a>
+            <span class="desc">Sets a managed breakpoint, validates the structured DBI IPC event drained via DAC <code>ReadVirtual</code>, real <code>InterpMethod</code> locals + values, and PDB source-location mapping.</span>
+        </li>
+        <li>
+            <a href="hello-async-break.html">hello-async-break</a>
+            <span class="desc">Runs a managed busy loop. Open DevTools (F12) and press <kbd>F8</kbd> to pause mid-loop via CDP <code>Debugger.pause</code>; press <kbd>F8</kbd> again to resume. No JSPI/Asyncify required.</span>
+        </li>
+    </ul>
+
+    <footer>
+        See <code>src/coreclr/debug/wasm-dbi-dac/browser/README.md</code> for build + Playwright usage. <code>window.__smokeResult</code> on each smoke page exposes the structured result for automated drivers.
+    </footer>
+</body>
+</html>

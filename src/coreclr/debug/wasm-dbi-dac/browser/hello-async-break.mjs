@@ -181,7 +181,17 @@ export async function runSmoke() {
             onPrint(text) {
                 const value = String(text);
                 console.log(`[runtime] ${value}`);
-                recordRuntimeLine(value);
+                // Emscripten's print callback may batch multiple newline-
+                // terminated lines into a single call under high throughput
+                // (e.g., right after Debugger.resume releases a backlog of
+                // queued output). Split on newlines so every keepalive-tick
+                // line is recorded individually; otherwise ticks past the
+                // first in each batch parse as NaN and are silently dropped.
+                for (const line of value.split('\n')) {
+                    if (line.length > 0) {
+                        recordRuntimeLine(line);
+                    }
+                }
             },
             onPrintErr: text => console.warn(`[runtime] ${text}`),
             onInstance(instance) {

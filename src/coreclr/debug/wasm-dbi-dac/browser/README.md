@@ -16,9 +16,7 @@ cd src/coreclr/debug/wasm-dbi-dac/browser
 serve-smokes.cmd                 # Windows
 ```
 
-The script runs `prepare.mjs` then `dotnet serve` on port 8080. Open in Chrome:
-- `http://localhost:8080/hello-breakpoint.html`
-- `http://localhost:8080/hello-async-break.html`
+The script runs `prepare.mjs`, starts `dotnet serve` on port 8080, and opens `http://localhost:8080/index.html` in your default browser. From the index page pick `hello-breakpoint` or `hello-async-break`.
 
 ### Automated (Playwright)
 

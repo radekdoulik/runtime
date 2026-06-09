@@ -77,4 +77,4 @@ echo        http://localhost:%PORT%/hello-breakpoint.html
 echo        http://localhost:%PORT%/hello-async-break.html
 echo.
 
-dotnet serve -d "%ARTIFACT_DIR%" -p %PORT%
+dotnet serve -d "%ARTIFACT_DIR%" -p %PORT% -o:/index.html

@@ -24,6 +24,7 @@ const NetVersion = 'net11.0';
 const SharedFrameworkVirtualPath = '/shared/Microsoft.NETCore.App/11.0.0';
 const SharedFrameworkStagedDir = path.join(ArtifactRoot, 'shared/Microsoft.NETCore.App/11.0.0');
 const StagedBrowserFiles = [
+    'index.html',
     `${BreakpointSmokeName}.html`,
     `${AsyncBreakSmokeName}.html`,
     'host.mjs',
