@@ -85,7 +85,8 @@ constexpr uint32_t WasmDbiDacVersionBlobMagic = 0x42564457;
 //   11 - add DAC-backed type-system enumeration exports.
 //   12 - add DAC-backed read-only local-value inspection export.
 //   13 - add managed-BCL source-location lookup bridge.
-constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 13;
+//   14 - add cooperative async-break request bridge and event drain path.
+constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 14;
 
 // Sidecar build version - encoded VS_FIXEDFILEINFO-style as two 32-bit
 // words. Reserved for future use; today's PoC sidecar reports 0/0 so
@@ -413,6 +414,25 @@ struct WasmDbgIpcEventException
     uint64_t Reserved0;
 };
 
+struct WasmDbgIpcEventAsyncBreakComplete
+{
+    uint32_t Magic;
+    uint32_t Type;
+    uint32_t ProcessId;
+    uint32_t ThreadId;
+    uint64_t VmAppDomain;
+    uint64_t VmThread;
+    int32_t Hr;
+    uint32_t Flags;
+    uint64_t AsyncBreakToken;
+    uint32_t FuncMetadataToken;
+    uint32_t ILOffset;
+    uint64_t VmAssembly;
+    uint64_t InterpreterIP;
+    uint64_t Reserved0;
+    uint64_t Reserved1;
+};
+
 struct WasmDbgIpcEventStepComplete
 {
     uint32_t Magic;
@@ -488,6 +508,8 @@ constexpr uint32_t WasmDbgIpcEventTypeStepComplete = 0x0104;      // Wasm-privat
 constexpr uint32_t WasmDbgIpcEventModuleLoadMagic = 0x4D435049;   // 'IPCM' little-endian
 constexpr uint32_t WasmDbgIpcEventTypeModuleLoad = 0x0105;        // DB_IPCE_LOAD_MODULE-shaped wasm event
 constexpr uint32_t WasmDbgIpcEventTypeModuleUnload = 0x0106;      // DB_IPCE_UNLOAD_MODULE-shaped wasm event
+constexpr uint32_t WasmDbgIpcEventAsyncBreakCompleteMagic = 0x41435049; // 'IPCA' little-endian
+constexpr uint32_t WasmDbgIpcEventTypeAsyncBreakComplete = 0x0107;      // wasm-private async-break-complete event
 constexpr uint32_t WasmDbgIpcEventContinueRequestMagic = 0x43435049; // 'IPCC' little-endian
 constexpr uint32_t WasmDbgIpcEventTypeContinueRequest = 0x0201;      // DB_IPCE_CONTINUE
 constexpr uint32_t WasmDbgIpcEventStepIntoRequestMagic = 0x53435049; // 'IPCS' little-endian
@@ -572,6 +594,7 @@ static_assert(sizeof(WasmDebugLocalsRecord) == 16 + 32 * 48);
 static_assert(sizeof(WasmDbgValueRecord) == 104);
 static_assert(sizeof(WasmDbgIpcEventBreakpoint) == 96);
 static_assert(sizeof(WasmDbgIpcEventException) == 144);
+static_assert(sizeof(WasmDbgIpcEventAsyncBreakComplete) == 88);
 static_assert(sizeof(WasmDbgIpcEventStepComplete) == 96);
 static_assert(sizeof(WasmDbgIpcEventModuleLoad) == 312);
 static_assert(sizeof(WasmDbgIpcEventContinueRequest) == 32);
@@ -727,6 +750,8 @@ uint64_t g_cachedIpcEventValidAddress = 0;
 uint64_t g_cachedIpcEventAddress = 0;
 uint64_t g_cachedExceptionEventValidAddress = 0;
 uint64_t g_cachedExceptionEventAddress = 0;
+uint64_t g_cachedAsyncBreakEventValidAddress = 0;
+uint64_t g_cachedAsyncBreakEventAddress = 0;
 uint64_t g_cachedStepCompleteEventValidAddress = 0;
 uint64_t g_cachedStepCompleteEventAddress = 0;
 uint64_t g_cachedModuleLoadEventValidAddress = 0;
@@ -755,6 +780,8 @@ void ClearRuntimeConnectionState()
     g_cachedIpcEventAddress = 0;
     g_cachedExceptionEventValidAddress = 0;
     g_cachedExceptionEventAddress = 0;
+    g_cachedAsyncBreakEventValidAddress = 0;
+    g_cachedAsyncBreakEventAddress = 0;
     g_cachedStepCompleteEventValidAddress = 0;
     g_cachedStepCompleteEventAddress = 0;
     g_cachedModuleLoadEventValidAddress = 0;
@@ -1095,6 +1122,9 @@ extern "C" int32_t coreclr_wasm_dbi_dac_send_ipc_to_runtime(uint32_t messageAddr
 
 extern "C" int32_t coreclr_wasm_dbi_dac_submit_continue_request(uint32_t requestBytesAddress, uint32_t requestBytesLength)
     __attribute__((import_module("coreclr_dbi_dac"), import_name("submit_continue_request")));
+
+extern "C" int32_t coreclr_wasm_dbi_dac_submit_async_break_request()
+    __attribute__((import_module("coreclr_dbi_dac"), import_name("submit_async_break_request")));
 
 extern "C" int32_t coreclr_wasm_dbi_dac_submit_step_into_request(uint32_t requestBytesAddress, uint32_t requestBytesLength)
     __attribute__((import_module("coreclr_dbi_dac"), import_name("submit_step_into_request")));
@@ -3299,13 +3329,23 @@ int32_t coreclr_wasm_dbi_dac_dbi_continue()
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_async_break_request)
 int32_t coreclr_wasm_dbi_dac_dbi_async_break_request()
 {
-    // A CDP async break is not a runtime-emitted event and the sidecar has no
-    // cross-module write/evaluate callback today. The actual suspension is
-    // initiated by the JS host with CDP Debugger.pause; this facade exists so
-    // future mscordbi-shaped callers can route "Pause" through the same
-    // sidecar API surface as continue/step without implying a sidecar-local
-    // pause mechanism.
-    return Success;
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
+    if (g_cordb == nullptr || !g_connectedToRuntime)
+    {
+        return E_FAIL;
+    }
+
+    int32_t result = coreclr_wasm_dbi_dac_submit_async_break_request();
+    if (result == Success)
+    {
+        InvalidatePageCache();
+    }
+    return result == Success ? Success : result;
 }
 
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_send_ipc_continue_request)
@@ -3598,6 +3638,102 @@ int32_t coreclr_wasm_dbi_dac_dbi_poll_ipc_exception(uint32_t bufferAddress, uint
     bytesRead = 0;
     hr = dataTarget.ReadVirtual(
         g_cachedExceptionEventAddress,
+        reinterpret_cast<BYTE*>(&payload),
+        sizeof(payload),
+        &bytesRead);
+    if (FAILED(hr) || bytesRead != sizeof(payload))
+    {
+        return HostReadFailed;
+    }
+
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bufferAddress)), &payload, sizeof(payload));
+    uint32_t written = static_cast<uint32_t>(sizeof(payload));
+    memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &written, sizeof(written));
+    return S_OK;
+}
+
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_poll_ipc_async_break_complete)
+int32_t coreclr_wasm_dbi_dac_dbi_poll_ipc_async_break_complete(uint32_t bufferAddress, uint32_t bufferLength, uint32_t bytesWrittenAddress)
+{
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
+    if (g_cordb == nullptr || !g_connectedToRuntime)
+    {
+        return E_FAIL;
+    }
+
+    if (bytesWrittenAddress == 0 || bufferAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    if (bufferLength < sizeof(WasmDbgIpcEventAsyncBreakComplete))
+    {
+        return BufferTooSmall;
+    }
+
+    InvalidatePageCache();
+
+    WasmDacDataTarget dataTarget(g_connectedRuntimeBase);
+
+    if (g_cachedAsyncBreakEventValidAddress == 0)
+    {
+        uint64_t resolved = 0;
+        if (!TryGetSymbol(
+                static_cast<ICorDebugDataTarget*>(&dataTarget),
+                g_connectedRuntimeBase,
+                "g_wasmDebugLastIpcAsyncBreakValid",
+                &resolved) ||
+            resolved == 0 ||
+            resolved > UINT32_MAX)
+        {
+            return HostSymbolLookupFailed;
+        }
+        g_cachedAsyncBreakEventValidAddress = resolved;
+    }
+    if (g_cachedAsyncBreakEventAddress == 0)
+    {
+        uint64_t resolved = 0;
+        if (!TryGetSymbol(
+                static_cast<ICorDebugDataTarget*>(&dataTarget),
+                g_connectedRuntimeBase,
+                "g_wasmDebugLastIpcAsyncBreak",
+                &resolved) ||
+            resolved == 0 ||
+            resolved > UINT32_MAX)
+        {
+            return HostSymbolLookupFailed;
+        }
+        g_cachedAsyncBreakEventAddress = resolved;
+    }
+
+    uint32_t valid = 0;
+    ULONG32 bytesRead = 0;
+    HRESULT hr = dataTarget.ReadVirtual(
+        g_cachedAsyncBreakEventValidAddress,
+        reinterpret_cast<BYTE*>(&valid),
+        sizeof(valid),
+        &bytesRead);
+    if (FAILED(hr) || bytesRead != sizeof(valid))
+    {
+        return HostReadFailed;
+    }
+
+    uint32_t zeroBytes = 0;
+    if (valid == 0)
+    {
+        memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &zeroBytes, sizeof(zeroBytes));
+        return S_OK;
+    }
+
+    WasmDbgIpcEventAsyncBreakComplete payload{};
+    bytesRead = 0;
+    hr = dataTarget.ReadVirtual(
+        g_cachedAsyncBreakEventAddress,
         reinterpret_cast<BYTE*>(&payload),
         sizeof(payload),
         &bytesRead);

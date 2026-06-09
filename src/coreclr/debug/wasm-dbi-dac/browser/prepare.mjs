@@ -11,7 +11,7 @@ const RepoRoot = path.resolve(BrowserDir, '../../../../..');
 const ObjDir = path.join(RepoRoot, 'artifacts/obj/coreclr/browser.wasm.Debug');
 const ArtifactRoot = path.join(RepoRoot, 'artifacts/wasm-dbi-dac-browser-smoke');
 const BreakpointSmokeName = 'hello-breakpoint';
-const AsyncBreakSmokeName = 'hello-async-break';
+const AsyncBreakSmokeName = 'hello-cdp-pause';
 const BreakpointSmokeDir = path.join(ArtifactRoot, BreakpointSmokeName);
 const AsyncBreakSmokeDir = path.join(ArtifactRoot, AsyncBreakSmokeName);
 const BreakpointAppSourceDir = path.join(BreakpointSmokeDir, 'src');
@@ -19,7 +19,7 @@ const AsyncBreakAppSourceDir = path.join(AsyncBreakSmokeDir, 'src');
 const HelperSourceDir = path.join(BreakpointSmokeDir, 'source-map-helper');
 const SharedFrameworkDir = path.join(RepoRoot, 'artifacts/bin/testhost/net11.0-browser-Debug-wasm/shared/Microsoft.NETCore.App/11.0.0');
 const BreakpointAssemblyName = 'HelloBreakpoint';
-const AsyncBreakAssemblyName = 'HelloAsyncBreak';
+const AsyncBreakAssemblyName = 'HelloCdpPause';
 const NetVersion = 'net11.0';
 const SharedFrameworkVirtualPath = '/shared/Microsoft.NETCore.App/11.0.0';
 const SharedFrameworkStagedDir = path.join(ArtifactRoot, 'shared/Microsoft.NETCore.App/11.0.0');
@@ -236,7 +236,7 @@ public static class HelloBreakpointTarget
     return { projectPath, programPath, changed: projectChanged || programChanged };
 }
 
-function generateHelloAsyncBreakProject() {
+function generateHelloCdpPauseProject() {
     const projectPath = path.join(AsyncBreakAppSourceDir, `${AsyncBreakAssemblyName}.csproj`);
     const programPath = path.join(AsyncBreakAppSourceDir, 'Program.cs');
     const project = `<Project Sdk="Microsoft.NET.Sdk">
@@ -446,8 +446,8 @@ function buildHelloBreakpointApp() {
     return path.join(BreakpointSmokeDir, `${BreakpointAssemblyName}.dll`);
 }
 
-function buildHelloAsyncBreakApp() {
-    const { projectPath, programPath } = generateHelloAsyncBreakProject();
+function buildHelloCdpPauseApp() {
+    const { projectPath, programPath } = generateHelloCdpPauseProject();
     const outputDir = path.join(RepoRoot, 'artifacts/bin', AsyncBreakAssemblyName, 'Debug', NetVersion);
     const outputDll = path.join(outputDir, `${AsyncBreakAssemblyName}.dll`);
     buildProjectIfNeeded(projectPath, outputDll, [programPath], AsyncBreakAssemblyName);
@@ -528,7 +528,7 @@ makeManifest(BreakpointSmokeDir, BreakpointSmokeName, BreakpointAssemblyName, `/
 
 fs.mkdirSync(AsyncBreakSmokeDir, { recursive: true });
 copyWasmArtifacts(AsyncBreakSmokeDir);
-buildHelloAsyncBreakApp();
+buildHelloCdpPauseApp();
 makeManifest(AsyncBreakSmokeDir, AsyncBreakSmokeName, AsyncBreakAssemblyName);
 
 console.log(`prepare: ready: ${BreakpointSmokeDir}`);

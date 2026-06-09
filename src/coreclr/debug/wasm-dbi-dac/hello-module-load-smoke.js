@@ -10,7 +10,7 @@ const { spawnSync } = require("child_process");
 
 const ExpectedVersionBlobMagic = 0x42564457;
 const ExpectedAbiVersion = 1;
-const ExpectedProtocolBreakingChangeCounter = 13;
+const ExpectedProtocolBreakingChangeCounter = 14;
 const IpcModuleLoadSize = 312;
 const IpcModuleLoadMagic = 0x4D435049;
 const IpcModuleLoadType = 0x0105;
@@ -135,6 +135,13 @@ async function loadDebugger(debuggerJsPath) {
                 },
                 submit_continue_request() {
                     return -1;
+                },
+                submit_async_break_request() {
+                    if (typeof globalThis.CoreClrWasmDebugSubmitAsyncBreakRequest !== "function") {
+                        return -1;
+                    }
+
+                    return globalThis.CoreClrWasmDebugSubmitAsyncBreakRequest();
                 },
                 submit_step_into_request() {
                     return -1;
@@ -402,6 +409,8 @@ async function main() {
                     symbolName === "g_wasmDebugLastIpcEventValid" ? runtimeExports.Getg_wasmDebugLastIpcEventValid() >>> 0 :
                     symbolName === "g_wasmDebugLastIpcException" ? runtimeExports.Getg_wasmDebugLastIpcException() >>> 0 :
                     symbolName === "g_wasmDebugLastIpcExceptionValid" ? runtimeExports.Getg_wasmDebugLastIpcExceptionValid() >>> 0 :
+                    symbolName === "g_wasmDebugLastIpcAsyncBreak" ? runtimeExports.Getg_wasmDebugLastIpcAsyncBreak() >>> 0 :
+                    symbolName === "g_wasmDebugLastIpcAsyncBreakValid" ? runtimeExports.Getg_wasmDebugLastIpcAsyncBreakValid() >>> 0 :
                     symbolName === "g_wasmDebugLastIpcStepComplete" ? runtimeExports.Getg_wasmDebugLastIpcStepComplete() >>> 0 :
                     symbolName === "g_wasmDebugLastIpcStepCompleteValid" ? runtimeExports.Getg_wasmDebugLastIpcStepCompleteValid() >>> 0 :
                     symbolName === "g_wasmDebugLastIpcModuleLoad" ? runtimeExports.Getg_wasmDebugLastIpcModuleLoad() >>> 0 :

@@ -183,6 +183,25 @@ struct WasmDbgIpcEventException
     uint64_t Reserved0;
 };
 
+struct WasmDbgIpcEventAsyncBreakComplete
+{
+    uint32_t Magic;
+    uint32_t Type;
+    uint32_t ProcessId;
+    uint32_t ThreadId;
+    uint64_t VmAppDomain;
+    uint64_t VmThread;
+    int32_t Hr;
+    uint32_t Flags;
+    uint64_t AsyncBreakToken;
+    uint32_t FuncMetadataToken;
+    uint32_t ILOffset;
+    uint64_t VmAssembly;
+    uint64_t InterpreterIP;
+    uint64_t Reserved0;
+    uint64_t Reserved1;
+};
+
 struct WasmDbgIpcEventStepComplete
 {
     uint32_t Magic;
@@ -291,6 +310,8 @@ static_assert(sizeof(WasmDbgIpcEventBreakpointRuntime) == 96,
               "WasmDbgIpcEventBreakpointRuntime must mirror the sidecar's WasmDbgIpcEventBreakpoint byte-for-byte");
 static_assert(sizeof(WasmDbgIpcEventException) == 144,
               "WasmDbgIpcEventException must mirror the sidecar's WasmDbgIpcEventException byte-for-byte");
+static_assert(sizeof(WasmDbgIpcEventAsyncBreakComplete) == 88,
+              "WasmDbgIpcEventAsyncBreakComplete must mirror the sidecar's byte-for-byte");
 static_assert(sizeof(WasmDbgIpcEventStepComplete) == 96,
               "WasmDbgIpcEventStepComplete must mirror the sidecar's WasmDbgIpcEventStepComplete byte-for-byte");
 static_assert(sizeof(WasmDbgIpcEventModuleLoad) == 312,
@@ -311,6 +332,8 @@ constexpr uint32_t WasmDbgIpcEventTypeStepComplete = 0x0104;
 constexpr uint32_t WasmDbgIpcEventModuleLoadMagic = 0x4D435049;
 constexpr uint32_t WasmDbgIpcEventTypeModuleLoad = 0x0105;
 constexpr uint32_t WasmDbgIpcEventTypeModuleUnload = 0x0106;
+constexpr uint32_t WasmDbgIpcEventAsyncBreakCompleteMagic = 0x41435049;
+constexpr uint32_t WasmDbgIpcEventTypeAsyncBreakComplete = 0x0107;
 constexpr uint32_t WasmDbgIpcEventContinueRequestMagic = 0x43435049;
 constexpr uint32_t WasmDbgIpcEventTypeContinueRequest = 0x0201;
 constexpr uint32_t WasmDbgIpcEventStepIntoRequestMagic = 0x53435049;
@@ -346,6 +369,9 @@ uint64_t g_wasmDebugBreakpointTokenCounter;
 WasmDbgIpcEventException g_wasmDebugLastIpcException;
 uint32_t g_wasmDebugLastIpcExceptionValid;
 uint64_t g_wasmDebugExceptionTokenCounter;
+WasmDbgIpcEventAsyncBreakComplete g_wasmDebugLastIpcAsyncBreak;
+uint32_t g_wasmDebugLastIpcAsyncBreakValid;
+uint64_t g_wasmDebugAsyncBreakTokenCounter;
 WasmDbgIpcEventStepComplete g_wasmDebugLastIpcStepComplete;
 uint32_t g_wasmDebugLastIpcStepCompleteValid;
 uint64_t g_wasmDebugStepTokenCounter;
@@ -421,12 +447,10 @@ void ClearWasmDebugOneShotStepState(bool clearBreakpoints);
 // debug-adapter) completes its handshake; cleared on disconnect.
 bool g_wasmDebuggerConnected;
 
-// CDP-level async-break correlation flag. The runtime does not implement
-// the suspension itself for this path: an external CDP client sends
-// Debugger.pause and V8's wasm-interrupt machinery halts execution at an
-// instruction boundary. Hosts flip this flag around their own pause/resume
-// request so future consumers can distinguish "our async-break request"
-// from unrelated DevTools pauses or user-authored `debugger;` statements.
+// Cooperative async-break request flag. The IDE/sidecar sets this through
+// CoreClrWasmDebugSetAsyncBreakInProgress; the interpreter consumes it at
+// the next debug sequence-point safepoint and clears it after the stop is
+// resumed. One request therefore fires at most one async-break event.
 bool g_wasmDebugAsyncBreakInProgress;
 
 void SetWasmDebugEvent(const char* event)
@@ -679,6 +703,49 @@ void EmitWasmDebugException(MethodDesc* methodDesc, uint32_t ilOffset, const int
     coreClrDebugFireEventToPause(
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_wasmDebugLastIpcException)),
         static_cast<uint32_t>(sizeof(g_wasmDebugLastIpcException)));
+}
+
+void EmitWasmDebugAsyncBreak(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip)
+{
+    if (!g_wasmDebuggerConnected || !g_wasmDebugAsyncBreakInProgress || methodDesc == nullptr)
+    {
+        return;
+    }
+
+    g_wasmDebugAsyncBreakTokenCounter++;
+    memset(&g_wasmDebugLastIpcAsyncBreak, 0, sizeof(g_wasmDebugLastIpcAsyncBreak));
+    g_wasmDebugLastIpcAsyncBreak.Magic = WasmDbgIpcEventAsyncBreakCompleteMagic;
+    g_wasmDebugLastIpcAsyncBreak.Type = WasmDbgIpcEventTypeAsyncBreakComplete;
+    g_wasmDebugLastIpcAsyncBreak.ProcessId = 1;
+    g_wasmDebugLastIpcAsyncBreak.ThreadId = 1;
+    g_wasmDebugLastIpcAsyncBreak.Hr = 0;
+    g_wasmDebugLastIpcAsyncBreak.Flags = 0;
+    g_wasmDebugLastIpcAsyncBreak.AsyncBreakToken = g_wasmDebugAsyncBreakTokenCounter;
+    g_wasmDebugLastIpcAsyncBreak.FuncMetadataToken = methodDesc->GetMemberDef();
+    g_wasmDebugLastIpcAsyncBreak.ILOffset = ilOffset;
+    g_wasmDebugLastIpcAsyncBreak.InterpreterIP = reinterpret_cast<uintptr_t>(ip);
+    g_wasmDebugLastIpcAsyncBreakValid = 1;
+
+    g_wasmDebugBreakpointStopped = true;
+    g_wasmDebugContinueRequested = false;
+    g_wasmDebugLastFiredSlot = WasmDebugMaxBreakpoints;
+    g_wasmDebugLastStoppedMethodDesc = methodDesc;
+    g_wasmDebugLastStoppedIP = ip;
+    g_wasmDebugLastStoppedILOffset = ilOffset;
+    g_wasmDebugLastStoppedFrame = nullptr;
+
+    coreClrDebugFireEventToPause(
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_wasmDebugLastIpcAsyncBreak)),
+        static_cast<uint32_t>(sizeof(g_wasmDebugLastIpcAsyncBreak)));
+
+    // Single-threaded wasm has no helper thread to process continue while
+    // this frame spins. As with breakpoint stops, the host should submit the
+    // structured continue synchronously while coreClrDebugFireEventToPause is
+    // on the stack (or through the inspector pause it triggers). The async-break
+    // request itself is one-shot: after a stop event fires, the IDE must request
+    // a future async break explicitly.
+    g_wasmDebugBreakpointStopped = false;
+    g_wasmDebugAsyncBreakInProgress = false;
 }
 
 void EmitWasmDebugModuleLoad(Module* pModule, bool isLoad)
@@ -1266,6 +1333,16 @@ extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcException()
 extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcExceptionValid()
 {
     return &g_wasmDebugLastIpcExceptionValid;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcAsyncBreak()
+{
+    return &g_wasmDebugLastIpcAsyncBreak;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcAsyncBreakValid()
+{
+    return &g_wasmDebugLastIpcAsyncBreakValid;
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcStepComplete()
@@ -1880,6 +1957,28 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReadLastIpcException(uin
     return static_cast<int32_t>(sizeof(g_wasmDebugLastIpcException));
 }
 
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetLastIpcAsyncBreakSize()
+{
+    return sizeof(WasmDbgIpcEventAsyncBreakComplete);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReadLastIpcAsyncBreak(uint8_t* buffer, uint32_t bufferLength)
+{
+    if (buffer == nullptr || bufferLength < sizeof(WasmDbgIpcEventAsyncBreakComplete))
+    {
+        return -1;
+    }
+
+    if (g_wasmDebugLastIpcAsyncBreakValid == 0)
+    {
+        return 0;
+    }
+
+    memcpy(buffer, &g_wasmDebugLastIpcAsyncBreak, sizeof(g_wasmDebugLastIpcAsyncBreak));
+    g_wasmDebugLastIpcAsyncBreakValid = 0;
+    return static_cast<int32_t>(sizeof(g_wasmDebugLastIpcAsyncBreak));
+}
+
 extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetLastIpcStepCompleteSize()
 {
     return sizeof(WasmDbgIpcEventStepComplete);
@@ -2046,6 +2145,19 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugSetAsyncBreakInProgress(
 extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugIsAsyncBreakInProgress()
 {
     return g_wasmDebugAsyncBreakInProgress ? 1 : 0;
+}
+
+extern "C" void CoreClrWasmDebugAsyncBreakAtSequencePoint(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip)
+{
+    if (!g_wasmDebuggerConnected || !g_wasmDebugAsyncBreakInProgress)
+    {
+        return;
+    }
+
+    // INTOP_DEBUG_SEQ_POINT carries no IL-offset operand today. Keep the
+    // event field at the caller-provided value (0 for the current hook) until
+    // the interpreter exposes a real sequence-point IL map.
+    EmitWasmDebugAsyncBreak(methodDesc, ilOffset, ip);
 }
 
 extern "C" void CoreClrWasmDebugMaybePatchInterpreterMethod(MethodDesc* methodDesc, uint32_t ilOffset, int32_t* ip)

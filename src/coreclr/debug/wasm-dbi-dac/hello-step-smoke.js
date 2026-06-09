@@ -17,7 +17,7 @@ const CommandRecordSize = 80;
 // point will run (CORDBG_E_INCOMPATIBLE_PROTOCOL otherwise).
 const ExpectedVersionBlobMagic = 0x42564457; // 'WDVB' little-endian
 const ExpectedAbiVersion = 1;
-const ExpectedProtocolBreakingChangeCounter = 13;
+const ExpectedProtocolBreakingChangeCounter = 14;
 const IpcModuleLoadSize = 312;
 
 function fail(message) {
@@ -133,6 +133,13 @@ async function loadDebugger(debuggerJsPath, sendToRuntime) {
                     return globalThis.CoreClrWasmDebugSubmitContinueRequest(
                         requestBytesAddress >>> 0,
                         requestBytesLength >>> 0);
+                },
+                submit_async_break_request() {
+                    if (typeof globalThis.CoreClrWasmDebugSubmitAsyncBreakRequest !== "function") {
+                        return -1;
+                    }
+
+                    return globalThis.CoreClrWasmDebugSubmitAsyncBreakRequest();
                 },
                 submit_step_into_request(requestBytesAddress, requestBytesLength) {
                     if (typeof globalThis.CoreClrWasmDebugSubmitStepIntoRequest !== "function") {
@@ -651,6 +658,8 @@ async function main() {
                     symbolName === "g_wasmDebugLastIpcEventValid" ? runtimeExports.Getg_wasmDebugLastIpcEventValid() >>> 0 :
                     symbolName === "g_wasmDebugLastIpcException" ? runtimeExports.Getg_wasmDebugLastIpcException() >>> 0 :
                     symbolName === "g_wasmDebugLastIpcExceptionValid" ? runtimeExports.Getg_wasmDebugLastIpcExceptionValid() >>> 0 :
+                    symbolName === "g_wasmDebugLastIpcAsyncBreak" ? runtimeExports.Getg_wasmDebugLastIpcAsyncBreak() >>> 0 :
+                    symbolName === "g_wasmDebugLastIpcAsyncBreakValid" ? runtimeExports.Getg_wasmDebugLastIpcAsyncBreakValid() >>> 0 :
                     symbolName === "g_wasmDebugLastIpcStepComplete" ? runtimeExports.Getg_wasmDebugLastIpcStepComplete() >>> 0 :
                     symbolName === "g_wasmDebugLastIpcStepCompleteValid" ? runtimeExports.Getg_wasmDebugLastIpcStepCompleteValid() >>> 0 :
                     symbolName === "g_wasmDebugLastIpcModuleLoad" ? runtimeExports.Getg_wasmDebugLastIpcModuleLoad() >>> 0 :

@@ -62,6 +62,7 @@ sidecar declares them in `dbi_dac_wasm.cpp` near line 740 with
 | `get_target_module_base`          | `int32_t (uint32_t imageNameAddress, uint32_t imageNameCharCount, uint32_t outAddress)` | DAC bootstrap    |
 | `send_ipc_to_runtime`             | `int32_t (uint32_t messageAddress, uint32_t messageLength)`                          | DBI session/breakpoint flow |
 | `submit_continue_request`         | `int32_t (uint32_t requestBytesAddress, uint32_t requestBytesLength)`                 | Structured DBI continue flow |
+| `submit_async_break_request`      | `int32_t ()`                                                                         | Cooperative async-break request flow |
 | `submit_step_into_request`        | `int32_t (uint32_t requestBytesAddress, uint32_t requestBytesLength)`                 | Structured DBI step request flow (into/over/out) |
 | `lookup_source_location`          | `int32_t (uint32_t methodToken, uint32_t ilOffset, uint32_t outFileAddress, uint32_t outFileCapacity, uint32_t outLineAddress, uint32_t outColumnAddress)` | Source lookup flow |
 
@@ -151,6 +152,21 @@ export synchronously.
   `DB_IPCE_CONTINUE` (`0x0201`).
 - Returns `0` on success, non-zero on validation or transport failure.
 
+### `submit_async_break_request()`
+
+Request a cooperative async break by calling the runtime module's
+`CoreClrWasmDebugSetAsyncBreakInProgress(1)` export. The interpreter
+consumes the flag at the next `INTOP_DEBUG_SEQ_POINT`, emits
+`WasmDbgIpcEventAsyncBreakComplete`, and clears the flag after the stop
+is continued.
+
+**Required semantics**:
+
+- Synchronous. Returns `0` after the runtime flag is set, non-zero on
+  validation or transport failure.
+- This is independent from CDP `Debugger.pause`; CDP pause remains a
+  host/inspector operation.
+
 ### `submit_step_into_request(requestBytesAddress, requestBytesLength)`
 
 Deliver a 32-byte `WasmDbgIpcEventStepIntoRequest` payload from the
@@ -237,9 +253,11 @@ acknowledged handshake returns `HrIncompatibleProtocol`.
 | `coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_token`  | Send `SetBreakpointByToken` command record to runtime. |
 | `coreclr_wasm_dbi_dac_dbi_continue`                 | Send `Continue` command record; invalidates the page cache. |
 | `coreclr_wasm_dbi_dac_dbi_send_ipc_continue_request` | Send structured `DB_IPCE_CONTINUE` request; invalidates the page cache on success. |
+| `coreclr_wasm_dbi_dac_dbi_async_break_request`       | Request a cooperative runtime async-break through `submit_async_break_request`; invalidates the page cache on success. |
 | `coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request` | Send structured wasm-private step request (`breakpointToken`, `stepKind`); invalidates the page cache on success. |
 | `coreclr_wasm_dbi_dac_dbi_poll_event`               | Drain queued runtime event text into the supplied buffer. |
 | `coreclr_wasm_dbi_dac_dbi_poll_ipc_exception`       | Drain structured first-chance exception event (`WasmDbgIpcEventException`, 144 bytes) via DAC `ReadVirtual`. |
+| `coreclr_wasm_dbi_dac_dbi_poll_ipc_async_break_complete` | Drain structured cooperative async-break event (`WasmDbgIpcEventAsyncBreakComplete`, 88 bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_poll_ipc_step_complete`   | Drain structured step-complete event (`WasmDbgIpcEventStepComplete`, 96 bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_poll_ipc_module_load`     | Drain structured module load/unload event (`WasmDbgIpcEventModuleLoad`, 312 bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints`    | Drain the runtime breakpoint slot table (`8 + 16 * 88` bytes) via DAC `ReadVirtual`. |
@@ -257,11 +275,26 @@ acknowledged handshake returns `HrIncompatibleProtocol`.
 | `coreclr_wasm_dbi_dac_receive_runtime_frame_record` | Push a `WasmDebugFrameRecord`.                         |
 | `coreclr_wasm_dbi_dac_invalidate_page_cache`        | Force-invalidate the in-sidecar page cache (epoch bump). |
 
-### Async-break facade (product, ungated)
+#### `WasmDbgIpcEventAsyncBreakComplete` (88 bytes, little-endian)
 
-| Export                                          | Purpose |
-|-------------------------------------------------|---------|
-| `coreclr_wasm_dbi_dac_dbi_async_break_request` | Facade for host-driven CDP `Debugger.pause`; currently succeeds as a no-op because actual pause/resume happens in the JS host. |
+```text
+offset  size  field
+   0     4    Magic                // 'IPCA' = 0x41435049 LE
+   4     4    Type                 // 0x0107
+   8     4    ProcessId            // 1
+  12     4    ThreadId             // 1
+  16     8    VmAppDomain          // 0 today
+  24     8    VmThread             // 0 today
+  32     4    Hr                   // 0
+  36     4    Flags                // 0
+  40     8    AsyncBreakToken      // monotonically increasing token
+  48     4    FuncMetadataToken    // stopped method token
+  52     4    ILOffset             // 0 until sequence-point IL mapping lands
+  56     8    VmAssembly           // 0 today
+  64     8    InterpreterIP        // interpreter bytecode IP
+  72     8    Reserved0
+  80     8    Reserved1
+```
 
 #### `WasmDbgIpcEventStepComplete` (96 bytes, little-endian)
 
@@ -467,7 +500,7 @@ legacy `ICLRDataTarget` / `ICLRRuntimeLocator` interfaces. Filling out
 A well-behaved host follows this sequence at session start:
 
 1. Instantiate `coreclr-dbi-dac.wasm` (or `-tests.wasm`) and wire all
-   seven host imports.
+   eight host imports.
 2. Call `get_abi_version` and `get_component_mask` to detect a
    completely unknown sidecar build before doing anything else.
 3. Call `get_version_blob(out, sizeof(out), &written)` and validate
@@ -477,9 +510,9 @@ A well-behaved host follows this sequence at session start:
 5. Call `dbi_session_create()`.
 6. Call `dbi_connect_runtime(runtimeBase)`; this invalidates the page
    cache so the next reads come from runtime memory.
-7. Issue breakpoints, polls, continues, and step-into requests as
-   needed; each legacy `continue` call and each successful structured
-   continue or step request invalidates the page cache.
+7. Issue breakpoints, async-breaks, polls, continues, and step requests
+   as needed; each legacy `continue` call and each successful structured
+   continue, async-break, or step request invalidates the page cache.
 8. At shutdown: `dbi_disconnect_runtime` (invalidates cache) then
    `dbi_session_destroy`. The session is single-use today.
 
@@ -503,6 +536,7 @@ as reference implementations of the host side of the contract.
   [`hello-step-into-call-smoke.js`](hello-step-into-call-smoke.js),
   [`hello-step-over-smoke.js`](hello-step-over-smoke.js),
   [`hello-step-out-smoke.js`](hello-step-out-smoke.js),
-  [`hello-exception-smoke.js`](hello-exception-smoke.js), and
-  [`hello-async-break-smoke.js`](hello-async-break-smoke.js) -
+  [`hello-exception-smoke.js`](hello-exception-smoke.js),
+  [`hello-cdp-pause-smoke.js`](hello-cdp-pause-smoke.js), and
+  [`hello-cooperative-async-break-smoke.js`](hello-cooperative-async-break-smoke.js) -
   reference host implementations that fully exercise the contract above.

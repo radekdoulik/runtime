@@ -27,7 +27,7 @@ async function cdpEvaluate(cdp, expression) {
   return response.result.value;
 }
 
-test('hello-async-break smoke', async ({ page }) => {
+test('hello-cdp-pause smoke', async ({ page }) => {
   let observedProgress = 0;
   const progressWaiters = [];
   page.on('console', msg => {
@@ -72,7 +72,7 @@ test('hello-async-break smoke', async ({ page }) => {
     });
   }
 
-  await page.goto('/hello-async-break.html?startDelayMs=3000');
+  await page.goto('/hello-cdp-pause.html?startDelayMs=3000');
   const cdp = await page.context().newCDPSession(page);
   await cdp.send('Runtime.enable');
   await cdp.send('Debugger.enable');

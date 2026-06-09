@@ -9,7 +9,7 @@
 #
 # After it starts, open in Chrome:
 #   http://localhost:<port>/hello-breakpoint.html
-#   http://localhost:<port>/hello-async-break.html
+#   http://localhost:<port>/hello-cdp-pause.html
 
 set -euo pipefail
 
@@ -54,7 +54,7 @@ fi
 echo "==> dotnet serve on port ${PORT}"
 echo "==> Open in Chrome:"
 echo "       http://localhost:${PORT}/hello-breakpoint.html"
-echo "       http://localhost:${PORT}/hello-async-break.html"
+echo "       http://localhost:${PORT}/hello-cdp-pause.html"
 echo
 
 exec dotnet serve -d "${ARTIFACT_DIR}" -p "${PORT}" -o:/index.html

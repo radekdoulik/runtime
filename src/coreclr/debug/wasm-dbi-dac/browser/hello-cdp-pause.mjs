@@ -128,7 +128,7 @@ export async function runSmoke() {
     }
 
     try {
-        const manifest = await fetchJson('/hello-async-break/manifest.json');
+        const manifest = await fetchJson('/hello-cdp-pause/manifest.json');
         sidecar = await loadSidecar(manifest.sidecarJsUrl);
 
         globalThis.CoreClrWasmDebugReadTargetMemory = (targetAddress, debuggerAddress, byteCount) => {
@@ -147,6 +147,19 @@ export async function runSmoke() {
             const symbolAddress =
                 symbolName === 'DotNetRuntimeContractDescriptor' ? runtimeExports.GetDotNetRuntimeContractDescriptor() >>> 0 :
                 symbolName === 'g_dacTable' ? runtimeExports.Getg_dacTable() >>> 0 :
+                symbolName === 'WasmDbiDacTestData' ? runtimeExports.GetWasmDbiDacTestData() >>> 0 :
+                symbolName === 'g_wasmDebugLastIpcEvent' ? runtimeExports.Getg_wasmDebugLastIpcEvent() >>> 0 :
+                symbolName === 'g_wasmDebugLastIpcEventValid' ? runtimeExports.Getg_wasmDebugLastIpcEventValid() >>> 0 :
+                symbolName === 'g_wasmDebugLastIpcException' ? runtimeExports.Getg_wasmDebugLastIpcException() >>> 0 :
+                symbolName === 'g_wasmDebugLastIpcExceptionValid' ? runtimeExports.Getg_wasmDebugLastIpcExceptionValid() >>> 0 :
+                symbolName === 'g_wasmDebugLastIpcAsyncBreak' ? runtimeExports.Getg_wasmDebugLastIpcAsyncBreak() >>> 0 :
+                symbolName === 'g_wasmDebugLastIpcAsyncBreakValid' ? runtimeExports.Getg_wasmDebugLastIpcAsyncBreakValid() >>> 0 :
+                symbolName === 'g_wasmDebugLastIpcStepComplete' ? runtimeExports.Getg_wasmDebugLastIpcStepComplete() >>> 0 :
+                symbolName === 'g_wasmDebugLastIpcStepCompleteValid' ? runtimeExports.Getg_wasmDebugLastIpcStepCompleteValid() >>> 0 :
+                symbolName === 'g_wasmDebugLastIpcModuleLoad' ? runtimeExports.Getg_wasmDebugLastIpcModuleLoad() >>> 0 :
+                symbolName === 'g_wasmDebugLastIpcModuleLoadValid' ? runtimeExports.Getg_wasmDebugLastIpcModuleLoadValid() >>> 0 :
+                symbolName === 'g_wasmDebugBreakpoints' ? runtimeExports.Getg_wasmDebugBreakpoints() >>> 0 :
+                symbolName === 'g_wasmDebugLastLocalsRecord' ? runtimeExports.Getg_wasmDebugLastLocalsRecord() >>> 0 :
                 0;
             if (symbolAddress === 0 || addressOutAddress + 8 > debuggerHeap.length) {
                 return -1;
@@ -166,6 +179,14 @@ export async function runSmoke() {
         };
         globalThis.CoreClrWasmDebugSendIpcToRuntime = () => -1;
         globalThis.CoreClrWasmDebugSubmitContinueRequest = () => -1;
+        globalThis.CoreClrWasmDebugSubmitAsyncBreakRequest = () => {
+            if (typeof runtimeExports?.CoreClrWasmDebugSetAsyncBreakInProgress !== 'function') {
+                return -1;
+            }
+
+            runtimeExports.CoreClrWasmDebugSetAsyncBreakInProgress(1);
+            return 0;
+        };
         globalThis.CoreClrWasmDebugSubmitStepIntoRequest = () => -1;
         globalThis.CoreClrWasmDebugLookupSourceLocation = () => -1;
         globalThis.coreClrDebugLookupSourceLocation = () => -1;
@@ -208,7 +229,7 @@ export async function runSmoke() {
                 connected = true;
                 const asyncBreakRequestResult = sidecar.module._coreclr_wasm_dbi_dac_dbi_async_break_request();
                 assert(asyncBreakRequestResult === 0, `async-break request facade failed: ${asyncBreakRequestResult}`);
-                asyncBreakFlagSetPrevious = runtimeExports.CoreClrWasmDebugSetAsyncBreakInProgress(1) | 0;
+                asyncBreakFlagSetPrevious = 0;
                 asyncBreakFlagSetCurrent = runtimeExports.CoreClrWasmDebugIsAsyncBreakInProgress() | 0;
             }
         });
@@ -278,6 +299,7 @@ export async function runSmoke() {
         delete globalThis.CoreClrWasmDebugReadTargetMemory;
         delete globalThis.CoreClrWasmDebugSendIpcToRuntime;
         delete globalThis.CoreClrWasmDebugSubmitContinueRequest;
+        delete globalThis.CoreClrWasmDebugSubmitAsyncBreakRequest;
         delete globalThis.CoreClrWasmDebugSubmitStepIntoRequest;
     }
 }

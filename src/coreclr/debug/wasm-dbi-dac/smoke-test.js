@@ -12,7 +12,7 @@ const ExpectedAbiVersion = 1;
 const ExpectedComponentMask = 0xf;
 const ExpectedVersionBlobMagic = 0x42564457;
 const ExpectedVersionBlobSize = 32;
-const ExpectedProtocolBreakingChangeCounter = 13;
+const ExpectedProtocolBreakingChangeCounter = 14;
 const HrIncompatibleProtocol = 0x8013134b | 0;
 const ContractDescriptorMagic = 0x0043414443434e44n;
 const TestDataMagic = 0x43445744;
@@ -469,6 +469,8 @@ async function main() {
             symbolName === "g_wasmDebugBreakpoints" ? runtimeExports.Getg_wasmDebugBreakpoints() >>> 0 :
             symbolName === "g_wasmDebugLastIpcException" ? runtimeExports.Getg_wasmDebugLastIpcException() >>> 0 :
             symbolName === "g_wasmDebugLastIpcExceptionValid" ? runtimeExports.Getg_wasmDebugLastIpcExceptionValid() >>> 0 :
+            symbolName === "g_wasmDebugLastIpcAsyncBreak" ? runtimeExports.Getg_wasmDebugLastIpcAsyncBreak() >>> 0 :
+            symbolName === "g_wasmDebugLastIpcAsyncBreakValid" ? runtimeExports.Getg_wasmDebugLastIpcAsyncBreakValid() >>> 0 :
             symbolName === "g_wasmDebugLastIpcStepComplete" ? runtimeExports.Getg_wasmDebugLastIpcStepComplete() >>> 0 :
             symbolName === "g_wasmDebugLastIpcStepCompleteValid" ? runtimeExports.Getg_wasmDebugLastIpcStepCompleteValid() >>> 0 :
             symbolName === "g_wasmDebugLastIpcModuleLoad" ? runtimeExports.Getg_wasmDebugLastIpcModuleLoad() >>> 0 :
@@ -549,6 +551,14 @@ async function main() {
         } finally {
             runtime.exports.stackRestore(savedRuntimeStack);
         }
+    };
+    hostImports.submit_async_break_request = () => {
+        if (typeof runtimeExports.CoreClrWasmDebugSetAsyncBreakInProgress !== "function") {
+            return -1;
+        }
+
+        runtimeExports.CoreClrWasmDebugSetAsyncBreakInProgress(1);
+        return 0;
     };
     hostImports.submit_step_into_request = (requestBytesAddressArg, requestBytesLengthArg) => {
         const requestBytesAddress = requestBytesAddressArg >>> 0;
@@ -922,7 +932,17 @@ async function main() {
     const asyncBreakAfterSet = runtimeExports.CoreClrWasmDebugIsAsyncBreakInProgress() | 0;
     const asyncBreakPrevOnClear = runtimeExports.CoreClrWasmDebugSetAsyncBreakInProgress(0) | 0;
     const asyncBreakAfterClear = runtimeExports.CoreClrWasmDebugIsAsyncBreakInProgress() | 0;
+    const asyncBreakAckForRequestResult = debuggerModule._coreclr_wasm_dbi_dac_acknowledge_protocol(
+        ExpectedVersionBlobMagic, ExpectedAbiVersion, ExpectedProtocolBreakingChangeCounter) | 0;
+    const asyncBreakSessionCreateResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_session_create() | 0;
+    const asyncBreakSessionConnectResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_connect_runtime(1) | 0;
     const asyncBreakRequestAfterAckResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_async_break_request() | 0;
+    const asyncBreakAfterSidecarRequest = runtimeExports.CoreClrWasmDebugIsAsyncBreakInProgress() | 0;
+    const asyncBreakPrevOnClearAfterSidecarRequest = runtimeExports.CoreClrWasmDebugSetAsyncBreakInProgress(0) | 0;
+    const asyncBreakAfterSidecarClear = runtimeExports.CoreClrWasmDebugIsAsyncBreakInProgress() | 0;
+    const asyncBreakDisconnectResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_disconnect_runtime() | 0;
+    const asyncBreakSessionDestroyResult = debuggerModule._coreclr_wasm_dbi_dac_dbi_session_destroy() | 0;
+    runtimeExports.CoreClrWasmDebugSetAsyncBreakInProgress(0);
 
     // Path A-lite slice 4 link probe: the exported runtime wrapper calls into
     // interpreterstephelper.cpp, proving that source is present in the live
@@ -1491,12 +1511,20 @@ async function main() {
         },
         asyncBreakFacade: {
             requestBeforeAck: asyncBreakRequestBeforeAckResult,
+            ackForRequest: asyncBreakAckForRequestResult,
+            sessionCreate: asyncBreakSessionCreateResult,
+            sessionConnect: asyncBreakSessionConnectResult,
             requestAfterAck: asyncBreakRequestAfterAckResult,
             initial: asyncBreakInitial,
             prevOnSet: asyncBreakPrevOnSet,
             afterSet: asyncBreakAfterSet,
             prevOnClear: asyncBreakPrevOnClear,
-            afterClear: asyncBreakAfterClear
+            afterClear: asyncBreakAfterClear,
+            afterSidecarRequest: asyncBreakAfterSidecarRequest,
+            prevOnClearAfterSidecarRequest: asyncBreakPrevOnClearAfterSidecarRequest,
+            afterSidecarClear: asyncBreakAfterSidecarClear,
+            disconnect: asyncBreakDisconnectResult,
+            sessionDestroy: asyncBreakSessionDestroyResult
         },
         interpreterStepHelperProbe: {
             size: interpreterStepHelperProbeSize
@@ -1530,7 +1558,7 @@ async function main() {
         checkProtocolBadMagicResult !== HrIncompatibleProtocol ||
         checkProtocolBadAbiResult !== HrIncompatibleProtocol ||
         checkProtocolBadCounterResult !== HrIncompatibleProtocol ||
-        asyncBreakRequestBeforeAckResult !== 0 ||
+        asyncBreakRequestBeforeAckResult !== HrIncompatibleProtocol ||
         sessionCreateBeforeAckResult !== HrIncompatibleProtocol ||
         sessionDestroyBeforeAckResult !== 0 ||
         ackBadMagicResult !== HrIncompatibleProtocol ||
@@ -1645,7 +1673,15 @@ async function main() {
         asyncBreakAfterSet !== 1 ||
         asyncBreakPrevOnClear !== 1 ||
         asyncBreakAfterClear !== 0 ||
+        asyncBreakAckForRequestResult !== 0 ||
+        asyncBreakSessionCreateResult !== 0 ||
+        asyncBreakSessionConnectResult !== 0 ||
         asyncBreakRequestAfterAckResult !== 0 ||
+        asyncBreakAfterSidecarRequest !== 1 ||
+        asyncBreakPrevOnClearAfterSidecarRequest !== 1 ||
+        asyncBreakAfterSidecarClear !== 0 ||
+        asyncBreakDisconnectResult !== 0 ||
+        asyncBreakSessionDestroyResult !== 0 ||
         interpreterStepHelperProbeSize === 0 ||
         dacGlobalsProbeResult !== DacGlobalsProbeSlotCount ||
         !dacGlobalsAllNonZero ||

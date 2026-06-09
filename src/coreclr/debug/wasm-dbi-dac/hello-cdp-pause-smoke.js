@@ -275,8 +275,8 @@ class RawCdpWebSocket {
 }
 
 function buildHelloWorld(repoRoot) {
-    const testDirectory = path.join(repoRoot, "artifacts", "wasm-dbi-dac-smoke", "hello-async-break");
-    const assemblyName = "HelloAsyncBreak";
+    const testDirectory = path.join(repoRoot, "artifacts", "wasm-dbi-dac-smoke", "hello-cdp-pause");
+    const assemblyName = "HelloCdpPause";
     fs.rmSync(testDirectory, { recursive: true, force: true });
     fs.mkdirSync(testDirectory, { recursive: true });
 
@@ -341,7 +341,7 @@ public static class Program
     if (result.status !== 0) {
         process.stdout.write(result.stdout);
         process.stderr.write(result.stderr);
-        fail(`failed to build HelloWorld async-break test app: ${result.status}`);
+        fail(`failed to build HelloWorld CDP pause test app: ${result.status}`);
     }
 
     const outputMatch = [...result.stdout.matchAll(/-> (.*\.dll)$/gm)]
@@ -576,7 +576,7 @@ async function runChild() {
     const runtimeJsPath = path.join(coreclrObjDirectory, "hosts/corerun/corerun.js");
 
     requireFile(runtimeJsPath, "runtime JS wrapper");
-    requireFile(appPath, "async-break test app");
+    requireFile(appPath, "CDP pause test app");
     requireFile(sharedFrameworkPath, "browser-wasm testhost shared framework");
 
     let runtimeExports;
@@ -826,7 +826,7 @@ async function runParent() {
             ticksAfterQuietProbe !== ticksAtQuietStart ||
             state.tickCount <= ticksAfterQuietProbe ||
             state.lastTick !== KeepAliveIterations - 1) {
-            fail(`CDP async-break smoke failed\nRecent child output:\n${state.lines.join("\n")}`);
+            fail(`CDP pause smoke failed\nRecent child output:\n${state.lines.join("\n")}`);
         }
     } finally {
         if (cdp !== undefined) {

@@ -7,7 +7,7 @@ export const CommandRecordSize = 80;
 export const ExpectedLocalTypeTags = [0x08, 0x0a, 0x0d];
 export const ExpectedVersionBlobMagic = 0x42564457;
 export const ExpectedAbiVersion = 1;
-export const ExpectedProtocolBreakingChangeCounter = 13;
+export const ExpectedProtocolBreakingChangeCounter = 14;
 export const IpcModuleLoadSize = 312;
 export const ValueRecordSize = 104;
 export const ValueRecordFlagReadFailed = 1;
@@ -249,6 +249,13 @@ function makeSidecarHostImports(getDebuggerHeap) {
             }
 
             return globalThis.CoreClrWasmDebugSubmitContinueRequest(requestBytesAddress >>> 0, requestBytesLength >>> 0) | 0;
+        },
+        submit_async_break_request() {
+            if (typeof globalThis.CoreClrWasmDebugSubmitAsyncBreakRequest !== 'function') {
+                return -1;
+            }
+
+            return globalThis.CoreClrWasmDebugSubmitAsyncBreakRequest() | 0;
         },
         submit_step_into_request(requestBytesAddress, requestBytesLength) {
             if (typeof globalThis.CoreClrWasmDebugSubmitStepIntoRequest !== 'function') {

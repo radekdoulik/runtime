@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>hello-async-break smoke (browser)</title>
+  <title>hello-cdp-pause smoke (browser)</title>
   <style>
     body { font-family: -apple-system, sans-serif; max-width: 1000px; margin: 2em auto; padding: 0 1em; }
     .pass { color: #2a8a4a; } .fail { color: #c43030; }
@@ -11,7 +11,7 @@
   </style>
 </head>
 <body>
-  <h1>hello-async-break smoke (browser)</h1>
+  <h1>hello-cdp-pause smoke (browser)</h1>
   <p>Status: <span id="status">arming DevTools/CDP...</span></p>
   <p>Tick count: <strong id="tick-count" class="counter">0</strong></p>
   <p>
@@ -40,7 +40,7 @@
       clearInterval(countdown);
       try {
         status.textContent = 'loading runtime';
-        const { runSmoke } = await import('./hello-async-break.mjs');
+        const { runSmoke } = await import('./hello-cdp-pause.mjs');
         const result = await runSmoke();
         globalThis.__smokeResult = { passed: true, result };
         status.innerHTML = '<span class="pass">PASS ✓</span>';

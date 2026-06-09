@@ -116,10 +116,16 @@ if(WASM_DBI_DAC_NODE)
     COMMENT "Running WASM DBI/DAC HelloWorld module-load smoke test"
     VERBATIM
   )
-  add_custom_target(coreclr_dbi_dac_wasm_hello_async_break_smoke
-    COMMAND "${WASM_DBI_DAC_NODE}" "${CMAKE_CURRENT_SOURCE_DIR}/hello-async-break-smoke.js" "${CMAKE_BINARY_DIR}"
+  add_custom_target(coreclr_dbi_dac_wasm_hello_cdp_pause_smoke
+    COMMAND "${WASM_DBI_DAC_NODE}" "${CMAKE_CURRENT_SOURCE_DIR}/hello-cdp-pause-smoke.js" "${CMAKE_BINARY_DIR}"
     DEPENDS coreclr_dbi_dac_wasm_tests corerun
-    COMMENT "Running WASM DBI/DAC HelloWorld CDP async-break smoke test"
+    COMMENT "Running WASM DBI/DAC HelloWorld CDP pause smoke test"
+    VERBATIM
+  )
+  add_custom_target(coreclr_dbi_dac_wasm_hello_cooperative_async_break_smoke
+    COMMAND "${WASM_DBI_DAC_NODE}" "${CMAKE_CURRENT_SOURCE_DIR}/hello-cooperative-async-break-smoke.js" "${CMAKE_BINARY_DIR}"
+    DEPENDS coreclr_dbi_dac_wasm_tests corerun
+    COMMENT "Running WASM DBI/DAC HelloWorld cooperative async-break smoke test"
     VERBATIM
   )
 endif()

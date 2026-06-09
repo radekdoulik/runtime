@@ -9,7 +9,7 @@ rem   serve-smokes.cmd [--port=8080] [--skip-prepare]
 rem
 rem After it starts, open in Chrome:
 rem   http://localhost:<port>/hello-breakpoint.html
-rem   http://localhost:<port>/hello-async-break.html
+rem   http://localhost:<port>/hello-cdp-pause.html
 
 setlocal enabledelayedexpansion
 
@@ -47,7 +47,7 @@ echo   serve-smokes.cmd [--port=8080] [--skip-prepare]
 echo.
 echo After it starts, open in Chrome:
 echo   http://localhost:^<port^>/hello-breakpoint.html
-echo   http://localhost:^<port^>/hello-async-break.html
+echo   http://localhost:^<port^>/hello-cdp-pause.html
 exit /b 0
 
 :args_done
@@ -74,7 +74,7 @@ if not exist "%ARTIFACT_DIR%" (
 echo ==^> dotnet serve on port %PORT%
 echo ==^> Open in Chrome:
 echo        http://localhost:%PORT%/hello-breakpoint.html
-echo        http://localhost:%PORT%/hello-async-break.html
+echo        http://localhost:%PORT%/hello-cdp-pause.html
 echo.
 
 dotnet serve -d "%ARTIFACT_DIR%" -p %PORT% -o:/index.html
