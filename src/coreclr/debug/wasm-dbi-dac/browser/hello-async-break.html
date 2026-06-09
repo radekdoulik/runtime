@@ -16,6 +16,25 @@
   <h1>hello-async-break smoke (browser)</h1>
   <p>Status: <span id="status">loading runtime</span></p>
   <p>Tick count: <strong id="tick-count" class="counter">0</strong></p>
+
+  <div id="no-orchestrator-notice" style="display: none; background: #fff5e6; border: 1px solid #c98a32; border-radius: 4px; padding: 1em 1.2em; margin: 0.8em 0; font-size: 0.92em;">
+    <strong style="color: #b0530e;">⚠ No CDP orchestrator detected.</strong>
+    <p style="margin: 0.5em 0;">
+      This page is a passive runtime host. Opened directly in the
+      browser, the busy loop will run from 0 → 120 without any
+      async-break, locals inspection, or pause. To see the full
+      IDE-driven CDP demo (runtime halts mid-loop, DAC reads locals,
+      5-second hold, then resumes) run one of:
+    </p>
+    <ul style="margin: 0.4em 0 0.4em 1.2em; padding: 0;">
+      <li><code>./serve-smokes.sh --async-demo</code> &nbsp;(or <code>./demo-async-break.sh</code>) — single command; launches a separate Chrome with <code>--remote-debugging-port=9222</code> and spawns <code>cdp-driver.mjs</code> (zero-dep Node CDP client) to play the IDE role.</li>
+      <li>Load <code>extension/</code> as an unpacked Chrome extension here, re-open this URL with <code>?wait-for-external-dbi=1</code> appended, and click the extension action icon.</li>
+    </ul>
+    <p style="margin: 0.5em 0 0; color: #5c6473;">
+      The busy loop will start in 3 seconds. Refresh after launching one of the orchestrators above to see the real demo.
+    </p>
+  </div>
+
   <pre id="simulated-pause" style="display: none; background: #fff8ee; border: 1px solid #c98a32; border-radius: 4px; padding: 0.8em 1em; white-space: pre-wrap; font-family: -apple-system-monospace, Menlo, monospace; font-size: 0.88em; line-height: 1.4em; margin: 0.8em 0;"></pre>
   <p>
     Demonstration of the full IDE-driven async-break flow over CDP. The page
@@ -28,7 +47,7 @@
   <p style="color: #5c6473; font-size: 0.85em;">
     Three ways to drive this page:
     <ul style="font-size: 0.92em;">
-      <li><strong>Single-step demo</strong>: run <code>./demo-async-break.sh</code>. It launches Chrome with <code>--remote-debugging-port=9222</code>, opens this page, and spawns <code>cdp-driver.mjs</code> (a small zero-dep Node CDP client) which runs the 8-step IDE/mscordbi orchestration over real CDP. Same pattern as Mono's BrowserDebugProxy, bundled into one command.</li>
+      <li><strong>Single-step demo</strong>: run <code>./serve-smokes.sh --async-demo</code> (or <code>./demo-async-break.sh</code>). It launches Chrome with <code>--remote-debugging-port=9222</code>, opens this page with <code>?wait-for-external-dbi=1</code>, and spawns <code>cdp-driver.mjs</code> (a small zero-dep Node CDP client) which runs the 8-step IDE/mscordbi orchestration over real CDP. Same pattern as Mono's BrowserDebugProxy, bundled into one command.</li>
       <li>Load <code>extension/</code> as an unpacked Chrome extension, open this page with <code>?wait-for-external-dbi=1</code>, click the extension action icon.</li>
       <li>Run the Playwright spec: <code>./run-smokes.sh</code>.</li>
     </ul>
@@ -36,10 +55,24 @@
   </p>
   <pre id="details"></pre>
   <script type="module">
+    // If this URL has no ?wait-for-external-dbi=1 query parameter, no
+    // external CDP orchestrator is going to drive the demo — show the
+    // friendly notice so the user knows what to do. The page still
+    // proceeds to run the bare busy loop after a short delay so they
+    // can see the runtime + sidecar actually load successfully.
+    const hasGate = new URLSearchParams(location.search).get('wait-for-external-dbi') === '1';
+    if (!hasGate) {
+      document.getElementById('no-orchestrator-notice').style.display = 'block';
+      document.getElementById('status').textContent = 'no orchestrator — starting bare busy loop in 3s';
+      await new Promise(r => setTimeout(r, 3000));
+    }
     try {
       const { runSmoke } = await import('./hello-async-break.mjs');
       const result = await runSmoke();
-      document.getElementById('status').innerHTML = '<span class="pass">PASS ✓ loop completed</span>';
+      const passText = hasGate
+        ? 'PASS ✓ loop completed (IDE-driven async-break exercised)'
+        : 'PASS ✓ loop completed (bare run — no async-break was orchestrated; see notice above)';
+      document.getElementById('status').innerHTML = '<span class="pass">' + passText + '</span>';
       document.getElementById('details').textContent = JSON.stringify(result, null, 2);
     } catch (e) {
       const error = e instanceof Error ? `${e.message}\n${e.stack}` : String(e);
