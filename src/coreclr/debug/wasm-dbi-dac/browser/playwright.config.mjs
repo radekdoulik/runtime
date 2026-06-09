@@ -6,7 +6,7 @@ export default {
   testDir: './tests',
   use: { headless: true, baseURL: 'http://localhost:8080' },
   webServer: {
-    command: 'dotnet serve -d ../../../../../artifacts/wasm-dbi-dac-browser-smoke -p 8080 -h "Cross-Origin-Embedder-Policy: require-corp" -h "Cross-Origin-Opener-Policy: same-origin"',
+    command: 'dotnet serve -d ../../../../../artifacts/wasm-dbi-dac-browser-smoke -p 8080',
     url: 'http://localhost:8080/',
     reuseExistingServer: !process.env.CI,
     timeout: 120000

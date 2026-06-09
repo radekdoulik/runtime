@@ -8,37 +8,55 @@ Prerequisite if you do not already have `dotnet serve`:
 dotnet tool install -g dotnet-serve
 ```
 
+### Manual (Chrome)
+
 ```bash
 cd src/coreclr/debug/wasm-dbi-dac/browser
-node prepare.mjs
-dotnet serve -d ../../../../../artifacts/wasm-dbi-dac-browser-smoke -p 8080 \
-    -h "Cross-Origin-Embedder-Policy: require-corp" \
-    -h "Cross-Origin-Opener-Policy: same-origin"
+./serve-smokes.sh                # macOS/Linux
+serve-smokes.cmd                 # Windows
 ```
 
-Open `http://localhost:8080/hello-breakpoint.html` or `http://localhost:8080/hello-async-break.html` in Chrome. Each page runs its smoke and renders PASS/FAIL plus the structured assertion details.
+The script runs `prepare.mjs` then `dotnet serve` on port 8080. Open in Chrome:
+- `http://localhost:8080/hello-breakpoint.html`
+- `http://localhost:8080/hello-async-break.html`
+
+### Automated (Playwright)
+
+```bash
+cd src/coreclr/debug/wasm-dbi-dac/browser
+./run-smokes.sh                  # macOS/Linux — headless Chromium
+run-smokes.cmd                   # Windows — headless Chromium
+```
+
+The first run installs `@playwright/test` + Chromium under `node_modules/` (skipped on subsequent runs).
+
+Flags:
+- `--headed` — visible Chromium window (useful for debugging)
+- `--smoke=<name>` — run a single smoke (e.g. `--smoke=hello-async-break`)
+- `--skip-prepare` — skip the `prepare.mjs` step if artifacts are already staged
 
 ## Manual Chrome
+
+The `serve-smokes.sh` / `serve-smokes.cmd` script handles the build + serve steps above; the long-form below is the manual equivalent if you prefer to run each command yourself.
 
 1. Build the wasm artifacts if needed: `cd ../../../../../artifacts/obj/coreclr/browser.wasm.Debug && ninja coreclr_dbi_dac_wasm corerun`.
 2. `cd src/coreclr/debug/wasm-dbi-dac/browser`.
 3. Run `node prepare.mjs`.
-4. Run `dotnet serve -d ../../../../../artifacts/wasm-dbi-dac-browser-smoke -p 8080 -h "Cross-Origin-Embedder-Policy: require-corp" -h "Cross-Origin-Opener-Policy: same-origin"`.
+4. Run `dotnet serve -d ../../../../../artifacts/wasm-dbi-dac-browser-smoke -p 8080`.
 5. Open `http://localhost:8080/hello-breakpoint.html` in Chrome.
 6. Optional: open DevTools after the page passes and inspect `window.__smokeResult` in the console. If DevTools pauses on the runtime `debugger;` stop trigger, resume once to let the smoke finish.
 
 ### hello-async-break
 
-1. Build the wasm artifacts if needed: `cd ../../../../../artifacts/obj/coreclr/browser.wasm.Debug && ninja coreclr_dbi_dac_wasm corerun`.
-2. `cd src/coreclr/debug/wasm-dbi-dac/browser`.
-3. Run `node prepare.mjs`.
-4. Run `dotnet serve -d ../../../../../artifacts/wasm-dbi-dac-browser-smoke -p 8080 -h "Cross-Origin-Embedder-Policy: require-corp" -h "Cross-Origin-Opener-Policy: same-origin"`.
-5. Open `http://localhost:8080/hello-async-break.html` in Chrome.
-6. Open DevTools immediately (F12 or ⌥⌘I). The page waits briefly before loading WebAssembly so DevTools can send `Debugger.enable` before the wasm modules instantiate.
-7. Press the DevTools **Pause** button, or F8, while the managed `KeepAlive` loop is running. Watch the tick count and runtime console ticks freeze.
-8. Press **Resume** (F8) and watch the loop continue to completion. The page reports PASS when `window.__smokeResult.passed === true`.
+1. Run `./serve-smokes.sh` (or `serve-smokes.cmd`) as above.
+2. Open `http://localhost:8080/hello-async-break.html` in Chrome.
+3. Open DevTools immediately (F12 or ⌥⌘I). The page waits briefly before loading WebAssembly so DevTools can send `Debugger.enable` before the wasm modules instantiate.
+4. Press the DevTools **Pause** button, or F8, while the managed `KeepAlive` loop is running. Watch the tick count and runtime console ticks freeze.
+5. Press **Resume** (F8) and watch the loop continue to completion. The page reports PASS when `window.__smokeResult.passed === true`.
 
 ## Playwright
+
+The `run-smokes.sh` / `run-smokes.cmd` script handles install + invocation; the long-form below is the manual equivalent.
 
 One-time setup from this directory:
 
