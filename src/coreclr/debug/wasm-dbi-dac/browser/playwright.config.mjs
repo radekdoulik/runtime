@@ -2,7 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 export default {
-  timeout: 120000,
+  timeout: 180000,
   testDir: './tests',
   use: { headless: true, baseURL: 'http://localhost:8080' },
   webServer: {

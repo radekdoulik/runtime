@@ -16,13 +16,33 @@
   <h1>hello-async-break smoke (browser)</h1>
   <p>Status: <span id="status">loading runtime</span></p>
   <p>Tick count: <strong id="tick-count" class="counter">0</strong></p>
+  <p id="async-break-info" style="background: #fff5e6; border-left: 4px solid #c98a32; padding: 0.6em 0.8em; min-height: 1.2em; font-family: -apple-system-monospace, Menlo, monospace; font-size: 0.9em;">(no async-break captured yet)</p>
+  <pre id="simulated-pause" style="display: none; background: #fff8ee; border: 1px solid #c98a32; border-radius: 4px; padding: 0.8em 1em; white-space: pre-wrap; font-family: -apple-system-monospace, Menlo, monospace; font-size: 0.88em; line-height: 1.4em; margin: 0.8em 0;"></pre>
   <p>
     This page demonstrates the cooperative IDE async-break path. The page
     itself simulates the mscordbi role — it loads the runtime, starts a busy
     loop, then sends a cooperative <code>async_break_request</code>. The runtime
-    checks the request flag at the next sequence point, halts cleanly, emits a
-    structured DBI event, and waits for the structured continue. No external
-    CDP client is involved.
+    checks the request flag at the next sequence point, halts cleanly, populates
+    a locals schema record, emits a structured DBI event, and yields control
+    via V8's <code>debugger;</code> statement. No external CDP client is
+    required to drain the event — but if one is attached, the runtime
+    really does freeze until the IDE resumes.
+  </p>
+  <p style="color: #5c6473; font-size: 0.85em;">
+    Demo flow with a CDP client attached (Chrome DevTools open, or a Playwright
+    test that called <code>Debugger.enable</code>):
+    <ol style="font-size: 0.92em;">
+      <li>page sends cooperative <code>async_break_request</code> ~800ms into the busy loop</li>
+      <li>runtime halts at next IL sequence point and populates <code>g_wasmDebugLastIpcAsyncBreak</code> + <code>g_wasmDebugLastLocalsRecord</code></li>
+      <li>page-side handler drains the structured event and reads the locals schema via DAC <code>enumerate_locals</code> (real DBI/DAC round-trip)</li>
+      <li>page renders the "Simulating IDE debug pause" panel with the locals it just read</li>
+      <li>handler returns → runtime's <code>libCorerun.js</code> wrapper executes <code>debugger;</code> → V8 freezes the wasm caller</li>
+      <li>IDE inspects state, then issues <code>Debugger.resume</code> after a 5-second hold (simulating a human at the IDE)</li>
+      <li>wrapper returns to wasm → runtime clears the async-break flag → loop runs to completion</li>
+    </ol>
+    With no CDP client attached, <code>debugger;</code> is a no-op and the loop
+    appears to run uninterrupted, but the structured event AND the locals were
+    still drained and rendered to the panel above.
   </p>
   <pre id="details"></pre>
   <script type="module">
@@ -31,7 +51,10 @@
       const result = await runSmoke();
       globalThis.__smokeResult = { passed: true, result };
       document.getElementById('status').innerHTML = '<span class="pass">PASS ✓</span>';
-      document.getElementById('details').textContent = JSON.stringify(result, null, 2);
+      const summary =
+        `// Cooperative async-break landed at tick ${result.tickCountAtAsyncBreak}\n` +
+        `// (loop ran to ${result.finalTickCount} after resume).\n\n`;
+      document.getElementById('details').textContent = summary + JSON.stringify(result, null, 2);
     } catch (e) {
       const error = e instanceof Error ? `${e.message}\n${e.stack}` : String(e);
       globalThis.__smokeResult = { passed: false, error };

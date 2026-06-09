@@ -20,7 +20,7 @@
 extern bool g_wasmDebuggerConnected;
 extern bool g_wasmDebugAsyncBreakInProgress;
 extern "C" void CoreClrWasmDebugMaybePatchInterpreterMethod(MethodDesc* methodDesc, uint32_t ilOffset, int32_t* ip);
-extern "C" void CoreClrWasmDebugAsyncBreakAtSequencePoint(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip);
+extern "C" void CoreClrWasmDebugAsyncBreakAtSequencePoint(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, void* frameAddress);
 extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     MethodDesc* methodDesc,
     uint32_t ilOffset,
@@ -1533,7 +1533,7 @@ SWITCH_OPCODE:
 #if defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
                     if (g_wasmDebuggerConnected && g_wasmDebugAsyncBreakInProgress)
                     {
-                        CoreClrWasmDebugAsyncBreakAtSequencePoint(pFrame->startIp->Method->methodHnd, 0, ip);
+                        CoreClrWasmDebugAsyncBreakAtSequencePoint(pFrame->startIp->Method->methodHnd, 0, ip, pFrame);
                     }
 #endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)
                     ip++;

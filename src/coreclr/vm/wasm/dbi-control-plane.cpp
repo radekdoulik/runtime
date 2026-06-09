@@ -705,7 +705,7 @@ void EmitWasmDebugException(MethodDesc* methodDesc, uint32_t ilOffset, const int
         static_cast<uint32_t>(sizeof(g_wasmDebugLastIpcException)));
 }
 
-void EmitWasmDebugAsyncBreak(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip)
+void EmitWasmDebugAsyncBreak(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, void* frameAddress)
 {
     if (!g_wasmDebuggerConnected || !g_wasmDebugAsyncBreakInProgress || methodDesc == nullptr)
     {
@@ -732,7 +732,15 @@ void EmitWasmDebugAsyncBreak(MethodDesc* methodDesc, uint32_t ilOffset, const in
     g_wasmDebugLastStoppedMethodDesc = methodDesc;
     g_wasmDebugLastStoppedIP = ip;
     g_wasmDebugLastStoppedILOffset = ilOffset;
-    g_wasmDebugLastStoppedFrame = nullptr;
+    g_wasmDebugLastStoppedFrame = reinterpret_cast<InterpMethodContextFrame*>(frameAddress);
+
+    // Populate the locals schema record so the debugger can enumerate
+    // the current frame's IL local slots while the runtime is halted.
+    // The interpreter has the frame in hand at INTOP_DEBUG_SEQ_POINT
+    // and forwards it here; populating the record is cheap and gives
+    // the IDE-side path the same inspection surface that breakpoint
+    // stops already expose.
+    SetWasmDebugBreakpointLocalsRecord(methodDesc, reinterpret_cast<InterpMethodContextFrame*>(frameAddress));
 
     coreClrDebugFireEventToPause(
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_wasmDebugLastIpcAsyncBreak)),
@@ -2147,7 +2155,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugIsAsyncBreakInProgress()
     return g_wasmDebugAsyncBreakInProgress ? 1 : 0;
 }
 
-extern "C" void CoreClrWasmDebugAsyncBreakAtSequencePoint(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip)
+extern "C" void CoreClrWasmDebugAsyncBreakAtSequencePoint(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, void* frameAddress)
 {
     if (!g_wasmDebuggerConnected || !g_wasmDebugAsyncBreakInProgress)
     {
@@ -2157,7 +2165,7 @@ extern "C" void CoreClrWasmDebugAsyncBreakAtSequencePoint(MethodDesc* methodDesc
     // INTOP_DEBUG_SEQ_POINT carries no IL-offset operand today. Keep the
     // event field at the caller-provided value (0 for the current hook) until
     // the interpreter exposes a real sequence-point IL map.
-    EmitWasmDebugAsyncBreak(methodDesc, ilOffset, ip);
+    EmitWasmDebugAsyncBreak(methodDesc, ilOffset, ip, frameAddress);
 }
 
 extern "C" void CoreClrWasmDebugMaybePatchInterpreterMethod(MethodDesc* methodDesc, uint32_t ilOffset, int32_t* ip)

@@ -10,13 +10,14 @@ import {
     loadRuntime,
     loadSidecar,
     pollDbiIpcAsyncBreakComplete,
+    pollDbiLocals,
     readAscii,
     writeUint64
 } from './host.mjs';
 
 const AsyncBreakRequestDelayMs = 800;
 const AsyncBreakTimeoutMs = 30000;
-const CompletionTimeoutMs = 90000;
+const CompletionTimeoutMs = 120000;
 const ExpectedKeepAliveIterations = 120;
 
 async function fetchJson(url) {
@@ -40,6 +41,76 @@ function setTickCount(progress) {
     if (tickCount !== null) {
         tickCount.textContent = String(progress);
     }
+}
+
+function setAsyncBreakInfo(tick, payload) {
+    const target = document.getElementById('async-break-info');
+    if (target === null) {
+        return;
+    }
+    if (payload === null) {
+        target.textContent = `paused at tick ${tick}; payload not yet drained`;
+        return;
+    }
+    target.innerHTML = `<strong>cooperative break captured at tick ${tick}:</strong> ` +
+        `token=0x${payload.asyncBreakToken.toString(16)}, ` +
+        `method=0x${payload.funcMetadataToken.toString(16)}, ` +
+        `ilOffset=${payload.ilOffset}, ` +
+        `interpreterIP=0x${payload.interpreterIP.toString(16)}`;
+}
+
+function describeTypeTag(typeTag) {
+    // CorElementType subset relevant to the interpreter locals we exercise here.
+    // See src/coreclr/inc/corhdr.h: ELEMENT_TYPE_*. Keep the table conservative;
+    // any tag we don't know lands in "raw" which is fine for an inspection demo.
+    switch (typeTag) {
+        case 0x01: return 'void';
+        case 0x02: return 'bool';
+        case 0x03: return 'char';
+        case 0x04: return 'i1';
+        case 0x05: return 'u1';
+        case 0x06: return 'i2';
+        case 0x07: return 'u2';
+        case 0x08: return 'i4';
+        case 0x09: return 'u4';
+        case 0x0a: return 'i8';
+        case 0x0b: return 'u8';
+        case 0x0c: return 'r4';
+        case 0x0d: return 'r8';
+        case 0x0e: return 'string';
+        case 0x12: return 'class';
+        case 0x14: return 'array';
+        case 0x18: return 'i';
+        case 0x19: return 'u';
+        case 0x1c: return 'object';
+        case 0x1d: return 'szarray';
+        default: return `tag(0x${typeTag.toString(16)})`;
+    }
+}
+
+function setSimulatedPausePanel(tick, payload, locals) {
+    const target = document.getElementById('simulated-pause');
+    if (target === null) {
+        return;
+    }
+    const localRows = locals !== null && locals.localCount > 0
+        ? locals.locals
+            .map(l => `  [${l.ilSlot.toString().padStart(2, ' ')}] ${l.name || '(anon)'} : ${describeTypeTag(l.typeTag)}` +
+                ` @stack+${l.byteOffset} size=${l.byteSize}`)
+            .join('\n')
+        : '  (no locals reported)';
+    target.innerHTML =
+        `<strong style="color: #b0530e;">⏸ Simulating IDE debug pause</strong> ` +
+        `<span style="color: #5c6473;">(runtime frozen by V8 via debugger; — resume issued by CDP after 5s)</span>` +
+        `\n\nasync-break payload @ tick ${tick}:` +
+        `\n  asyncBreakToken    = 0x${payload.asyncBreakToken.toString(16)}` +
+        `\n  funcMetadataToken  = 0x${payload.funcMetadataToken.toString(16)}` +
+        `\n  ilOffset           = ${payload.ilOffset}` +
+        `\n  interpreterIP      = 0x${payload.interpreterIP.toString(16)}` +
+        `\n\nlocals schema read from the runtime via DAC enumerate_locals` +
+        ` (method token 0x${(locals?.methodToken ?? 0).toString(16)}, count ${locals?.localCount ?? 0}):` +
+        `\n${localRows}`;
+    target.style.display = 'block';
 }
 
 function sleep(ms) {
@@ -102,6 +173,7 @@ export async function runSmoke() {
     let asyncBreakFireEventToPauseCount = 0;
     let continueDuringCallbackResult = -1;
     let asyncBreakEvent = { pollResult: -1, bytesWritten: 0, payload: null };
+    let localsAtAsyncBreak = { pollResult: -1, bytesWritten: 0, record: null };
     let fireEventToPauseLastEvent = { address: 0, length: 0, headerHex: '' };
     const startedAt = performance.now();
     let completedAt = 0;
@@ -294,13 +366,65 @@ export async function runSmoke() {
                 headerHex: readHex(getRuntimeHeap(), address, Math.min(length, 16))
             };
             if (length !== IpcAsyncBreakSize) {
+                // Not an async-break event (module load, breakpoint, etc.).
+                // Tell the CDP-side spec to auto-resume the upcoming V8
+                // pause emitted by the libCorerun.js wrapper.
+                globalThis.__lastFiredEventKind = 'non-async-break';
                 return 0;
             }
 
             asyncBreakFireEventToPauseCount++;
             tickCountAtAsyncBreak = tickCount;
-            setStatus('async-break event fired');
+            setStatus(`cooperative break at tick ${tickCount} — reading runtime state via DAC`);
             asyncBreakEvent = pollDbiIpcAsyncBreakComplete(sidecar);
+            setAsyncBreakInfo(tickCount, asyncBreakEvent.payload);
+            // Read the current frame's IL locals schema via the DAC.
+            // The runtime populated g_wasmDebugLastLocalsRecord during
+            // EmitWasmDebugAsyncBreak, so this round-trip exercises the
+            // same inspection surface a real IDE would use to populate
+            // its "Locals" pane while halted.
+            try {
+                localsAtAsyncBreak = pollDbiLocals(sidecar);
+            } catch (e) {
+                localsAtAsyncBreak = { pollResult: -1, bytesWritten: 0, record: null, error: String(e) };
+            }
+            setSimulatedPausePanel(tickCount, asyncBreakEvent.payload, localsAtAsyncBreak.record);
+            // Real cooperative async-break demo: yield to the IDE here.
+            //
+            // The cooperative path's contract is "halt the runtime at the
+            // next clean IL sequence point and hand control to the IDE
+            // until it explicitly resumes". Single-threaded wasm cannot
+            // spin-wait while staying responsive — but it can use V8's
+            // own debugger to halt: the libCorerun.js wrapper that V8
+            // calls on our behalf executes a `debugger;` statement
+            // IMMEDIATELY AFTER this user handler returns. With a CDP
+            // client attached (Chrome DevTools open, or a Playwright
+            // test that called `Debugger.enable`), V8 emits
+            // `Debugger.paused` at that statement and freezes the wasm
+            // caller until the client issues `Debugger.resume`. With no
+            // CDP client attached, `debugger;` is a no-op and the
+            // wrapper returns immediately (the loop appears to run
+            // uninterrupted).
+            //
+            // This is exactly the demo: the IDE async-breaks the
+            // runtime via CDP at a clean IL boundary; the cooperative
+            // event tells the IDE WHERE the break landed; the DAC
+            // surfaces the locals schema (and method/IL/IP) the IDE
+            // would render in its Locals/Stack pane; the IDE controls
+            // when to resume.
+            //
+            // We deliberately do NOT add another `debugger;` here —
+            // doing so would create a second pause point that the CDP
+            // client would have to dance around. The libCorerun
+            // wrapper's `debugger;` is the single source of truth.
+            setStatus(`paused at tick ${tickCount} — awaiting IDE resume (CDP)`);
+            console.log(`[smoke] cooperative break at tick ${tickCount}; ` +
+                `read ${localsAtAsyncBreak.record?.localCount ?? 0} locals via DAC; ` +
+                `handler returning — libCorerun debugger; will freeze V8 next`);
+            // Tag the upcoming V8 pause as the cooperative async-break so
+            // the CDP spec can distinguish it from incidental pauses
+            // (module load, etc.) and only apply the 5-second hold here.
+            globalThis.__lastFiredEventKind = 'async-break';
             if (asyncBreakEvent.payload !== null) {
                 continueDuringCallbackResult = sendContinue(sidecar, asyncBreakEvent.payload.asyncBreakToken);
             }
@@ -399,10 +523,19 @@ export async function runSmoke() {
         assert(debuggerConnectedPrevious === 1, `debugger connected flag previous value mismatch: ${debuggerConnectedPrevious}`);
 
         const result = {
-            tickCount,
-            lastTick,
+            // tickCountAtAsyncBreak: the busy-loop tick count CAPTURED at the
+            // moment the cooperative async-break event fired. This is the
+            // value the user wants when asking "where did the break land?".
             tickCountAtAsyncBreak,
+            // finalTickCount / finalLastTick: tick counts read AFTER the
+            // managed loop completed, i.e. AFTER continue resumed the
+            // runtime and the loop ran to its natural end. These are
+            // intentionally named with the "final" prefix so a casual
+            // reader cannot mistake them for "tick at break".
+            finalTickCount: tickCount,
+            finalLastTick: lastTick,
             finalSink,
+            localsAtAsyncBreak,
             elapsedMs: Math.round(completedAt - startedAt),
             asyncBreakRequest: {
                 delayMs: AsyncBreakRequestDelayMs,
