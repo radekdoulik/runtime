@@ -14,7 +14,7 @@ import {
     writeUint64
 } from './host.mjs';
 
-const AsyncBreakRequestDelayMs = 500;
+const AsyncBreakRequestDelayMs = 800;
 const AsyncBreakTimeoutMs = 30000;
 const CompletionTimeoutMs = 90000;
 const ExpectedKeepAliveIterations = 120;
@@ -155,6 +155,19 @@ export async function runSmoke() {
         if (text === 'keepalive-begin') {
             begin = true;
             setStatus('running busy loop');
+            // Schedule the async-break request NOW that the loop has
+            // actually started. Scheduling it earlier (during onInstance)
+            // doesn't work: the wasm runtime's startup blocks the JS
+            // event loop for ~1.5-2s, so a setTimeout queued before
+            // loadRuntime fires only AFTER the loop has already begun
+            // — and the very first sequence point thereafter triggers
+            // the break at tick 0/1, not mid-loop. Anchoring the delay
+            // to keepalive-begin ensures we break around tick (delay /
+            // 10ms-per-tick) ≈ tick 60, which is mid-loop for the
+            // 120-iteration managed program.
+            if (asyncBreakTimer === 0) {
+                asyncBreakTimer = setTimeout(requestAsyncBreak, AsyncBreakRequestDelayMs);
+            }
             return;
         }
 
@@ -326,10 +339,12 @@ export async function runSmoke() {
                 assert(previousConnected === 0, `expected CoreClrWasmDebugSetDebuggerConnected to return 0, got ${previousConnected}`);
                 assert(runtimeExports.CoreClrWasmDebugIsDebuggerConnected() === 1, 'debugger connected flag was not set');
                 debuggerConnected = true;
-                // The async Main enters KeepAlive within roughly one browser turn and
-                // yields every 10 ms. 500 ms gives enough margin for the loop to start
-                // while still requesting the break well before normal completion.
-                asyncBreakTimer = setTimeout(requestAsyncBreak, AsyncBreakRequestDelayMs);
+                // NOTE: the async-break timer is now scheduled when the
+                // 'keepalive-begin' line is observed (see recordRuntimeLine
+                // above), not here, because wasm init blocks JS for ~1.5-2s
+                // and a setTimeout queued here would fire effectively
+                // immediately after the loop begins (tick 0/1 instead of
+                // mid-loop).
             }
         });
 
@@ -371,7 +386,14 @@ export async function runSmoke() {
         assert(end, 'KeepAlive loop did not end');
         assert(final, 'KeepAlive final marker missing');
         assert(tickCount === ExpectedKeepAliveIterations && lastTick === ExpectedKeepAliveIterations - 1, `unexpected tick progress: count=${tickCount} last=${lastTick}`);
-        assert(tickCountAtAsyncBreak > 0 && tickCountAtAsyncBreak < tickCount && tickCountAtAsyncBreak !== 1000, `unexpected async-break progress: ${tickCountAtAsyncBreak}`);
+        // Cooperative async-break should land roughly mid-loop. The
+        // 800ms delay anchored at keepalive-begin (each tick ~13-14ms
+        // due to await Task.Delay(10) yields) puts the break in
+        // [40, 90] for the 120-iteration program. Tightening here
+        // catches accidental regressions (e.g., timer firing at
+        // page-load like before commit 0fb5a7bdaf8 + fed1209a375 era).
+        assert(tickCountAtAsyncBreak > 30 && tickCountAtAsyncBreak < ExpectedKeepAliveIterations - 30,
+            `async-break should land mid-loop, got ${tickCountAtAsyncBreak} of ${tickCount}`);
         assert((runtimeExports.CoreClrWasmDebugIsAsyncBreakInProgress() | 0) === 0, 'async-break flag was not cleared');
         assert(disconnectResult === 0 && sessionDestroyResult === 0, 'disconnect/session destroy failed');
         assert(debuggerConnectedPrevious === 1, `debugger connected flag previous value mismatch: ${debuggerConnectedPrevious}`);
