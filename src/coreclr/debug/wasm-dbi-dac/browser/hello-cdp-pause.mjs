@@ -252,7 +252,7 @@ export async function runSmoke() {
         assert(begin, 'KeepAlive loop did not begin');
         assert(end, 'KeepAlive loop did not end');
         assert(final, 'KeepAlive final marker missing');
-        assert(tickCount === 1000 && lastTick === 999, `unexpected tick progress: count=${tickCount} last=${lastTick}`);
+        assert(tickCount === 100 && lastTick === 99, `unexpected tick progress: count=${tickCount} last=${lastTick}`);
         assert(asyncBreakFlagSetPrevious === 0 && asyncBreakFlagSetCurrent === 1, 'async-break flag was not set');
         assert(asyncBreakFlagClearPrevious === 1 && asyncBreakFlagClearCurrent === 0, 'async-break flag was not cleared');
         assert(disconnectResult === 0 && sessionDestroyResult === 0, 'disconnect/session destroy failed');

@@ -266,8 +266,8 @@ namespace HelloSmoke;
 
 public static class Program
 {
-    private const int Iterations = 1_000;
-    private const int InnerIterations = 5_000;
+    private const int Iterations = 100;
+    private const int InnerIterations = 50_000;
 
     public static int Main()
     {

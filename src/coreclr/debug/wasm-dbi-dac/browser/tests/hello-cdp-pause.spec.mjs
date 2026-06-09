@@ -79,7 +79,7 @@ test('hello-cdp-pause smoke', async ({ page }) => {
   await cdp.send('Debugger.setSkipAllPauses', { skip: false });
   await cdp.send('Runtime.runIfWaitingForDebugger');
 
-  const progressBeforePause = await waitForObservedProgress(100, 60000);
+  const progressBeforePause = await waitForObservedProgress(10, 60000);
   const pauseStart = performance.now();
   const paused = waitForCdpEvent(cdp, 'Debugger.paused', 15000);
   await cdp.send('Debugger.pause');
