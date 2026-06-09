@@ -24,6 +24,10 @@
 
     <ul>
         <li>
+            <a href="hello-async-break.html">hello-async-break</a>
+            <span class="desc">Runs the cooperative IDE async-break path: the page sends <code>async_break_request</code>, the runtime halts at the next safepoint, the sidecar drains the structured DBI event, and the page resumes with structured continue.</span>
+        </li>
+        <li>
             <a href="hello-breakpoint.html">hello-breakpoint</a>
             <span class="desc">Sets a managed breakpoint, validates the structured DBI IPC event drained via DAC <code>ReadVirtual</code>, real <code>InterpMethod</code> locals + values, and PDB source-location mapping.</span>
         </li>

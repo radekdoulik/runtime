@@ -8,6 +8,9 @@ export const ExpectedLocalTypeTags = [0x08, 0x0a, 0x0d];
 export const ExpectedVersionBlobMagic = 0x42564457;
 export const ExpectedAbiVersion = 1;
 export const ExpectedProtocolBreakingChangeCounter = 14;
+export const IpcAsyncBreakMagic = 0x41435049;
+export const IpcAsyncBreakSize = 88;
+export const IpcAsyncBreakType = 0x0107;
 export const IpcModuleLoadSize = 312;
 export const ValueRecordSize = 104;
 export const ValueRecordFlagReadFailed = 1;
@@ -497,6 +500,41 @@ export function pollDbiIpcException(sidecar) {
     sidecar.exports.stackRestore(stack);
 
     return { pollResult, bytesWritten };
+}
+
+export function pollDbiIpcAsyncBreakComplete(sidecar) {
+    const stack = sidecar.exports.stackSave();
+    const eventAddress = sidecar.exports.stackAlloc(IpcAsyncBreakSize);
+    const bytesWrittenAddress = sidecar.exports.stackAlloc(4);
+    const pollResult = sidecar.module._coreclr_wasm_dbi_dac_dbi_poll_ipc_async_break_complete(
+        eventAddress,
+        IpcAsyncBreakSize,
+        bytesWrittenAddress);
+    const bytesWritten = new DataView(sidecar.module.HEAPU8.buffer, bytesWrittenAddress, 4).getUint32(0, true);
+    let payload = null;
+    if (pollResult === 0 && bytesWritten === IpcAsyncBreakSize) {
+        const view = new DataView(sidecar.module.HEAPU8.buffer, eventAddress, IpcAsyncBreakSize);
+        payload = {
+            magic: view.getUint32(0, true),
+            type: view.getUint32(4, true),
+            processId: view.getUint32(8, true),
+            threadId: view.getUint32(12, true),
+            vmAppDomain: view.getBigUint64(16, true),
+            vmThread: view.getBigUint64(24, true),
+            hr: view.getInt32(32, true),
+            flags: view.getUint32(36, true),
+            asyncBreakToken: view.getBigUint64(40, true),
+            funcMetadataToken: view.getUint32(48, true),
+            ilOffset: view.getUint32(52, true),
+            vmAssembly: view.getBigUint64(56, true),
+            interpreterIP: view.getBigUint64(64, true),
+            reserved0: view.getBigUint64(72, true),
+            reserved1: view.getBigUint64(80, true)
+        };
+    }
+    sidecar.exports.stackRestore(stack);
+
+    return { pollResult, bytesWritten, payload };
 }
 
 export function pollDbiIpcStepComplete(sidecar) {

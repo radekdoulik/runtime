@@ -12,14 +12,18 @@ const ObjDir = path.join(RepoRoot, 'artifacts/obj/coreclr/browser.wasm.Debug');
 const ArtifactRoot = path.join(RepoRoot, 'artifacts/wasm-dbi-dac-browser-smoke');
 const BreakpointSmokeName = 'hello-breakpoint';
 const AsyncBreakSmokeName = 'hello-cdp-pause';
+const CooperativeAsyncBreakSmokeName = 'hello-async-break';
 const BreakpointSmokeDir = path.join(ArtifactRoot, BreakpointSmokeName);
 const AsyncBreakSmokeDir = path.join(ArtifactRoot, AsyncBreakSmokeName);
+const CooperativeAsyncBreakSmokeDir = path.join(ArtifactRoot, CooperativeAsyncBreakSmokeName);
 const BreakpointAppSourceDir = path.join(BreakpointSmokeDir, 'src');
 const AsyncBreakAppSourceDir = path.join(AsyncBreakSmokeDir, 'src');
+const CooperativeAsyncBreakAppSourceDir = path.join(CooperativeAsyncBreakSmokeDir, 'src');
 const HelperSourceDir = path.join(BreakpointSmokeDir, 'source-map-helper');
 const SharedFrameworkDir = path.join(RepoRoot, 'artifacts/bin/testhost/net11.0-browser-Debug-wasm/shared/Microsoft.NETCore.App/11.0.0');
 const BreakpointAssemblyName = 'HelloBreakpoint';
 const AsyncBreakAssemblyName = 'HelloCdpPause';
+const CooperativeAsyncBreakAssemblyName = 'HelloAsyncBreak';
 const NetVersion = 'net11.0';
 const SharedFrameworkVirtualPath = '/shared/Microsoft.NETCore.App/11.0.0';
 const SharedFrameworkStagedDir = path.join(ArtifactRoot, 'shared/Microsoft.NETCore.App/11.0.0');
@@ -27,9 +31,11 @@ const StagedBrowserFiles = [
     'index.html',
     `${BreakpointSmokeName}.html`,
     `${AsyncBreakSmokeName}.html`,
+    `${CooperativeAsyncBreakSmokeName}.html`,
     'host.mjs',
     `${BreakpointSmokeName}.mjs`,
-    `${AsyncBreakSmokeName}.mjs`
+    `${AsyncBreakSmokeName}.mjs`,
+    `${CooperativeAsyncBreakSmokeName}.mjs`
 ];
 
 function fail(message) {
@@ -303,6 +309,77 @@ public static class AsyncBreakKeepAlive
     return { projectPath, programPath, changed: projectChanged || programChanged };
 }
 
+function generateHelloCooperativeAsyncBreakProject() {
+    const projectPath = path.join(CooperativeAsyncBreakAppSourceDir, `${CooperativeAsyncBreakAssemblyName}.csproj`);
+    const programPath = path.join(CooperativeAsyncBreakAppSourceDir, 'Program.cs');
+    const project = `<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>${CooperativeAsyncBreakAssemblyName}</AssemblyName>
+    <TargetFramework>${NetVersion}</TargetFramework>
+    <DebugType>portable</DebugType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+</Project>
+`;
+    const program = `// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
+
+namespace HelloSmoke;
+
+public static class Program
+{
+    private const int Iterations = 120;
+    private const int InnerIterations = 1_000;
+    private static volatile int s_sink;
+
+    public static async Task<int> Main()
+    {
+        MethodInfo keepAliveMethod = typeof(Program).GetMethod(nameof(KeepAlive), BindingFlags.Public | BindingFlags.Static)!;
+        AsyncStateMachineAttribute stateMachine = keepAliveMethod.GetCustomAttribute<AsyncStateMachineAttribute>()!;
+        MethodInfo moveNext = stateMachine.StateMachineType.GetMethod("MoveNext", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!;
+        int moveNextILBytes = moveNext.GetMethodBody()?.GetILAsByteArray()?.Length ?? 1;
+        Console.WriteLine($"keepalive-method-token 0x{keepAliveMethod.MetadataToken:x8}");
+        Console.WriteLine($"keepalive-movenext-token 0x{moveNext.MetadataToken:x8}");
+        Console.WriteLine($"keepalive-movenext-il-bytes {moveNextILBytes}");
+        await KeepAlive(Iterations, InnerIterations).ConfigureAwait(false);
+        Console.WriteLine($"keepalive-final {s_sink}");
+        return 0;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.NoOptimization)]
+    public static async Task KeepAlive(int iterations, int innerIterations)
+    {
+        Console.WriteLine("keepalive-begin");
+        int value = 17;
+        for (int i = 0; i < iterations; i++)
+        {
+            for (int j = 0; j < innerIterations; j++)
+            {
+                value = unchecked((value * 1103515245 + 12345) ^ (i + j));
+            }
+
+            s_sink = value;
+            Console.WriteLine($"keepalive-tick {i}");
+            await Task.Delay(10).ConfigureAwait(false);
+        }
+
+        Console.WriteLine("keepalive-end");
+    }
+}
+`;
+
+    const projectChanged = writeIfChanged(projectPath, project);
+    const programChanged = writeIfChanged(programPath, program);
+    return { projectPath, programPath, changed: projectChanged || programChanged };
+}
+
 function generateSourceMapHelper() {
     const projectPath = path.join(HelperSourceDir, 'PdbSourceMapHelper.csproj');
     const programPath = path.join(HelperSourceDir, 'Program.cs');
@@ -456,6 +533,16 @@ function buildHelloCdpPauseApp() {
     return path.join(AsyncBreakSmokeDir, `${AsyncBreakAssemblyName}.dll`);
 }
 
+function buildHelloCooperativeAsyncBreakApp() {
+    const { projectPath, programPath } = generateHelloCooperativeAsyncBreakProject();
+    const outputDir = path.join(RepoRoot, 'artifacts/bin', CooperativeAsyncBreakAssemblyName, 'Debug', NetVersion);
+    const outputDll = path.join(outputDir, `${CooperativeAsyncBreakAssemblyName}.dll`);
+    buildProjectIfNeeded(projectPath, outputDll, [programPath], CooperativeAsyncBreakAssemblyName);
+    copyAppOutputs(outputDir, CooperativeAsyncBreakSmokeDir, CooperativeAsyncBreakAssemblyName);
+
+    return path.join(CooperativeAsyncBreakSmokeDir, `${CooperativeAsyncBreakAssemblyName}.dll`);
+}
+
 function buildSourceMap(assemblyPath) {
     const { projectPath, programPath } = generateSourceMapHelper();
     const helperDll = path.join(RepoRoot, 'artifacts/bin/PdbSourceMapHelper/Debug', NetVersion, 'PdbSourceMapHelper.dll');
@@ -531,6 +618,12 @@ copyWasmArtifacts(AsyncBreakSmokeDir);
 buildHelloCdpPauseApp();
 makeManifest(AsyncBreakSmokeDir, AsyncBreakSmokeName, AsyncBreakAssemblyName);
 
+fs.mkdirSync(CooperativeAsyncBreakSmokeDir, { recursive: true });
+copyWasmArtifacts(CooperativeAsyncBreakSmokeDir);
+buildHelloCooperativeAsyncBreakApp();
+makeManifest(CooperativeAsyncBreakSmokeDir, CooperativeAsyncBreakSmokeName, CooperativeAsyncBreakAssemblyName);
+
 console.log(`prepare: ready: ${BreakpointSmokeDir}`);
 console.log(`prepare: ready: ${AsyncBreakSmokeDir}`);
+console.log(`prepare: ready: ${CooperativeAsyncBreakSmokeDir}`);
 console.log(`prepare: staged browser harness: ${ArtifactRoot}`);

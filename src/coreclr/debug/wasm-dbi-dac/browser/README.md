@@ -16,7 +16,7 @@ cd src/coreclr/debug/wasm-dbi-dac/browser
 serve-smokes.cmd                 # Windows
 ```
 
-The script runs `prepare.mjs`, starts `dotnet serve` on port 8080, and opens `http://localhost:8080/index.html` in your default browser. From the index page pick `hello-breakpoint` or `hello-cdp-pause`.
+The script runs `prepare.mjs`, starts `dotnet serve` on port 8080, and opens `http://localhost:8080/index.html` in your default browser. From the index page pick `hello-async-break`, `hello-breakpoint`, or `hello-cdp-pause`.
 
 ### Automated (Playwright)
 
@@ -44,6 +44,16 @@ The `serve-smokes.sh` / `serve-smokes.cmd` script handles the build + serve step
 5. Open `http://localhost:8080/hello-breakpoint.html` in Chrome.
 6. Optional: open DevTools after the page passes and inspect `window.__smokeResult` in the console. If DevTools pauses on the runtime `debugger;` stop trigger, resume once to let the smoke finish.
 
+### hello-async-break
+
+1. Run `./serve-smokes.sh` (or `serve-smokes.cmd`) as above.
+2. Open `http://localhost:8080/hello-async-break.html` in Chrome.
+3. The page loads the runtime and sidecar, starts the managed `KeepAlive`
+   loop, sends a cooperative `async_break_request`, drains the 88-byte
+   structured async-break-complete event, sends structured continue, and
+   reports PASS. No DevTools or external CDP client is needed; the runtime
+   halts at an interpreter sequence-point safepoint.
+
 ### hello-cdp-pause
 
 1. Run `./serve-smokes.sh` (or `serve-smokes.cmd`) as above.
@@ -52,10 +62,9 @@ The `serve-smokes.sh` / `serve-smokes.cmd` script handles the build + serve step
 4. Press the DevTools **Pause** button, or F8, while the managed `KeepAlive` loop is running. Watch the tick count and runtime console ticks freeze.
 5. Press **Resume** (F8) and watch the loop continue to completion. The page reports PASS when `window.__smokeResult.passed === true`.
 
-The future browser `hello-async-break` smoke is reserved for the
-cooperative IDE async-break path (sidecar request → interpreter safepoint
-→ structured event). This slice only keeps the CDP pause harness under the
-disambiguated `hello-cdp-pause` name.
+`hello-cdp-pause.html` demonstrates the V8 CDP pause path (DevTools F8 or
+Playwright `Debugger.pause`). It is intentionally separate from
+`hello-async-break.html`, which covers the IDE-realistic cooperative path.
 
 ## Playwright
 
@@ -76,6 +85,8 @@ npx playwright test
 
 `playwright.config.mjs` starts `dotnet serve` for the staged artifact directory and drives headless Chromium against the same pages used manually. Run `node prepare.mjs` first when artifacts need to be built or refreshed.
 
+`tests/hello-async-break.spec.mjs` runs the self-contained cooperative smoke and waits for `window.__smokeResult.passed === true`.
+
 `tests/hello-cdp-pause.spec.mjs` attaches a CDP session to the page, sends `Debugger.enable` before the delayed WebAssembly startup, waits for the managed `KeepAlive` loop to make progress, sends `Debugger.pause`, verifies progress stops while paused, sends `Debugger.resume`, and verifies the loop completes.
 
 The staged shared framework is a directory symlink on macOS/Linux to avoid copying hundreds of files. Browser HTML and `.mjs` files are copied because `dotnet serve` serves file symlinks as link files instead of following them.
@@ -86,7 +97,7 @@ The staged shared framework is a directory symlink on macOS/Linux to avoid copyi
 prepare.mjs
   ├─ copies corerun.{js,wasm} and coreclr-dbi-dac.{js,wasm}
   ├─ builds HelloBreakpoint.dll + Portable PDB with dotnet.sh
-  ├─ builds HelloCdpPause.dll with dotnet.sh
+  ├─ builds HelloCdpPause.dll + HelloAsyncBreak.dll with dotnet.sh
   ├─ writes manifest.json + source-location-map.json
   └─ stages HTML, browser modules, and shared-framework symlinks under
      artifacts/wasm-dbi-dac-browser-smoke/
@@ -96,6 +107,13 @@ hello-breakpoint.html
        └─ uses host.mjs to instantiate corerun.wasm and coreclr-dbi-dac.wasm,
           wire the host imports, set BreakHereWithLocals, validate the stop,
           locals, values, source mapping, continue, disconnect, and expose
+          window.__smokeResult.
+
+hello-async-break.html
+  └─ imports hello-async-break.mjs
+       └─ uses host.mjs to instantiate corerun.wasm and coreclr-dbi-dac.wasm,
+          connect a DBI session, request cooperative async-break, drain the
+          structured async-break-complete event, continue, and expose
           window.__smokeResult.
 
 hello-cdp-pause.html
