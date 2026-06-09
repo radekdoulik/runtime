@@ -123,6 +123,12 @@ test('hello-async-break smoke (DBI/CDP orchestration)', async ({ page }) => {
 
   await page.goto('/hello-async-break.html');
 
+  // Declare external DBI control BEFORE the runtime fires its first
+  // event. Otherwise the page's self-DBI fallback will kick in and
+  // do the busy-wait work itself (for manual `serve-smokes.sh`
+  // browsing), which would conflict with our CDP orchestration.
+  await cdpEvaluate(cdp, 'globalThis.__dbiExternal = true');
+
   // Wait until the runtime + sidecar are up, the DBI session is
   // connected, and the page has exposed the __dbi facade.
   await waitFor(
