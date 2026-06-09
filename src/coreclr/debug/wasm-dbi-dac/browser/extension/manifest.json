@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "WASM CoreCLR DBI/DAC demo",
+  "version": "1.0.0",
+  "description": "Demo extension playing the ICorDebug/mscordbi role over CDP for the in-browser CoreCLR wasm runtime + sidecar (DAC). Click the action icon on hello-async-break.html to run the full IDE-driven async-break + locals-inspect demo.",
+  "permissions": ["debugger", "scripting", "tabs"],
+  "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
+  "action": {
+    "default_title": "Run WASM CoreCLR DBI/DAC async-break demo on this tab",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}

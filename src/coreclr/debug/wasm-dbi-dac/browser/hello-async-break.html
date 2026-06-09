@@ -20,24 +20,18 @@
   <p>
     Demonstration of the full IDE-driven async-break flow over CDP. The page
     is a <em>passive</em> runtime host: it loads the CoreCLR runtime + sidecar
-    (mscordbi/DAC), exposes a small <code>globalThis.__dbi</code> facade, and
-    runs a managed busy loop. All orchestration is driven from the
-    IDE/DBI side via CDP <code>Debugger.pause</code> / <code>Debugger.resume</code>
-    plus <code>Runtime.evaluate</code> calls into the facade.
+    (mscordbi/DAC) and exposes a small <code>globalThis.__dbi</code> facade.
+    Orchestration is driven from the IDE/DBI side via CDP
+    <code>Debugger.pause</code> / <code>Debugger.resume</code> plus
+    <code>Runtime.evaluate</code> calls into the facade.
   </p>
   <p style="color: #5c6473; font-size: 0.85em;">
-    Flow when a CDP client is attached (Playwright test, Chrome DevTools, or
-    any ICorDebug-style debugger speaking CDP):
-    <ol style="font-size: 0.92em;">
-      <li>IDE issues CDP <code>Debugger.pause</code> → V8 freezes the wasm runtime thread.</li>
-      <li>DBI writes the runtime's atomic <code>g_wasmDebugAsyncBreakInProgress</code> flag directly into runtime memory (the runtime is frozen so its own setter cannot run; the 1-byte memory write IS the synchronization).</li>
-      <li>IDE issues CDP <code>Debugger.resume</code> → V8 unfreezes the runtime.</li>
-      <li>The runtime continues until the next <code>INTOP_DEBUG_SEQ_POINT</code>, where the interpreter checks the flag, halts cleanly, populates <code>g_wasmDebugLastIpcAsyncBreak</code> + <code>g_wasmDebugLastLocalsRecord</code>, and calls the JS stop trigger. The <code>libCorerun.js</code> wrapper's <code>debugger;</code> halts V8 again.</li>
-      <li>DBI polls the structured event + locals schema via the sidecar DAC (<code>__dbi.pollAsyncBreakEvent</code> / <code>__dbi.pollLocals</code>) — a real DBI/DAC round-trip into the frozen runtime's memory.</li>
-      <li>DBI renders the data in the browser via <code>__dbi.renderPausePanel</code> so the user sees the locals.</li>
-      <li>DBI holds for 5 seconds (simulating a human staring at the debugger UI).</li>
-      <li>IDE issues CDP <code>Debugger.resume</code> → the runtime continues; loop runs to completion.</li>
-    </ol>
+    Two ways to drive this page:
+    <ul style="font-size: 0.92em;">
+      <li>Load <code>extension/</code> as an unpacked Chrome extension, open this page with <code>?wait-for-external-dbi=1</code>, click the extension action icon.</li>
+      <li>Run the Playwright spec: <code>./run-smokes.sh</code>.</li>
+    </ul>
+    Both run the same 8-step orchestration. See <code>extension/README.md</code>.
   </p>
   <pre id="details"></pre>
   <script type="module">

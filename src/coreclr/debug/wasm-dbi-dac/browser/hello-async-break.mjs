@@ -36,21 +36,6 @@ import {
 
 const ExpectedKeepAliveIterations = 120;
 const CompletionTimeoutMs = 120000;
-// Delay after onInstance before the PAGE itself acts as a stand-in
-// "self-DBI" and writes the async-break flag. This only runs when no
-// external DBI (Playwright/CDP) has signalled it is in control by
-// setting `globalThis.__dbiExternal = true` before this delay elapses.
-// Manual `serve-smokes.sh` browsing therefore gets a working demo
-// without needing DevTools open. 800ms anchors the break around
-// tick ~50 of the 120-iteration KeepAlive loop (each iteration is
-// ~14ms wall-clock due to `await Task.Delay(10)` overhead).
-const SelfDbiAutoTriggerDelayMs = 800;
-// Length of the visible "IDE looking at the debugger UI" hold the
-// page-side handler applies in self-DBI mode. Implemented as a
-// synchronous busy-wait inside the JS callback that the runtime is
-// currently parked on; for single-threaded wasm this genuinely
-// freezes the runtime until the busy-wait completes.
-const SelfDbiSimulatedHoldMs = 5000;
 
 function setStatus(text) {
     const status = document.getElementById('status');
@@ -98,19 +83,6 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Synchronous busy-wait. Used in self-DBI mode inside the
-// coreClrDebugFireEventToPause callback to genuinely freeze the wasm
-// runtime for SelfDbiSimulatedHoldMs. The wasm thread is the JS
-// thread on single-threaded builds, so spinning here is exactly what
-// keeps the managed busy loop from advancing — that IS the visible
-// "pause" the user sees when running manually without CDP attached.
-function busyWaitSync(ms) {
-    const deadline = performance.now() + ms;
-    while (performance.now() < deadline) {
-        // intentional empty body
-    }
-}
-
 function withTimeout(promise, description, timeoutMs) {
     return Promise.race([
         promise,
@@ -142,7 +114,6 @@ export async function runSmoke() {
     let connected = false;
     let debuggerConnected = false;
     let asyncBreakFlagAddress = 0;
-    let selfDbiArmed = false;
     let fireEventToPauseCount = 0;
     let asyncBreakFireEventToPauseCount = 0;
     let begin = false;
@@ -192,30 +163,6 @@ export async function runSmoke() {
         if (text === 'keepalive-begin') {
             begin = true;
             setStatus('running busy loop — DBI may async-break at any time');
-            // Self-DBI auto-trigger: anchored to keepalive-begin so the
-            // request lands mid-loop regardless of how long wasm init
-            // blocked the JS thread. Skipped if an external DBI
-            // (Playwright/CDP) declared control via __dbiExternal.
-            if (globalThis.__dbiExternal !== true && !selfDbiArmed) {
-                selfDbiArmed = true;
-                setTimeout(() => {
-                    if (globalThis.__dbiExternal === true) {
-                        console.log('[smoke] external DBI is in control; skipping self-DBI auto-trigger');
-                        return;
-                    }
-                    if (asyncBreakFlagAddress === 0) {
-                        console.warn('[smoke] self-DBI: flag address not yet resolved');
-                        return;
-                    }
-                    const flag = getRuntimeHeap()[asyncBreakFlagAddress] | 0;
-                    if (flag !== 0) {
-                        console.log('[smoke] async-break flag already set; skipping self-DBI auto-trigger');
-                        return;
-                    }
-                    console.log(`[smoke] self-DBI: writing async-break flag at tick ${tickCount}`);
-                    getRuntimeHeap()[asyncBreakFlagAddress] = 1;
-                }, SelfDbiAutoTriggerDelayMs);
-            }
             return;
         }
 
@@ -245,6 +192,38 @@ export async function runSmoke() {
 
     try {
         const manifest = await fetchJson('/hello-async-break/manifest.json');
+
+        // If the URL asks us to wait for an external DBI to arm itself
+        // (Chrome extension installing chrome.debugger.attach +
+        // Debugger.enable BEFORE we touch wasm), block here. The
+        // extension signals readiness by setting
+        // globalThis.__externalDbiReady = true. This guarantees the
+        // CDP debugger is armed before the runtime's libCorerun.js
+        // ever executes its `debugger;` statements, which matters
+        // because some sidecar/runtime debug emit needs the inspector
+        // present from the very first event.
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('wait-for-external-dbi') === '1') {
+            setStatus('waiting for external DBI extension to attach (chrome.debugger + Debugger.enable)');
+            await withTimeout(new Promise(resolve => {
+                if (globalThis.__externalDbiReady === true) {
+                    resolve();
+                    return;
+                }
+                Object.defineProperty(globalThis, '__externalDbiReady', {
+                    configurable: true,
+                    get() { return true; },
+                    set(value) {
+                        if (value === true) {
+                            Object.defineProperty(globalThis, '__externalDbiReady', { value: true, writable: false, configurable: false });
+                            resolve();
+                        }
+                    }
+                });
+            }), 'external DBI attach', 120000);
+            setStatus('external DBI armed; loading sidecar + runtime');
+        }
+
         sidecar = await loadSidecar(manifest.sidecarJsUrl);
 
         // Standard DAC JS imports — runtime memory access for the sidecar.
@@ -303,27 +282,17 @@ export async function runSmoke() {
         globalThis.CoreClrWasmDebugLookupSourceLocation = () => -1;
         globalThis.coreClrDebugLookupSourceLocation = () => -1;
 
-        // Mono-pattern stop trigger. Behaviour depends on whether an
-        // external DBI (Playwright/CDP) is driving:
+        // Mono-pattern stop trigger. The page is passive — all
+        // orchestration (drain event, poll locals via DAC, render
+        // panel, hold, resume) happens on the DBI side, which talks
+        // to this page over CDP. The libCorerun.js wrapper's
+        // `debugger;` halt right after this callback returns is the
+        // single point where V8 hands control to the DBI.
         //
-        //   * External DBI mode (globalThis.__dbiExternal === true):
-        //     The handler does the minimum amount of work — tag the
-        //     upcoming libCorerun.js `debugger;` pause so the DBI's CDP
-        //     filter can distinguish async-break from incidental
-        //     module-load pauses, then return immediately. The DBI is
-        //     responsible for draining the event, polling locals,
-        //     rendering, holding, and resuming via CDP.
-        //
-        //   * Self-DBI mode (default, e.g. `serve-smokes.sh` browsing
-        //     without DevTools): the handler plays the DBI role itself.
-        //     It drains the event, polls locals via the sidecar DAC,
-        //     renders the pause panel, and busy-waits for
-        //     SelfDbiSimulatedHoldMs. The busy-wait synchronously
-        //     freezes the JS thread which on single-threaded wasm IS
-        //     the runtime thread, so the visible counter genuinely
-        //     stops advancing for the hold duration — exactly what the
-        //     user expects to see during an "IDE has paused the
-        //     runtime" demo, even without a CDP client attached.
+        // The only thing this handler does is tag the upcoming pause
+        // so the DBI's CDP filter can distinguish the async-break
+        // halt from incidental libCorerun pauses (module-load events
+        // fire through the same wrapper).
         globalThis.coreClrDebugFireEventToPause = (eventAddress, eventLength) => {
             fireEventToPauseCount++;
             const length = eventLength >>> 0;
@@ -334,39 +303,6 @@ export async function runSmoke() {
             asyncBreakFireEventToPauseCount++;
             globalThis.__lastFiredEventKind = 'async-break';
             globalThis.__tickCountAtAsyncBreak = tickCount;
-            if (globalThis.__dbiExternal === true) {
-                // External DBI is driving — return immediately so the
-                // libCorerun.js wrapper's `debugger;` is reached and the
-                // DBI's CDP session can take over.
-                return 0;
-            }
-
-            // Self-DBI fallback: do the DBI work inline so manual
-            // browsing without CDP still demonstrates the pause.
-            try {
-                const event = pollDbiIpcAsyncBreakComplete(sidecar);
-                const locals = pollDbiLocals(sidecar);
-                const message =
-                    `Simulating IDE debug pause at tick ${tickCount} ` +
-                    `(self-DBI mode — no external CDP client; holding ${SelfDbiSimulatedHoldMs}ms)`;
-                if (typeof globalThis.__dbi?.renderPausePanel === 'function' &&
-                    event.payload !== null &&
-                    locals.record !== null) {
-                    globalThis.__dbi.renderPausePanel(message, event.payload, locals.record);
-                }
-                // Force the browser to flush the DOM mutation before we
-                // freeze the JS thread. Reading offsetHeight forces a
-                // synchronous layout; most engines paint the result
-                // before the next JS task gets the chance to run.
-                void document.body.offsetHeight;
-                console.log(`[smoke] self-DBI: rendered pause panel at tick ${tickCount}; ` +
-                    `holding runtime for ${SelfDbiSimulatedHoldMs}ms via busy-wait`);
-                busyWaitSync(SelfDbiSimulatedHoldMs);
-                console.log(`[smoke] self-DBI: hold complete; runtime will resume`);
-                setStatus(`self-DBI hold complete — runtime resumed`);
-            } catch (e) {
-                console.warn('[smoke] self-DBI handler failed:', e);
-            }
             return 0;
         };
 

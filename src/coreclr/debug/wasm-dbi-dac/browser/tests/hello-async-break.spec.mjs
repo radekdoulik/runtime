@@ -121,13 +121,12 @@ test('hello-async-break smoke (DBI/CDP orchestration)', async ({ page }) => {
     await cdp.send('Debugger.resume').catch(() => {});
   });
 
-  await page.goto('/hello-async-break.html');
-
-  // Declare external DBI control BEFORE the runtime fires its first
-  // event. Otherwise the page's self-DBI fallback will kick in and
-  // do the busy-wait work itself (for manual `serve-smokes.sh`
-  // browsing), which would conflict with our CDP orchestration.
-  await cdpEvaluate(cdp, 'globalThis.__dbiExternal = true');
+  // Use the same wait-for-external-dbi gate the Chrome extension uses
+  // — ensures CDP Debugger.enable runs before the page loads sidecar
+  // or runtime wasm. This is the moment a real ICorDebug session
+  // would attach.
+  await page.goto('/hello-async-break.html?wait-for-external-dbi=1');
+  await cdpEvaluate(cdp, 'globalThis.__externalDbiReady = true');
 
   // Wait until the runtime + sidecar are up, the DBI session is
   // connected, and the page has exposed the __dbi facade.
