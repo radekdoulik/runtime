@@ -162,11 +162,20 @@ if [ "${SERVE_OWNED}" -eq 1 ]; then
     echo "==> dotnet serve on port ${PORT}"
     dotnet serve -d "${ARTIFACT_DIR}" -p "${PORT}" >/tmp/wasm-dbi-dac-demo-serve.log 2>&1 &
     SERVE_PID=$!
-    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-        if curl -fsS "http://localhost:${PORT}/" >/dev/null 2>&1; then break; fi
-        sleep 0.3
+    # Up to ~30s for dotnet serve to come up; first-launch can be slow.
+    SERVE_READY=0
+    for i in $(seq 1 60); do
+        if curl -fsS "http://localhost:${PORT}/" >/dev/null 2>&1; then
+            SERVE_READY=1
+            break
+        fi
+        # bail if the child already exited
+        if ! kill -0 "$SERVE_PID" 2>/dev/null; then
+            break
+        fi
+        sleep 0.5
     done
-    if ! curl -fsS "http://localhost:${PORT}/" >/dev/null 2>&1; then
+    if [ "${SERVE_READY}" -ne 1 ]; then
         echo "Error: dotnet serve did not come up on port ${PORT}" >&2
         cat /tmp/wasm-dbi-dac-demo-serve.log >&2 || true
         exit 1
