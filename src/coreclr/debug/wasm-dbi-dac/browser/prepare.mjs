@@ -10,11 +10,16 @@ const BrowserDir = path.dirname(fileURLToPath(import.meta.url));
 const RepoRoot = path.resolve(BrowserDir, '../../../../..');
 const ObjDir = path.join(RepoRoot, 'artifacts/obj/coreclr/browser.wasm.Debug');
 const ArtifactRoot = path.join(RepoRoot, 'artifacts/wasm-dbi-dac-browser-smoke');
-const SmokeDir = path.join(ArtifactRoot, 'hello-breakpoint');
-const AppSourceDir = path.join(SmokeDir, 'src');
-const HelperSourceDir = path.join(SmokeDir, 'source-map-helper');
+const BreakpointSmokeName = 'hello-breakpoint';
+const AsyncBreakSmokeName = 'hello-async-break';
+const BreakpointSmokeDir = path.join(ArtifactRoot, BreakpointSmokeName);
+const AsyncBreakSmokeDir = path.join(ArtifactRoot, AsyncBreakSmokeName);
+const BreakpointAppSourceDir = path.join(BreakpointSmokeDir, 'src');
+const AsyncBreakAppSourceDir = path.join(AsyncBreakSmokeDir, 'src');
+const HelperSourceDir = path.join(BreakpointSmokeDir, 'source-map-helper');
 const SharedFrameworkDir = path.join(RepoRoot, 'artifacts/bin/testhost/net11.0-browser-Debug-wasm/shared/Microsoft.NETCore.App/11.0.0');
-const AssemblyName = 'HelloBreakpoint';
+const BreakpointAssemblyName = 'HelloBreakpoint';
+const AsyncBreakAssemblyName = 'HelloAsyncBreak';
 const NetVersion = 'net11.0';
 const SharedFrameworkVirtualPath = '/shared/Microsoft.NETCore.App/11.0.0';
 
@@ -77,13 +82,13 @@ function isUpToDate(output, inputs) {
     return inputs.every(input => fs.existsSync(input) && fs.statSync(input).mtimeMs <= outputTime);
 }
 
-function generateHelloProject() {
-    const projectPath = path.join(AppSourceDir, `${AssemblyName}.csproj`);
-    const programPath = path.join(AppSourceDir, 'Program.cs');
+function generateHelloBreakpointProject() {
+    const projectPath = path.join(BreakpointAppSourceDir, `${BreakpointAssemblyName}.csproj`);
+    const programPath = path.join(BreakpointAppSourceDir, 'Program.cs');
     const project = `<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <AssemblyName>${AssemblyName}</AssemblyName>
+    <AssemblyName>${BreakpointAssemblyName}</AssemblyName>
     <TargetFramework>${NetVersion}</TargetFramework>
     <DebugType>portable</DebugType>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -126,6 +131,73 @@ public static class HelloBreakpointTarget
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static void Consume(int localInt, long localLong, double localDouble)
         => Console.WriteLine($"break here {localInt} {localLong} {localDouble}");
+}
+`;
+
+    const projectChanged = writeIfChanged(projectPath, project);
+    const programChanged = writeIfChanged(programPath, program);
+    return { projectPath, programPath, changed: projectChanged || programChanged };
+}
+
+function generateHelloAsyncBreakProject() {
+    const projectPath = path.join(AsyncBreakAppSourceDir, `${AsyncBreakAssemblyName}.csproj`);
+    const programPath = path.join(AsyncBreakAppSourceDir, 'Program.cs');
+    const project = `<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>${AsyncBreakAssemblyName}</AssemblyName>
+    <TargetFramework>${NetVersion}</TargetFramework>
+    <DebugType>portable</DebugType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+</Project>
+`;
+    const program = `// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System;
+using System.Runtime.CompilerServices;
+
+namespace HelloSmoke;
+
+public static class Program
+{
+    private const int Iterations = 1_000;
+    private const int InnerIterations = 5_000;
+
+    public static int Main()
+    {
+        AsyncBreakKeepAlive.KeepAlive(Iterations, InnerIterations);
+        Console.WriteLine($"keepalive-final {AsyncBreakKeepAlive.Sink}");
+        return 0;
+    }
+}
+
+public static class AsyncBreakKeepAlive
+{
+    private static volatile int s_sink;
+
+    public static int Sink => s_sink;
+
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.NoOptimization)]
+    public static void KeepAlive(int iterations, int innerIterations)
+    {
+        Console.WriteLine("keepalive-begin");
+        int value = 17;
+        for (int i = 0; i < iterations; i++)
+        {
+            for (int j = 0; j < innerIterations; j++)
+            {
+                value = unchecked((value * 1103515245 + 12345) ^ (i + j));
+            }
+
+            s_sink = value;
+            Console.WriteLine($"keepalive-tick {i}");
+        }
+
+        Console.WriteLine("keepalive-end");
+    }
 }
 `;
 
@@ -250,27 +322,41 @@ function buildProjectIfNeeded(projectPath, outputDll, inputs, description) {
     requireFile(outputDll, `${description} output`);
 }
 
-function buildHelloApp() {
-    const { projectPath, programPath } = generateHelloProject();
-    const outputDir = path.join(RepoRoot, 'artifacts/bin', AssemblyName, 'Debug', NetVersion);
-    const outputDll = path.join(outputDir, `${AssemblyName}.dll`);
-    buildProjectIfNeeded(projectPath, outputDll, [programPath], AssemblyName);
+function copyAppOutputs(outputDir, smokeDir, assemblyName) {
+    for (const extension of ['dll', 'pdb', 'runtimeconfig.json', 'deps.json']) {
+        const source = path.join(outputDir, `${assemblyName}.${extension}`);
+        if (fs.existsSync(source)) {
+            copyIfNewer(source, path.join(smokeDir, `${assemblyName}.${extension}`));
+        }
+    }
+}
 
-    const pdbPath = path.join(outputDir, `${AssemblyName}.pdb`);
+function buildHelloBreakpointApp() {
+    const { projectPath, programPath } = generateHelloBreakpointProject();
+    const outputDir = path.join(RepoRoot, 'artifacts/bin', BreakpointAssemblyName, 'Debug', NetVersion);
+    const outputDll = path.join(outputDir, `${BreakpointAssemblyName}.dll`);
+    buildProjectIfNeeded(projectPath, outputDll, [programPath], BreakpointAssemblyName);
+
+    const pdbPath = path.join(outputDir, `${BreakpointAssemblyName}.pdb`);
     requireFile(pdbPath, 'HelloBreakpoint portable PDB');
     const pdbSignature = fs.readFileSync(pdbPath).subarray(0, 4).toString('ascii');
     if (pdbSignature !== 'BSJB') {
         fail(`HelloBreakpoint PDB has unexpected signature: ${pdbSignature}`);
     }
 
-    for (const extension of ['dll', 'pdb', 'runtimeconfig.json', 'deps.json']) {
-        const source = path.join(outputDir, `${AssemblyName}.${extension}`);
-        if (fs.existsSync(source)) {
-            copyIfNewer(source, path.join(SmokeDir, `${AssemblyName}.${extension}`));
-        }
-    }
+    copyAppOutputs(outputDir, BreakpointSmokeDir, BreakpointAssemblyName);
 
-    return path.join(SmokeDir, `${AssemblyName}.dll`);
+    return path.join(BreakpointSmokeDir, `${BreakpointAssemblyName}.dll`);
+}
+
+function buildHelloAsyncBreakApp() {
+    const { projectPath, programPath } = generateHelloAsyncBreakProject();
+    const outputDir = path.join(RepoRoot, 'artifacts/bin', AsyncBreakAssemblyName, 'Debug', NetVersion);
+    const outputDll = path.join(outputDir, `${AsyncBreakAssemblyName}.dll`);
+    buildProjectIfNeeded(projectPath, outputDll, [programPath], AsyncBreakAssemblyName);
+    copyAppOutputs(outputDir, AsyncBreakSmokeDir, AsyncBreakAssemblyName);
+
+    return path.join(AsyncBreakSmokeDir, `${AsyncBreakAssemblyName}.dll`);
 }
 
 function buildSourceMap(assemblyPath) {
@@ -278,7 +364,7 @@ function buildSourceMap(assemblyPath) {
     const helperDll = path.join(RepoRoot, 'artifacts/bin/PdbSourceMapHelper/Debug', NetVersion, 'PdbSourceMapHelper.dll');
     buildProjectIfNeeded(projectPath, helperDll, [programPath], 'PDB source-map helper');
 
-    const outputPath = path.join(SmokeDir, 'source-location-map.json');
+    const outputPath = path.join(BreakpointSmokeDir, 'source-location-map.json');
     if (isUpToDate(outputPath, [assemblyPath, helperDll])) {
         return;
     }
@@ -289,12 +375,12 @@ function buildSourceMap(assemblyPath) {
     fs.writeFileSync(outputPath, result.stdout.trimEnd() + '\n');
 }
 
-function copyWasmArtifacts() {
+function copyWasmArtifacts(smokeDir) {
     const files = [
-        [path.join(ObjDir, 'debug/wasm-dbi-dac/coreclr-dbi-dac.js'), path.join(SmokeDir, 'coreclr-dbi-dac.js')],
-        [path.join(ObjDir, 'debug/wasm-dbi-dac/coreclr-dbi-dac.wasm'), path.join(SmokeDir, 'coreclr-dbi-dac.wasm')],
-        [path.join(ObjDir, 'hosts/corerun/corerun.js'), path.join(SmokeDir, 'corerun.js')],
-        [path.join(ObjDir, 'hosts/corerun/corerun.wasm'), path.join(SmokeDir, 'corerun.wasm')]
+        [path.join(ObjDir, 'debug/wasm-dbi-dac/coreclr-dbi-dac.js'), path.join(smokeDir, 'coreclr-dbi-dac.js')],
+        [path.join(ObjDir, 'debug/wasm-dbi-dac/coreclr-dbi-dac.wasm'), path.join(smokeDir, 'coreclr-dbi-dac.wasm')],
+        [path.join(ObjDir, 'hosts/corerun/corerun.js'), path.join(smokeDir, 'corerun.js')],
+        [path.join(ObjDir, 'hosts/corerun/corerun.wasm'), path.join(smokeDir, 'corerun.wasm')]
     ];
 
     for (const [source, destination] of files) {
@@ -304,13 +390,13 @@ function copyWasmArtifacts() {
     }
 }
 
-function makeManifest() {
+function makeManifest(smokeDir, smokeName, assemblyName, sourceMapUrl = null) {
     requireFile(SharedFrameworkDir, 'browser-wasm shared framework');
     const appFiles = ['dll', 'pdb', 'runtimeconfig.json', 'deps.json']
-        .map(extension => `${AssemblyName}.${extension}`)
-        .filter(fileName => fs.existsSync(path.join(SmokeDir, fileName)))
+        .map(extension => `${assemblyName}.${extension}`)
+        .filter(fileName => fs.existsSync(path.join(smokeDir, fileName)))
         .map(fileName => ({
-            url: `/hello-breakpoint/${fileName}`,
+            url: `/${smokeName}/${fileName}`,
             path: `/app/${fileName}`
         }));
     const frameworkFiles = fs.readdirSync(SharedFrameworkDir)
@@ -321,19 +407,29 @@ function makeManifest() {
             path: `${SharedFrameworkVirtualPath}/${fileName}`
         }));
     const manifest = {
-        runtimeJsUrl: '/hello-breakpoint/corerun.js',
-        sidecarJsUrl: '/hello-breakpoint/coreclr-dbi-dac.js',
-        appVirtualPath: `/app/${AssemblyName}.dll`,
+        runtimeJsUrl: `/${smokeName}/corerun.js`,
+        sidecarJsUrl: `/${smokeName}/coreclr-dbi-dac.js`,
+        appVirtualPath: `/app/${assemblyName}.dll`,
         sharedFrameworkVirtualPath: SharedFrameworkVirtualPath,
-        sourceMapUrl: '/hello-breakpoint/source-location-map.json',
         files: [...appFiles, ...frameworkFiles]
     };
-    fs.writeFileSync(path.join(SmokeDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
+    if (sourceMapUrl !== null) {
+        manifest.sourceMapUrl = sourceMapUrl;
+    }
+
+    fs.writeFileSync(path.join(smokeDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
 }
 
-fs.mkdirSync(SmokeDir, { recursive: true });
-copyWasmArtifacts();
-const assemblyPath = buildHelloApp();
-buildSourceMap(assemblyPath);
-makeManifest();
-console.log(`prepare: ready: ${SmokeDir}`);
+fs.mkdirSync(BreakpointSmokeDir, { recursive: true });
+copyWasmArtifacts(BreakpointSmokeDir);
+const breakpointAssemblyPath = buildHelloBreakpointApp();
+buildSourceMap(breakpointAssemblyPath);
+makeManifest(BreakpointSmokeDir, BreakpointSmokeName, BreakpointAssemblyName, `/${BreakpointSmokeName}/source-location-map.json`);
+
+fs.mkdirSync(AsyncBreakSmokeDir, { recursive: true });
+copyWasmArtifacts(AsyncBreakSmokeDir);
+buildHelloAsyncBreakApp();
+makeManifest(AsyncBreakSmokeDir, AsyncBreakSmokeName, AsyncBreakAssemblyName);
+
+console.log(`prepare: ready: ${BreakpointSmokeDir}`);
+console.log(`prepare: ready: ${AsyncBreakSmokeDir}`);

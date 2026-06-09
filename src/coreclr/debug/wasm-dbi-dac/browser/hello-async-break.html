@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>hello-async-break smoke (browser)</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; max-width: 1000px; margin: 2em auto; padding: 0 1em; }
+    .pass { color: #2a8a4a; } .fail { color: #c43030; }
+    .counter { font-size: 1.5em; font-variant-numeric: tabular-nums; }
+    pre { background: #f5f5f5; padding: 1em; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h1>hello-async-break smoke (browser)</h1>
+  <p>Status: <span id="status">arming DevTools/CDP...</span></p>
+  <p>Tick count: <strong id="tick-count" class="counter">0</strong></p>
+  <p>
+    <strong>Manual test</strong>: Open DevTools (F12 or ⌥⌘I), then press the
+    <strong>Pause</strong> button (or F8) while the loop is running. Watch the
+    tick count freeze. Press <strong>Resume</strong> (also F8). Watch the count
+    continue.
+  </p>
+  <p>
+    The page waits briefly before loading WebAssembly so DevTools or Playwright
+    can send <code>Debugger.enable</code> before the wasm modules instantiate.
+  </p>
+  <pre id="details"></pre>
+  <script type="module">
+    globalThis.__smokeProgress = 0;
+    const startDelayMs = Number(new URLSearchParams(location.search).get('startDelayMs') ?? 10000);
+    const status = document.getElementById('status');
+    const details = document.getElementById('details');
+    const startedWaitingAt = performance.now();
+    const countdown = setInterval(() => {
+      const remainingMs = Math.max(0, startDelayMs - (performance.now() - startedWaitingAt));
+      status.textContent = `arming DevTools/CDP (${Math.ceil(remainingMs / 1000)}s)`;
+    }, 100);
+
+    setTimeout(async () => {
+      clearInterval(countdown);
+      try {
+        status.textContent = 'loading runtime';
+        const { runSmoke } = await import('./hello-async-break.mjs');
+        const result = await runSmoke();
+        globalThis.__smokeResult = { passed: true, result };
+        status.innerHTML = '<span class="pass">PASS ✓</span>';
+        details.textContent = JSON.stringify(result, null, 2);
+      } catch (e) {
+        const error = e instanceof Error ? `${e.message}\n${e.stack}` : String(e);
+        globalThis.__smokeResult = { passed: false, error };
+        status.innerHTML = '<span class="fail">FAIL ✗</span>';
+        details.textContent = error;
+      }
+    }, startDelayMs);
+  </script>
+</body>
+</html>

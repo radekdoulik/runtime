@@ -99,4 +99,5 @@ const server = http.createServer((req, res) => {
 
 server.listen(port, '127.0.0.1', () => {
     console.log(`Open http://localhost:${port}/hello-breakpoint.html in Chrome`);
+    console.log(`Open http://localhost:${port}/hello-async-break.html in Chrome`);
 });
