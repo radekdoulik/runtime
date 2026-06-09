@@ -2,10 +2,18 @@
 
 ## Quick start
 
+Prerequisite if you do not already have `dotnet serve`:
+
+```bash
+dotnet tool install -g dotnet-serve
+```
+
 ```bash
 cd src/coreclr/debug/wasm-dbi-dac/browser
 node prepare.mjs
-node serve.mjs
+dotnet serve -d ../../../../../artifacts/wasm-dbi-dac-browser-smoke -p 8080 \
+    -h "Cross-Origin-Embedder-Policy: require-corp" \
+    -h "Cross-Origin-Opener-Policy: same-origin"
 ```
 
 Open `http://localhost:8080/hello-breakpoint.html` or `http://localhost:8080/hello-async-break.html` in Chrome. Each page runs its smoke and renders PASS/FAIL plus the structured assertion details.
@@ -15,7 +23,7 @@ Open `http://localhost:8080/hello-breakpoint.html` or `http://localhost:8080/hel
 1. Build the wasm artifacts if needed: `cd ../../../../../artifacts/obj/coreclr/browser.wasm.Debug && ninja coreclr_dbi_dac_wasm corerun`.
 2. `cd src/coreclr/debug/wasm-dbi-dac/browser`.
 3. Run `node prepare.mjs`.
-4. Run `node serve.mjs --port=8080`.
+4. Run `dotnet serve -d ../../../../../artifacts/wasm-dbi-dac-browser-smoke -p 8080 -h "Cross-Origin-Embedder-Policy: require-corp" -h "Cross-Origin-Opener-Policy: same-origin"`.
 5. Open `http://localhost:8080/hello-breakpoint.html` in Chrome.
 6. Optional: open DevTools after the page passes and inspect `window.__smokeResult` in the console. If DevTools pauses on the runtime `debugger;` stop trigger, resume once to let the smoke finish.
 
@@ -24,7 +32,7 @@ Open `http://localhost:8080/hello-breakpoint.html` or `http://localhost:8080/hel
 1. Build the wasm artifacts if needed: `cd ../../../../../artifacts/obj/coreclr/browser.wasm.Debug && ninja coreclr_dbi_dac_wasm corerun`.
 2. `cd src/coreclr/debug/wasm-dbi-dac/browser`.
 3. Run `node prepare.mjs`.
-4. Run `node serve.mjs --port=8080`.
+4. Run `dotnet serve -d ../../../../../artifacts/wasm-dbi-dac-browser-smoke -p 8080 -h "Cross-Origin-Embedder-Policy: require-corp" -h "Cross-Origin-Opener-Policy: same-origin"`.
 5. Open `http://localhost:8080/hello-async-break.html` in Chrome.
 6. Open DevTools immediately (F12 or ⌥⌘I). The page waits briefly before loading WebAssembly so DevTools can send `Debugger.enable` before the wasm modules instantiate.
 7. Press the DevTools **Pause** button, or F8, while the managed `KeepAlive` loop is running. Watch the tick count and runtime console ticks freeze.
@@ -45,9 +53,11 @@ Run the automated browser smokes:
 npx playwright test
 ```
 
-`playwright.config.mjs` runs `node prepare.mjs`, starts `node serve.mjs --port=8080`, and drives headless Chromium against the same pages used manually.
+`playwright.config.mjs` starts `dotnet serve` for the staged artifact directory and drives headless Chromium against the same pages used manually. Run `node prepare.mjs` first when artifacts need to be built or refreshed.
 
 `tests/hello-async-break.spec.mjs` attaches a CDP session to the page, sends `Debugger.enable` before the delayed WebAssembly startup, waits for the managed `KeepAlive` loop to make progress, sends `Debugger.pause`, verifies progress stops while paused, sends `Debugger.resume`, and verifies the loop completes.
+
+The staged shared framework is a directory symlink on macOS/Linux to avoid copying hundreds of files. Browser HTML and `.mjs` files are copied because `dotnet serve` serves file symlinks as link files instead of following them.
 
 ## Architecture
 
@@ -56,12 +66,9 @@ prepare.mjs
   ├─ copies corerun.{js,wasm} and coreclr-dbi-dac.{js,wasm}
   ├─ builds HelloBreakpoint.dll + Portable PDB with dotnet.sh
   ├─ builds HelloAsyncBreak.dll with dotnet.sh
-  └─ writes manifest.json + source-location-map.json
-
-serve.mjs
-  ├─ serves this browser harness directory
-  ├─ serves artifacts/wasm-dbi-dac-browser-smoke/
-  └─ serves shared-framework DLLs from artifacts/bin/testhost/...
+  ├─ writes manifest.json + source-location-map.json
+  └─ stages HTML, browser modules, and shared-framework symlinks under
+     artifacts/wasm-dbi-dac-browser-smoke/
 
 hello-breakpoint.html
   └─ imports hello-breakpoint.mjs

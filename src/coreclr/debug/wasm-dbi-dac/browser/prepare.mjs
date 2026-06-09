@@ -22,6 +22,14 @@ const BreakpointAssemblyName = 'HelloBreakpoint';
 const AsyncBreakAssemblyName = 'HelloAsyncBreak';
 const NetVersion = 'net11.0';
 const SharedFrameworkVirtualPath = '/shared/Microsoft.NETCore.App/11.0.0';
+const SharedFrameworkStagedDir = path.join(ArtifactRoot, 'shared/Microsoft.NETCore.App/11.0.0');
+const StagedBrowserFiles = [
+    `${BreakpointSmokeName}.html`,
+    `${AsyncBreakSmokeName}.html`,
+    'host.mjs',
+    `${BreakpointSmokeName}.mjs`,
+    `${AsyncBreakSmokeName}.mjs`
+];
 
 function fail(message) {
     throw new Error(message);
@@ -57,6 +65,94 @@ function copyIfNewer(source, destination) {
 
     fs.copyFileSync(source, destination);
     return true;
+}
+
+function removeExistingDestination(destination) {
+    fs.rmSync(destination, { recursive: true, force: true });
+}
+
+function getExistingSymlinkTarget(destination) {
+    try {
+        const linkStat = fs.lstatSync(destination);
+        return linkStat.isSymbolicLink() ? fs.readlinkSync(destination) : null;
+    } catch (error) {
+        if (error.code === 'ENOENT') {
+            return null;
+        }
+
+        throw error;
+    }
+}
+
+function makeRelativeSymlinkTarget(source, destination) {
+    const relative = path.relative(path.dirname(destination), source);
+    return relative.length === 0 ? '.' : relative;
+}
+
+function symlinkIfNeeded(source, destination, type) {
+    const desiredTarget = makeRelativeSymlinkTarget(source, destination);
+    const currentTarget = getExistingSymlinkTarget(destination);
+    if (currentTarget === desiredTarget) {
+        return true;
+    }
+
+    if (currentTarget !== null || fs.existsSync(destination)) {
+        removeExistingDestination(destination);
+    }
+
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.symlinkSync(desiredTarget, destination, type);
+    return true;
+}
+
+function copyDirectoryIfNewer(source, destination) {
+    requireFile(source, 'source directory');
+    let changed = false;
+    fs.mkdirSync(destination, { recursive: true });
+    for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+        const sourcePath = path.join(source, entry.name);
+        const destinationPath = path.join(destination, entry.name);
+        if (entry.isDirectory()) {
+            changed = copyDirectoryIfNewer(sourcePath, destinationPath) || changed;
+        } else if (entry.isFile()) {
+            changed = copyIfNewer(sourcePath, destinationPath) || changed;
+        }
+    }
+
+    return changed;
+}
+
+function stagePath(source, destination, type) {
+    requireFile(source, type === 'dir' ? 'source directory' : 'source file');
+    if (process.platform !== 'win32') {
+        symlinkIfNeeded(source, destination, type);
+        return;
+    }
+
+    if (type === 'dir') {
+        if (getExistingSymlinkTarget(destination) !== null) {
+            removeExistingDestination(destination);
+        }
+        copyDirectoryIfNewer(source, destination);
+        return;
+    }
+
+    copyIfNewer(source, destination);
+}
+
+function stageFileCopy(source, destination) {
+    if (getExistingSymlinkTarget(destination) !== null) {
+        removeExistingDestination(destination);
+    }
+
+    copyIfNewer(source, destination);
+}
+
+function stageBrowserHarness() {
+    stagePath(SharedFrameworkDir, SharedFrameworkStagedDir, 'dir');
+    for (const fileName of StagedBrowserFiles) {
+        stageFileCopy(path.join(BrowserDir, fileName), path.join(ArtifactRoot, fileName));
+    }
 }
 
 function runDotnet(args, description) {
@@ -420,6 +516,9 @@ function makeManifest(smokeDir, smokeName, assemblyName, sourceMapUrl = null) {
     fs.writeFileSync(path.join(smokeDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
 }
 
+fs.mkdirSync(ArtifactRoot, { recursive: true });
+stageBrowserHarness();
+
 fs.mkdirSync(BreakpointSmokeDir, { recursive: true });
 copyWasmArtifacts(BreakpointSmokeDir);
 const breakpointAssemblyPath = buildHelloBreakpointApp();
@@ -433,3 +532,4 @@ makeManifest(AsyncBreakSmokeDir, AsyncBreakSmokeName, AsyncBreakAssemblyName);
 
 console.log(`prepare: ready: ${BreakpointSmokeDir}`);
 console.log(`prepare: ready: ${AsyncBreakSmokeDir}`);
+console.log(`prepare: staged browser harness: ${ArtifactRoot}`);
