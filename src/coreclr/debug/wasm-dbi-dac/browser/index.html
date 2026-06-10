@@ -50,6 +50,14 @@
             <a href="hello-exception.html">hello-exception</a>
             <span class="desc">Throws and catches a managed exception; validates the structured first-chance exception DBI event (<code>WasmDbgIpcEventException</code>) drained via the sidecar DAC.</span>
         </li>
+        <li>
+            <a href="hello-step-over.html">hello-step-over</a>
+            <span class="desc">Breakpoint + step-over request; validates the structured step-complete DBI event (<code>WasmDbgIpcEventStepComplete</code>) landing at the next statement in the same method, skipping a call.</span>
+        </li>
+        <li>
+            <a href="hello-step-out.html">hello-step-out</a>
+            <span class="desc">Breakpoint + step-out request; validates the step-complete DBI event landing back in the caller method.</span>
+        </li>
     </ul>
 
     <footer>

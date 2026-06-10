@@ -18,6 +18,11 @@ export const IpcExceptionSize = 144;
 export const IpcExceptionMagic = 0x58435049;
 export const IpcExceptionType = 0x0103;
 export const IpcStepCompleteSize = 96;
+export const IpcStepCompleteMagic = 0x54435049;
+export const IpcStepCompleteType = 0x0104;
+export const StepKindInto = 0;
+export const StepKindOver = 1;
+export const StepKindOut = 2;
 export const ValueRecordSize = 104;
 export const ValueRecordFlagReadFailed = 1;
 export const SourceLocationFileCapacity = 256;
@@ -577,8 +582,11 @@ export function pollDbiIpcStepComplete(sidecar) {
             hr: view.getInt32(32, true),
             flags: view.getUint32(36, true),
             stepToken: view.getBigUint64(40, true),
-            funcMetadataToken: view.getUint32(48, true),
-            ilOffset: view.getUint32(52, true)
+            originalStepRequestToken: view.getBigUint64(48, true),
+            funcMetadataToken: view.getUint32(56, true),
+            ilOffset: view.getUint32(60, true),
+            isIL: view.getUint32(72, true),
+            codeStartAddress: view.getBigUint64(88, true)
         };
     }
     sidecar.exports.stackRestore(stack);
@@ -890,6 +898,21 @@ export function installDebuggerImports(ctx) {
 
     globalThis.CoreClrWasmDebugSubmitContinueRequest = forwardRequest('CoreClrWasmDebugSubmitContinueRequest');
     globalThis.CoreClrWasmDebugSubmitStepIntoRequest = forwardRequest('CoreClrWasmDebugSubmitStepIntoRequest');
+    globalThis.CoreClrWasmDebugSendIpcToRuntime = (messageAddress, messageLength) => {
+        const runtimeExports = ctx.runtime();
+        const message = debuggerHeap().slice(messageAddress, messageAddress + messageLength);
+        const stack = runtimeExports.stackSave();
+        try {
+            const runtimeMessageAddress = runtimeExports.stackAlloc(messageLength);
+            runtimeHeap().set(message, runtimeMessageAddress);
+            return messageLength === CommandRecordSize &&
+                new DataView(message.buffer, message.byteOffset, message.byteLength).getUint32(0, true) === CommandRecordMagic
+                ? runtimeExports.CoreClrWasmDebugReceiveCommandRecord(runtimeMessageAddress, messageLength)
+                : runtimeExports.CoreClrWasmDebugReceiveCommand(runtimeMessageAddress, messageLength);
+        } finally {
+            runtimeExports.stackRestore(stack);
+        }
+    };
     globalThis.CoreClrWasmDebugSubmitAsyncBreakRequest = () => {
         const runtimeExports = ctx.runtime();
         if (typeof runtimeExports.CoreClrWasmDebugSetAsyncBreakInProgress !== 'function') {
@@ -921,4 +944,28 @@ export function removeDebuggerImports(extraNames = []) {
     for (const name of names) {
         delete globalThis[name];
     }
+}
+
+// Enumerates the sidecar's active breakpoint slots and returns the
+// active count (used by the step smokes to assert the transient
+// step breakpoint is added on a step request and removed on landing).
+export function enumerateBreakpoints(sidecar) {
+    const recordSize = 8 + (16 * 88);
+    const stack = sidecar.exports.stackSave();
+    const slotsAddress = sidecar.exports.stackAlloc(recordSize);
+    const bytesWrittenAddress = sidecar.exports.stackAlloc(4);
+    const enumerateResult = sidecar.module._coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints(
+        slotsAddress, recordSize, bytesWrittenAddress);
+    const view = new DataView(sidecar.module.HEAPU8.buffer, slotsAddress, recordSize);
+    const activeCount = enumerateResult === 0 ? view.getUint32(4, true) : 0;
+    sidecar.exports.stackRestore(stack);
+
+    return { enumerateResult, activeCount };
+}
+
+export function sendStepRequest(sidecar, breakpointToken, stepKind) {
+    return sidecar.module._coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request(
+        Number(breakpointToken & 0xffffffffn),
+        Number(breakpointToken >> 32n),
+        stepKind) | 0;
 }

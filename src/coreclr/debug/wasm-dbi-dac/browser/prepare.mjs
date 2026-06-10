@@ -38,7 +38,10 @@ const StagedBrowserFiles = [
     `${CooperativeAsyncBreakSmokeName}.mjs`,
     // Simple smokes ported from the Node harness (see SimpleSmokes below).
     'hello-module-load.html', 'hello-module-load.mjs',
-    'hello-exception.html', 'hello-exception.mjs'
+    'hello-exception.html', 'hello-exception.mjs',
+    'step-complete-smoke.mjs',
+    'hello-step-over.html', 'hello-step-over.mjs',
+    'hello-step-out.html', 'hello-step-out.mjs'
 ];
 
 function fail(message) {
@@ -723,7 +726,7 @@ public static class HelloExceptionTarget
 }
 `;
 
-const StepProgram = `// Licensed to the .NET Foundation under one or more agreements.
+const StepIntoProgram = `// Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
@@ -736,30 +739,86 @@ public static class Program
     public static void Main()
     {
         Console.WriteLine("before");
-        HelloStepTarget.BreakHereWithLocals();
+        HelloBreakpointTarget.BreakHere();
         Console.WriteLine("after");
     }
 }
 
-public static class HelloStepTarget
+public static class HelloBreakpointTarget
 {
     [MethodImpl(MethodImplOptions.NoInlining)]
-    public static void BreakHereWithLocals()
+    public static void BreakHere() => Console.WriteLine("break here");
+}
+`;
+
+const StepOverProgram = `// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System;
+using System.Runtime.CompilerServices;
+
+namespace HelloSmoke;
+
+public static class Program
+{
+    public static void Main()
     {
-        int localInt = 42;
-        long localLong = localInt + 1L;
-        double localDouble = localLong + 0.5;
-        Consume(localInt, localLong, localDouble);
+        Console.WriteLine("before");
+        HelloBreakpointTarget.BreakHere();
+        Console.WriteLine("after");
+    }
+}
+
+public static class HelloBreakpointTarget
+{
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static void BreakHere()
+    {
+        SomeOtherMethod();
+        Console.WriteLine("after step over");
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void Consume(int localInt, long localLong, double localDouble)
-        => Console.WriteLine($"break here {localInt} {localLong} {localDouble}");
+    public static void SomeOtherMethod() => Console.WriteLine("inside callee");
+}
+`;
+
+const StepOutProgram = `// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System;
+using System.Runtime.CompilerServices;
+
+namespace HelloSmoke;
+
+public static class Program
+{
+    public static void Main()
+    {
+        Console.WriteLine("before");
+        HelloBreakpointTarget.BreakHereOuter();
+        Console.WriteLine("after");
+    }
+}
+
+public static class HelloBreakpointTarget
+{
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static void BreakHereOuter()
+    {
+        BreakHereInner();
+        Console.WriteLine("after step out");
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static void BreakHereInner() => Console.WriteLine("inside inner");
 }
 `;
 
 prepareSimpleSmoke('hello-module-load', 'HelloModuleLoadBrowser', ModuleLoadProgram);
 prepareSimpleSmoke('hello-exception', 'HelloExceptionBrowser', ExceptionProgram);
+prepareSimpleSmoke('hello-step-over', 'HelloStepOverBrowser', StepOverProgram);
+prepareSimpleSmoke('hello-step-out', 'HelloStepOutBrowser', StepOutProgram);
 
 console.log(`prepare: ready: ${BreakpointSmokeDir}`);
 console.log(`prepare: ready: ${AsyncBreakSmokeDir}`);
