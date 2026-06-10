@@ -35,7 +35,10 @@ const StagedBrowserFiles = [
     'host.mjs',
     `${BreakpointSmokeName}.mjs`,
     `${AsyncBreakSmokeName}.mjs`,
-    `${CooperativeAsyncBreakSmokeName}.mjs`
+    `${CooperativeAsyncBreakSmokeName}.mjs`,
+    // Simple smokes ported from the Node harness (see SimpleSmokes below).
+    'hello-module-load.html', 'hello-module-load.mjs',
+    'hello-exception.html', 'hello-exception.mjs'
 ];
 
 function fail(message) {
@@ -606,7 +609,6 @@ function makeManifest(smokeDir, smokeName, assemblyName, sourceMapUrl = null) {
 
 fs.mkdirSync(ArtifactRoot, { recursive: true });
 stageBrowserHarness();
-
 fs.mkdirSync(BreakpointSmokeDir, { recursive: true });
 copyWasmArtifacts(BreakpointSmokeDir);
 const breakpointAssemblyPath = buildHelloBreakpointApp();
@@ -622,6 +624,142 @@ fs.mkdirSync(CooperativeAsyncBreakSmokeDir, { recursive: true });
 copyWasmArtifacts(CooperativeAsyncBreakSmokeDir);
 buildHelloCooperativeAsyncBreakApp();
 makeManifest(CooperativeAsyncBreakSmokeDir, CooperativeAsyncBreakSmokeName, CooperativeAsyncBreakAssemblyName);
+
+// --- Simple smokes ported from the Node harness ---------------------------
+// Each is a self-contained app plus a passive .mjs/.html harness. They share
+// the generic prepareSimpleSmoke pipeline below: generate csproj + Program.cs,
+// build, stage wasm + app outputs, and write a manifest.
+
+function csproj(assemblyName) {
+    return `<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>${assemblyName}</AssemblyName>
+    <TargetFramework>${NetVersion}</TargetFramework>
+    <DebugType>portable</DebugType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+</Project>
+`;
+}
+
+function prepareSimpleSmoke(smokeName, assemblyName, programSource) {
+    const smokeDir = path.join(ArtifactRoot, smokeName);
+    const appSourceDir = path.join(smokeDir, 'src');
+    const projectPath = path.join(appSourceDir, `${assemblyName}.csproj`);
+    const programPath = path.join(appSourceDir, 'Program.cs');
+    writeIfChanged(projectPath, csproj(assemblyName));
+    writeIfChanged(programPath, programSource);
+
+    const outputDir = path.join(RepoRoot, 'artifacts/bin', assemblyName, 'Debug', NetVersion);
+    const outputDll = path.join(outputDir, `${assemblyName}.dll`);
+    buildProjectIfNeeded(projectPath, outputDll, [programPath], assemblyName);
+
+    fs.mkdirSync(smokeDir, { recursive: true });
+    copyWasmArtifacts(smokeDir);
+    copyAppOutputs(outputDir, smokeDir, assemblyName);
+    makeManifest(smokeDir, smokeName, assemblyName);
+    console.log(`prepare: ready: ${smokeDir}`);
+}
+
+const ModuleLoadProgram = `// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+
+namespace HelloSmoke;
+
+public static class Program
+{
+    public static void Main()
+    {
+        Console.WriteLine("before module load");
+        HelloModuleLoadTarget.BreakHere();
+        Assembly.Load(new AssemblyName("System.Text.Json"));
+        Console.WriteLine("after module load");
+    }
+}
+
+public static class HelloModuleLoadTarget
+{
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static void BreakHere() => Console.WriteLine("module-load smoke");
+}
+`;
+
+const ExceptionProgram = `// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System;
+using System.Runtime.CompilerServices;
+
+namespace HelloSmoke;
+
+public static class Program
+{
+    public static void Main()
+    {
+        Console.WriteLine("before throw");
+        try
+        {
+            HelloExceptionTarget.ThrowHere();
+        }
+        catch (InvalidOperationException ex)
+        {
+            Console.WriteLine($"caught {ex.Message}");
+        }
+
+        Console.WriteLine("after throw");
+    }
+}
+
+public static class HelloExceptionTarget
+{
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static void ThrowHere() => throw new InvalidOperationException("hello-exception");
+}
+`;
+
+const StepProgram = `// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System;
+using System.Runtime.CompilerServices;
+
+namespace HelloSmoke;
+
+public static class Program
+{
+    public static void Main()
+    {
+        Console.WriteLine("before");
+        HelloStepTarget.BreakHereWithLocals();
+        Console.WriteLine("after");
+    }
+}
+
+public static class HelloStepTarget
+{
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static void BreakHereWithLocals()
+    {
+        int localInt = 42;
+        long localLong = localInt + 1L;
+        double localDouble = localLong + 0.5;
+        Consume(localInt, localLong, localDouble);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void Consume(int localInt, long localLong, double localDouble)
+        => Console.WriteLine($"break here {localInt} {localLong} {localDouble}");
+}
+`;
+
+prepareSimpleSmoke('hello-module-load', 'HelloModuleLoadBrowser', ModuleLoadProgram);
+prepareSimpleSmoke('hello-exception', 'HelloExceptionBrowser', ExceptionProgram);
 
 console.log(`prepare: ready: ${BreakpointSmokeDir}`);
 console.log(`prepare: ready: ${AsyncBreakSmokeDir}`);

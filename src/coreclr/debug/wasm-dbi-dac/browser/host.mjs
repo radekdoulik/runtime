@@ -12,6 +12,12 @@ export const IpcAsyncBreakMagic = 0x41435049;
 export const IpcAsyncBreakSize = 88;
 export const IpcAsyncBreakType = 0x0107;
 export const IpcModuleLoadSize = 312;
+export const IpcModuleLoadMagic = 0x4D435049;
+export const IpcModuleLoadType = 0x0105;
+export const IpcExceptionSize = 144;
+export const IpcExceptionMagic = 0x58435049;
+export const IpcExceptionType = 0x0103;
+export const IpcStepCompleteSize = 96;
 export const ValueRecordSize = 104;
 export const ValueRecordFlagReadFailed = 1;
 export const SourceLocationFileCapacity = 256;
@@ -493,13 +499,30 @@ export function pollDbiIpcEvent(sidecar) {
 
 export function pollDbiIpcException(sidecar) {
     const stack = sidecar.exports.stackSave();
-    const eventAddress = sidecar.exports.stackAlloc(144);
+    const eventAddress = sidecar.exports.stackAlloc(IpcExceptionSize);
     const bytesWrittenAddress = sidecar.exports.stackAlloc(4);
-    const pollResult = sidecar.module._coreclr_wasm_dbi_dac_dbi_poll_ipc_exception(eventAddress, 144, bytesWrittenAddress);
+    const pollResult = sidecar.module._coreclr_wasm_dbi_dac_dbi_poll_ipc_exception(eventAddress, IpcExceptionSize, bytesWrittenAddress);
     const bytesWritten = new DataView(sidecar.module.HEAPU8.buffer, bytesWrittenAddress, 4).getUint32(0, true);
+    let payload = null;
+    if (pollResult === 0 && bytesWritten === IpcExceptionSize) {
+        const view = new DataView(sidecar.module.HEAPU8.buffer, eventAddress, IpcExceptionSize);
+        payload = {
+            magic: view.getUint32(0, true),
+            type: view.getUint32(4, true),
+            processId: view.getUint32(8, true),
+            threadId: view.getUint32(12, true),
+            hr: view.getInt32(32, true),
+            flags: view.getUint32(36, true),
+            exceptionToken: view.getBigUint64(40, true),
+            funcMetadataToken: view.getUint32(48, true),
+            ilOffset: view.getUint32(52, true),
+            exceptionAddress: view.getBigUint64(64, true),
+            exceptionTypeName: readNullTerminatedAscii(sidecar.module.HEAPU8, eventAddress + 72, 64)
+        };
+    }
     sidecar.exports.stackRestore(stack);
 
-    return { pollResult, bytesWritten };
+    return { pollResult, bytesWritten, payload };
 }
 
 export function pollDbiIpcAsyncBreakComplete(sidecar) {
@@ -539,13 +562,28 @@ export function pollDbiIpcAsyncBreakComplete(sidecar) {
 
 export function pollDbiIpcStepComplete(sidecar) {
     const stack = sidecar.exports.stackSave();
-    const eventAddress = sidecar.exports.stackAlloc(96);
+    const eventAddress = sidecar.exports.stackAlloc(IpcStepCompleteSize);
     const bytesWrittenAddress = sidecar.exports.stackAlloc(4);
-    const pollResult = sidecar.module._coreclr_wasm_dbi_dac_dbi_poll_ipc_step_complete(eventAddress, 96, bytesWrittenAddress);
+    const pollResult = sidecar.module._coreclr_wasm_dbi_dac_dbi_poll_ipc_step_complete(eventAddress, IpcStepCompleteSize, bytesWrittenAddress);
     const bytesWritten = new DataView(sidecar.module.HEAPU8.buffer, bytesWrittenAddress, 4).getUint32(0, true);
+    let payload = null;
+    if (pollResult === 0 && bytesWritten === IpcStepCompleteSize) {
+        const view = new DataView(sidecar.module.HEAPU8.buffer, eventAddress, IpcStepCompleteSize);
+        payload = {
+            magic: view.getUint32(0, true),
+            type: view.getUint32(4, true),
+            processId: view.getUint32(8, true),
+            threadId: view.getUint32(12, true),
+            hr: view.getInt32(32, true),
+            flags: view.getUint32(36, true),
+            stepToken: view.getBigUint64(40, true),
+            funcMetadataToken: view.getUint32(48, true),
+            ilOffset: view.getUint32(52, true)
+        };
+    }
     sidecar.exports.stackRestore(stack);
 
-    return { pollResult, bytesWritten };
+    return { pollResult, bytesWritten, payload };
 }
 
 export function pollDbiIpcModuleLoad(sidecar) {
@@ -554,9 +592,26 @@ export function pollDbiIpcModuleLoad(sidecar) {
     const bytesWrittenAddress = sidecar.exports.stackAlloc(4);
     const pollResult = sidecar.module._coreclr_wasm_dbi_dac_dbi_poll_ipc_module_load(eventAddress, IpcModuleLoadSize, bytesWrittenAddress);
     const bytesWritten = new DataView(sidecar.module.HEAPU8.buffer, bytesWrittenAddress, 4).getUint32(0, true);
+    let payload = null;
+    if (pollResult === 0 && bytesWritten === IpcModuleLoadSize) {
+        const view = new DataView(sidecar.module.HEAPU8.buffer, eventAddress, IpcModuleLoadSize);
+        payload = {
+            magic: view.getUint32(0, true),
+            type: view.getUint32(4, true),
+            processId: view.getUint32(8, true),
+            threadId: view.getUint32(12, true),
+            vmAssembly: view.getBigUint64(24, true),
+            vmModule: view.getBigUint64(32, true),
+            moduleToken: view.getBigUint64(40, true),
+            flags: view.getUint32(48, true),
+            isDynamic: view.getUint32(52, true),
+            moduleName: readNullTerminatedAscii(sidecar.module.HEAPU8, eventAddress + 56, 128),
+            assemblyPath: readNullTerminatedAscii(sidecar.module.HEAPU8, eventAddress + 184, 128)
+        };
+    }
     sidecar.exports.stackRestore(stack);
 
-    return { pollResult, bytesWritten };
+    return { pollResult, bytesWritten, payload };
 }
 
 function readFrameRecord(memory, address) {
@@ -752,4 +807,118 @@ export async function pollDbiEventUntil(sidecar, predicate, timeoutMs = 5000) {
     }
 
     return { pollResult: -1, event: '', bytesWritten: 0 };
+}
+
+// Installs the stateless DAC/runtime-bridge JS imports that every smoke
+// needs identically (target-memory read, runtime symbol resolution,
+// module-base lookup, and the continue/step/async-break request
+// forwarders). Smoke-specific imports (coreClrDebugFireEventToPause,
+// CoreClrWasmDebugOnBreakpointHit, source-location lookup) are left to
+// each smoke to install.
+//
+// ctx:
+//   runtime()  -> the runtime wasm exports object (lazy; bound in onInstance)
+//   sidecar()  -> the loaded sidecar ({ module, exports })
+export function installDebuggerImports(ctx) {
+    const runtimeHeap = () => new Uint8Array(ctx.runtime().memory.buffer);
+    const debuggerHeap = () => new Uint8Array(ctx.sidecar().exports.memory.buffer);
+
+    globalThis.CoreClrWasmDebugReadTargetMemory = (targetAddress, debuggerAddress, byteCount) => {
+        const rt = runtimeHeap();
+        const dbg = debuggerHeap();
+        if (targetAddress + byteCount > rt.length || debuggerAddress + byteCount > dbg.length) {
+            return -1;
+        }
+        dbg.set(rt.subarray(targetAddress, targetAddress + byteCount), debuggerAddress);
+        return 0;
+    };
+
+    globalThis.CoreClrWasmDebugGetSymbolAddress = (baseAddress, symbolNameAddress, symbolNameLength, addressOutAddress) => {
+        const runtimeExports = ctx.runtime();
+        const dbg = debuggerHeap();
+        const symbolName = readAscii(dbg, symbolNameAddress, symbolNameLength);
+        const symbolAddress =
+            symbolName === 'DotNetRuntimeContractDescriptor' ? runtimeExports.GetDotNetRuntimeContractDescriptor() >>> 0 :
+            symbolName === 'g_dacTable' ? runtimeExports.Getg_dacTable() >>> 0 :
+            symbolName === 'WasmDbiDacTestData' ? runtimeExports.GetWasmDbiDacTestData() >>> 0 :
+            symbolName === 'g_wasmDebugLastIpcEvent' ? runtimeExports.Getg_wasmDebugLastIpcEvent() >>> 0 :
+            symbolName === 'g_wasmDebugLastIpcEventValid' ? runtimeExports.Getg_wasmDebugLastIpcEventValid() >>> 0 :
+            symbolName === 'g_wasmDebugLastIpcException' ? runtimeExports.Getg_wasmDebugLastIpcException() >>> 0 :
+            symbolName === 'g_wasmDebugLastIpcExceptionValid' ? runtimeExports.Getg_wasmDebugLastIpcExceptionValid() >>> 0 :
+            symbolName === 'g_wasmDebugLastIpcAsyncBreak' ? runtimeExports.Getg_wasmDebugLastIpcAsyncBreak() >>> 0 :
+            symbolName === 'g_wasmDebugLastIpcAsyncBreakValid' ? runtimeExports.Getg_wasmDebugLastIpcAsyncBreakValid() >>> 0 :
+            symbolName === 'g_wasmDebugLastIpcStepComplete' ? runtimeExports.Getg_wasmDebugLastIpcStepComplete() >>> 0 :
+            symbolName === 'g_wasmDebugLastIpcStepCompleteValid' ? runtimeExports.Getg_wasmDebugLastIpcStepCompleteValid() >>> 0 :
+            symbolName === 'g_wasmDebugLastIpcModuleLoad' ? runtimeExports.Getg_wasmDebugLastIpcModuleLoad() >>> 0 :
+            symbolName === 'g_wasmDebugLastIpcModuleLoadValid' ? runtimeExports.Getg_wasmDebugLastIpcModuleLoadValid() >>> 0 :
+            symbolName === 'g_wasmDebugBreakpoints' ? runtimeExports.Getg_wasmDebugBreakpoints() >>> 0 :
+            symbolName === 'g_wasmDebugLastLocalsRecord' ? runtimeExports.Getg_wasmDebugLastLocalsRecord() >>> 0 :
+            0;
+        if (symbolAddress === 0 || addressOutAddress + 8 > dbg.length) {
+            return -1;
+        }
+        writeUint64(dbg, addressOutAddress, symbolAddress);
+        return 0;
+    };
+
+    globalThis.CoreClrWasmDebugGetTargetModuleBase = (imageNameAddress, imageNameCharCount, addressOutAddress) => {
+        const dbg = debuggerHeap();
+        if (addressOutAddress + 8 > dbg.length) {
+            return -1;
+        }
+        writeUint64(dbg, addressOutAddress, 1);
+        return 0;
+    };
+
+    const forwardRequest = (runtimeFn) => (requestBytesAddress, requestBytesLength) => {
+        const runtimeExports = ctx.runtime();
+        const dbg = debuggerHeap();
+        if (requestBytesAddress + requestBytesLength > dbg.length ||
+            typeof runtimeExports[runtimeFn] !== 'function') {
+            return -1;
+        }
+        const requestBytes = dbg.slice(requestBytesAddress, requestBytesAddress + requestBytesLength);
+        const savedStack = runtimeExports.stackSave();
+        try {
+            const runtimeRequestAddress = runtimeExports.stackAlloc(requestBytesLength);
+            runtimeHeap().set(requestBytes, runtimeRequestAddress);
+            return runtimeExports[runtimeFn](runtimeRequestAddress, requestBytesLength) | 0;
+        } finally {
+            runtimeExports.stackRestore(savedStack);
+        }
+    };
+
+    globalThis.CoreClrWasmDebugSubmitContinueRequest = forwardRequest('CoreClrWasmDebugSubmitContinueRequest');
+    globalThis.CoreClrWasmDebugSubmitStepIntoRequest = forwardRequest('CoreClrWasmDebugSubmitStepIntoRequest');
+    globalThis.CoreClrWasmDebugSubmitAsyncBreakRequest = () => {
+        const runtimeExports = ctx.runtime();
+        if (typeof runtimeExports.CoreClrWasmDebugSetAsyncBreakInProgress !== 'function') {
+            return -1;
+        }
+        runtimeExports.CoreClrWasmDebugSetAsyncBreakInProgress(1);
+        return 0;
+    };
+}
+
+// Removes the imports installed by installDebuggerImports (plus the
+// smoke-specific ones a caller may also have set). Safe to call in a
+// finally block even if some were never installed.
+export function removeDebuggerImports(extraNames = []) {
+    const names = [
+        'CoreClrWasmDebugReadTargetMemory',
+        'CoreClrWasmDebugGetSymbolAddress',
+        'CoreClrWasmDebugGetTargetModuleBase',
+        'CoreClrWasmDebugSubmitContinueRequest',
+        'CoreClrWasmDebugSubmitStepIntoRequest',
+        'CoreClrWasmDebugSubmitAsyncBreakRequest',
+        'coreClrDebugFireEventToPause',
+        'CoreClrWasmDebugOnBreakpointHit',
+        'CoreClrWasmDebugSendIpcToRuntime',
+        'coreClrDebugLookupSourceLocation',
+        'CoreClrWasmDebugLookupSourceLocation',
+        ...extraNames
+    ];
+    for (const name of names) {
+        delete globalThis[name];
+    }
 }

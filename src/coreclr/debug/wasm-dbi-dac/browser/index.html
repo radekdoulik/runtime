@@ -42,6 +42,14 @@
             <a href="hello-cdp-pause.html">hello-cdp-pause</a>
             <span class="desc">Runs a managed busy loop. Open DevTools (F12) and press <kbd>F8</kbd> to pause mid-loop via CDP <code>Debugger.pause</code>; press <kbd>F8</kbd> again to resume. No JSPI/Asyncify required.</span>
         </li>
+        <li>
+            <a href="hello-module-load.html">hello-module-load</a>
+            <span class="desc">Observes structured module-load DBI events (<code>WasmDbgIpcEventModuleLoad</code>) drained via the sidecar DAC as managed assemblies load.</span>
+        </li>
+        <li>
+            <a href="hello-exception.html">hello-exception</a>
+            <span class="desc">Throws and catches a managed exception; validates the structured first-chance exception DBI event (<code>WasmDbgIpcEventException</code>) drained via the sidecar DAC.</span>
+        </li>
     </ul>
 
     <footer>
