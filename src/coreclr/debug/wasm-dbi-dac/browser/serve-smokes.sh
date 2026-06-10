@@ -2,21 +2,25 @@
 # Licensed to the .NET Foundation under one or more agreements.
 # The .NET Foundation licenses this file to you under the MIT license.
 #
-# serve-smokes.sh — prepare + serve the browser smoke harness for
-# manual exploration. Open index.html to pick a smoke (hello-breakpoint,
-# hello-cdp-pause, hello-async-break).
+# serve-smokes.sh — prepare + serve the browser smoke harness AND
+# launch the IDE-driven async-break demo (chrome --remote-debugging
+# + cdp-driver.mjs orchestrator). All other smokes (hello-breakpoint,
+# hello-cdp-pause) are still available via the same dotnet serve;
+# open index.html in the browser to pick one.
 #
 # Usage:
-#   ./serve-smokes.sh                  # serve all smokes; open index.html in default browser
-#   ./serve-smokes.sh --async-demo     # also run the full IDE-driven async-break demo (delegates to demo-async-break.sh)
-#   ./serve-smokes.sh [--port=8080] [--skip-prepare] [--no-open]
+#   ./serve-smokes.sh                  # serve + run the async demo
+#   ./serve-smokes.sh --just-serve     # serve only; no async demo / no chrome launch
+#   ./serve-smokes.sh [--port=8080] [--skip-prepare] [--cdp-port=9222] [--browser=chrome|edge|chromium] [--keep-profile]
 
 set -euo pipefail
 
 PORT=8080
+CDP_PORT=9222
+BROWSER=""
 SKIP_PREPARE=0
-ASYNC_DEMO=0
-NO_OPEN=0
+JUST_SERVE=0
+KEEP_PROFILE=0
 
 for arg in "$@"; do
     case "$arg" in
@@ -25,11 +29,13 @@ for arg in "$@"; do
             shift
             PORT="$1"
             ;;
+        --cdp-port=*) CDP_PORT="${arg#--cdp-port=}" ;;
+        --browser=*) BROWSER="${arg#--browser=}" ;;
         --skip-prepare) SKIP_PREPARE=1 ;;
-        --async-demo) ASYNC_DEMO=1 ;;
-        --no-open) NO_OPEN=1 ;;
+        --just-serve) JUST_SERVE=1 ;;
+        --keep-profile) KEEP_PROFILE=1 ;;
         -h|--help)
-            sed -n '5,13p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '5,15p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -55,36 +61,30 @@ if [ ! -d "${ARTIFACT_DIR}" ]; then
     exit 1
 fi
 
-# --async-demo: delegate to demo-async-break.sh which handles the full
-# IDE-driven async-break CDP demo (chrome --remote-debugging-port=9222
-# + cdp-driver.mjs). It will detect this serve and reuse it if we are
-# already running one, but in this --async-demo flow we hand control to
-# it entirely (it starts dotnet serve itself).
-if [ "${ASYNC_DEMO}" -eq 1 ]; then
-    echo "==> --async-demo: handing control to demo-async-break.sh"
+# --just-serve: skip the async demo orchestrator, just serve the smokes
+# (the original behaviour). Useful when the user only wants to poke at
+# hello-breakpoint or hello-cdp-pause manually.
+if [ "${JUST_SERVE}" -eq 1 ]; then
+    echo "==> --just-serve: dotnet serve only (no async-demo orchestrator)"
+    echo "==> Open in Chrome:"
+    echo "       http://localhost:${PORT}/index.html"
+    echo "       http://localhost:${PORT}/hello-breakpoint.html"
+    echo "       http://localhost:${PORT}/hello-cdp-pause.html"
+    echo "       http://localhost:${PORT}/hello-async-break.html"
     echo
-    exec ./demo-async-break.sh \
-        --skip-prepare \
-        --port="${PORT}"
+    exec dotnet serve -d "${ARTIFACT_DIR}" -p "${PORT}" -o:/index.html
 fi
 
-OPEN_ARG=""
-if [ "${NO_OPEN}" -eq 0 ]; then
-    OPEN_ARG="-o:/index.html"
-fi
-
-echo "==> dotnet serve on port ${PORT}"
-echo "==> Open in Chrome (index.html will be opened automatically):"
-echo "       http://localhost:${PORT}/hello-breakpoint.html"
-echo "       http://localhost:${PORT}/hello-cdp-pause.html"
-echo "       http://localhost:${PORT}/hello-async-break.html"
+# Default: serve + run the async demo end-to-end. demo-async-break.sh
+# will detect that dotnet serve is already running on this port (the
+# only thing we'd have done first anyway) — but to keep ordering simple
+# we delegate the entire flow to it (it starts dotnet serve itself if
+# none is running, and reuses one if there is).
+echo "==> serving + running IDE-driven async-break demo (use --just-serve to skip the demo)"
 echo
-echo "==> NOTE: hello-async-break.html is a passive runtime host —"
-echo "==>       opening it alone runs the busy loop without any pause"
-echo "==>       or DAC inspection. To see the full IDE-driven async-break"
-echo "==>       + locals demo run one of:"
-echo "==>          ./serve-smokes.sh --async-demo   (single command, restart this script)"
-echo "==>          ./demo-async-break.sh            (in another terminal; reuses this serve)"
-echo "==>          load extension/ as an unpacked Chrome extension; see extension/README.md"
-echo
-exec dotnet serve -d "${ARTIFACT_DIR}" -p "${PORT}" ${OPEN_ARG}
+exec ./demo-async-break.sh \
+    --skip-prepare \
+    --port="${PORT}" \
+    --cdp-port="${CDP_PORT}" \
+    $( [ -n "${BROWSER}" ] && echo "--browser=${BROWSER}" ) \
+    $( [ "${KEEP_PROFILE}" -eq 1 ] && echo "--keep-profile" )

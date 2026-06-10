@@ -27,7 +27,7 @@
       5-second hold, then resumes) run one of:
     </p>
     <ul style="margin: 0.4em 0 0.4em 1.2em; padding: 0;">
-      <li><code>./serve-smokes.sh --async-demo</code> &nbsp;(or <code>./demo-async-break.sh</code>) — single command; launches a separate Chrome with <code>--remote-debugging-port=9222</code> and spawns <code>cdp-driver.mjs</code> (zero-dep Node CDP client) to play the IDE role.</li>
+      <li><code>./serve-smokes.sh</code> &nbsp;(or <code>./demo-async-break.sh</code>) — single command; launches a separate Chrome with <code>--remote-debugging-port=9222</code> and spawns <code>cdp-driver.mjs</code> (zero-dep Node CDP client) to play the IDE role.</li>
       <li>Load <code>extension/</code> as an unpacked Chrome extension here, re-open this URL with <code>?wait-for-external-dbi=1</code> appended, and click the extension action icon.</li>
     </ul>
     <p style="margin: 0.5em 0 0; color: #5c6473;">
@@ -47,7 +47,7 @@
   <p style="color: #5c6473; font-size: 0.85em;">
     Three ways to drive this page:
     <ul style="font-size: 0.92em;">
-      <li><strong>Single-step demo</strong>: run <code>./serve-smokes.sh --async-demo</code> (or <code>./demo-async-break.sh</code>). It launches Chrome with <code>--remote-debugging-port=9222</code>, opens this page with <code>?wait-for-external-dbi=1</code>, and spawns <code>cdp-driver.mjs</code> (a small zero-dep Node CDP client) which runs the 8-step IDE/mscordbi orchestration over real CDP. Same pattern as Mono's BrowserDebugProxy, bundled into one command.</li>
+      <li><strong>Single-step demo</strong>: run <code>./serve-smokes.sh</code> (or <code>./demo-async-break.sh</code>). It launches Chrome with <code>--remote-debugging-port=9222</code>, opens this page with <code>?wait-for-external-dbi=1</code>, and spawns <code>cdp-driver.mjs</code> (a small zero-dep Node CDP client) which runs the 8-step IDE/mscordbi orchestration over real CDP. Same pattern as Mono's BrowserDebugProxy, bundled into one command.</li>
       <li>Load <code>extension/</code> as an unpacked Chrome extension, open this page with <code>?wait-for-external-dbi=1</code>, click the extension action icon.</li>
       <li>Run the Playwright spec: <code>./run-smokes.sh</code>.</li>
     </ul>
