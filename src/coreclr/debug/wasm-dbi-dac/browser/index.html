@@ -51,6 +51,14 @@
             <span class="desc">Throws and catches a managed exception; validates the structured first-chance exception DBI event (<code>WasmDbgIpcEventException</code>) drained via the sidecar DAC.</span>
         </li>
         <li>
+            <a href="hello-step.html">hello-step (step-into)</a>
+            <span class="desc">Breakpoint + step-into request; the step landing is reported as a second breakpoint-hit event at a later interpreter offset.</span>
+        </li>
+        <li>
+            <a href="hello-step-into-call.html">hello-step-into-call</a>
+            <span class="desc">Step-into a call (entering the callee, reported as a step-complete at method-enter), then step-out back to the caller. Exercises both breakpoint and step-complete DBI events.</span>
+        </li>
+        <li>
             <a href="hello-step-over.html">hello-step-over</a>
             <span class="desc">Breakpoint + step-over request; validates the structured step-complete DBI event (<code>WasmDbgIpcEventStepComplete</code>) landing at the next statement in the same method, skipping a call.</span>
         </li>

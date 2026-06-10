@@ -40,6 +40,8 @@ const StagedBrowserFiles = [
     'hello-module-load.html', 'hello-module-load.mjs',
     'hello-exception.html', 'hello-exception.mjs',
     'step-complete-smoke.mjs',
+    'hello-step.html', 'hello-step.mjs',
+    'hello-step-into-call.html', 'hello-step-into-call.mjs',
     'hello-step-over.html', 'hello-step-over.mjs',
     'hello-step-out.html', 'hello-step-out.mjs'
 ];
@@ -815,8 +817,41 @@ public static class HelloBreakpointTarget
 }
 `;
 
+const StepIntoCallProgram = `// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System;
+using System.Runtime.CompilerServices;
+
+namespace HelloSmoke;
+
+public static class Program
+{
+    public static void Main()
+    {
+        Console.WriteLine("before");
+        HelloBreakpointTarget.BreakHere();
+        Console.WriteLine("after");
+    }
+}
+
+public static class HelloBreakpointTarget
+{
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static void BreakHere()
+    {
+        StepIntoTarget();
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static void StepIntoTarget() => Console.WriteLine("step target");
+}
+`;
+
 prepareSimpleSmoke('hello-module-load', 'HelloModuleLoadBrowser', ModuleLoadProgram);
 prepareSimpleSmoke('hello-exception', 'HelloExceptionBrowser', ExceptionProgram);
+prepareSimpleSmoke('hello-step', 'HelloStepBrowser', StepIntoProgram);
+prepareSimpleSmoke('hello-step-into-call', 'HelloStepIntoCallBrowser', StepIntoCallProgram);
 prepareSimpleSmoke('hello-step-over', 'HelloStepOverBrowser', StepOverProgram);
 prepareSimpleSmoke('hello-step-out', 'HelloStepOutBrowser', StepOutProgram);
 

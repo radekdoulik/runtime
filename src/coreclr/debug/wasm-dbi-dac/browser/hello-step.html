@@ -1,0 +1,40 @@
+<!doctype html>
+<!-- Licensed to the .NET Foundation under one or more agreements. -->
+<!-- The .NET Foundation licenses this file to you under the MIT license. -->
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>hello-step smoke (browser)</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; max-width: 1000px; margin: 2em auto; padding: 0 1em; }
+    .pass { color: #2a8a4a; } .fail { color: #c43030; }
+    pre { background: #f5f5f5; padding: 1em; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h1>hello-step (step-into) smoke (browser)</h1>
+  <p>Status: <span id="status">running...</span></p>
+  <p>
+    Sets a managed breakpoint at <code>BreakHere</code>; on the first hit
+    issues a step-into request. The step landing is reported as a second
+    breakpoint-hit event. The harness forwards the runtime event + record +
+    frame-record to the sidecar and drains the structured breakpoint IPC
+    payload for both events, asserting the step advanced to a later
+    interpreter offset.
+  </p>
+  <pre id="details"></pre>
+  <script type="module">
+    try {
+      const { runSmoke } = await import('./hello-step.mjs');
+      const result = await runSmoke();
+      document.getElementById('status').innerHTML = '<span class="pass">PASS ✓</span>';
+      document.getElementById('details').textContent = JSON.stringify(result, null, 2);
+    } catch (e) {
+      const error = e instanceof Error ? `${e.message}\n${e.stack}` : String(e);
+      globalThis.__smokeResult = { passed: false, error };
+      document.getElementById('status').innerHTML = '<span class="fail">FAIL ✗</span>';
+      document.getElementById('details').textContent = error;
+    }
+  </script>
+</body>
+</html>
