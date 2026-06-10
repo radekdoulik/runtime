@@ -2,15 +2,15 @@
 # Licensed to the .NET Foundation under one or more agreements.
 # The .NET Foundation licenses this file to you under the MIT license.
 #
-# serve-smokes.sh — prepare + serve the browser smoke harness AND
-# launch the IDE-driven async-break demo (chrome --remote-debugging
-# + cdp-driver.mjs orchestrator). All other smokes (hello-breakpoint,
-# hello-cdp-pause) are still available via the same dotnet serve;
-# open index.html in the browser to pick one.
+# serve-smokes.sh — prepare + serve the browser smoke harness, launch
+# Chrome with --remote-debugging-port=9222 on the smoke index, and
+# start the cdp-driver in watch mode so the async-break demo runs
+# automatically when the user clicks the hello-async-break link in
+# the index.
 #
 # Usage:
-#   ./serve-smokes.sh                  # serve + run the async demo
-#   ./serve-smokes.sh --just-serve     # serve only; no async demo / no chrome launch
+#   ./serve-smokes.sh                  # serve + chrome + watcher (default)
+#   ./serve-smokes.sh --just-serve     # serve only; no chrome launch; no watcher
 #   ./serve-smokes.sh [--port=8080] [--skip-prepare] [--cdp-port=9222] [--browser=chrome|edge|chromium] [--keep-profile]
 
 set -euo pipefail
@@ -61,30 +61,176 @@ if [ ! -d "${ARTIFACT_DIR}" ]; then
     exit 1
 fi
 
-# --just-serve: skip the async demo orchestrator, just serve the smokes
-# (the original behaviour). Useful when the user only wants to poke at
-# hello-breakpoint or hello-cdp-pause manually.
 if [ "${JUST_SERVE}" -eq 1 ]; then
-    echo "==> --just-serve: dotnet serve only (no async-demo orchestrator)"
-    echo "==> Open in Chrome:"
+    echo "==> --just-serve: dotnet serve only (no chrome launch / no watcher)"
+    echo "==> Open in any browser:"
     echo "       http://localhost:${PORT}/index.html"
-    echo "       http://localhost:${PORT}/hello-breakpoint.html"
-    echo "       http://localhost:${PORT}/hello-cdp-pause.html"
-    echo "       http://localhost:${PORT}/hello-async-break.html"
     echo
     exec dotnet serve -d "${ARTIFACT_DIR}" -p "${PORT}" -o:/index.html
 fi
 
-# Default: serve + run the async demo end-to-end. demo-async-break.sh
-# will detect that dotnet serve is already running on this port (the
-# only thing we'd have done first anyway) — but to keep ordering simple
-# we delegate the entire flow to it (it starts dotnet serve itself if
-# none is running, and reuses one if there is).
-echo "==> serving + running IDE-driven async-break demo (use --just-serve to skip the demo)"
+# Default mode: serve + chrome + watcher.
+#
+# - dotnet serve in background (terminated on script exit)
+# - chrome with --remote-debugging-port=$CDP_PORT and an isolated
+#   --user-data-dir, opening /index.html (NOT the demo directly)
+# - cdp-driver.mjs --watch in the foreground (blocking). It polls
+#   chrome's /json endpoint for any tab whose URL contains
+#   hello-async-break.html AND ?wait-for-external-dbi=1, then drives
+#   the 8-step demo on that tab. The hello-async-break link in
+#   index.html includes the query param so a single click triggers
+#   the demo.
+#
+# Ctrl-C tears everything down cleanly via the trap.
+
+# --- resolve browser binary (same logic as demo-async-break.sh) ---
+resolve_browser() {
+    local want="$1"
+    local candidates=()
+    case "${want:-auto}" in
+        chrome|google-chrome)
+            candidates=(
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+                "google-chrome" "google-chrome-stable" "chrome"
+            )
+            ;;
+        edge|msedge)
+            candidates=(
+                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+                "msedge" "microsoft-edge"
+            )
+            ;;
+        chromium)
+            candidates=(
+                "/Applications/Chromium.app/Contents/MacOS/Chromium"
+                "chromium" "chromium-browser"
+            )
+            ;;
+        ""|auto)
+            candidates=(
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+                "/Applications/Chromium.app/Contents/MacOS/Chromium"
+                "google-chrome" "google-chrome-stable" "chrome"
+                "msedge" "microsoft-edge"
+                "chromium" "chromium-browser"
+            )
+            ;;
+        *) echo "$want"; return ;;
+    esac
+    for c in "${candidates[@]}"; do
+        if [ -x "$c" ]; then
+            echo "$c"; return
+        fi
+        if command -v "$c" >/dev/null 2>&1; then
+            command -v "$c"; return
+        fi
+    done
+    echo ""
+}
+
+BROWSER_BIN="$(resolve_browser "${BROWSER}")"
+if [ -z "${BROWSER_BIN}" ]; then
+    echo "Error: no Chrome/Edge/Chromium binary found. Use --browser=<path-or-name>." >&2
+    exit 1
+fi
+
+USER_DATA_DIR="$(mktemp -d -t wasm-dbi-dac-demo-XXXXXX)"
+
+cleanup() {
+    local rc=$?
+    set +e
+    if [ -n "${WATCHER_PID:-}" ] && kill -0 "$WATCHER_PID" 2>/dev/null; then
+        echo "==> stopping cdp-driver watcher (PID ${WATCHER_PID})"
+        kill "$WATCHER_PID" 2>/dev/null
+        sleep 0.3
+        kill -9 "$WATCHER_PID" 2>/dev/null
+    fi
+    if [ -n "${BROWSER_PID:-}" ] && kill -0 "$BROWSER_PID" 2>/dev/null; then
+        echo "==> stopping browser (PID ${BROWSER_PID})"
+        kill "$BROWSER_PID" 2>/dev/null
+        sleep 0.3
+        kill -9 "$BROWSER_PID" 2>/dev/null
+    fi
+    if [ -n "${SERVE_PID:-}" ] && kill -0 "$SERVE_PID" 2>/dev/null; then
+        echo "==> stopping dotnet serve (PID ${SERVE_PID})"
+        kill "$SERVE_PID" 2>/dev/null
+        sleep 0.3
+        kill -9 "$SERVE_PID" 2>/dev/null
+    fi
+    if [ "${KEEP_PROFILE}" -eq 0 ] && [ -d "${USER_DATA_DIR}" ]; then
+        rm -rf "${USER_DATA_DIR}"
+    else
+        echo "==> user-data-dir kept at: ${USER_DATA_DIR}"
+    fi
+    exit $rc
+}
+trap cleanup EXIT INT TERM
+
+# Step 1: dotnet serve (or reuse existing one)
+SERVE_OWNED=1
+if curl -fsS "http://localhost:${PORT}/" >/dev/null 2>&1; then
+    echo "==> reusing existing http server on port ${PORT}"
+    SERVE_OWNED=0
+else
+    echo "==> dotnet serve on port ${PORT}"
+    dotnet serve -d "${ARTIFACT_DIR}" -p "${PORT}" >/tmp/wasm-dbi-dac-serve.log 2>&1 &
+    SERVE_PID=$!
+    SERVE_READY=0
+    for i in $(seq 1 60); do
+        if curl -fsS "http://localhost:${PORT}/" >/dev/null 2>&1; then SERVE_READY=1; break; fi
+        if ! kill -0 "$SERVE_PID" 2>/dev/null; then break; fi
+        sleep 0.5
+    done
+    if [ "${SERVE_READY}" -ne 1 ]; then
+        echo "Error: dotnet serve did not come up on port ${PORT}" >&2
+        cat /tmp/wasm-dbi-dac-serve.log >&2 || true
+        exit 1
+    fi
+fi
+
+# Step 2: launch chrome on /index.html with the CDP port open
+INDEX_URL="http://localhost:${PORT}/index.html"
+echo "==> launching browser: ${BROWSER_BIN}"
+echo "==>   --remote-debugging-port=${CDP_PORT}"
+echo "==>   --user-data-dir=${USER_DATA_DIR}"
+echo "==>   URL: ${INDEX_URL}"
+
+"${BROWSER_BIN}" \
+    --remote-debugging-port="${CDP_PORT}" \
+    --user-data-dir="${USER_DATA_DIR}" \
+    --no-first-run \
+    --no-default-browser-check \
+    --new-window \
+    "${INDEX_URL}" \
+    >/tmp/wasm-dbi-dac-browser.log 2>&1 &
+BROWSER_PID=$!
+
+# Wait for CDP endpoint
+echo "==> waiting for CDP endpoint http://localhost:${CDP_PORT}/json/version ..."
+CDP_READY=0
+for i in $(seq 1 60); do
+    if curl -fsS "http://localhost:${CDP_PORT}/json/version" >/dev/null 2>&1; then CDP_READY=1; break; fi
+    sleep 0.5
+done
+if [ "${CDP_READY}" -ne 1 ]; then
+    echo "Error: CDP endpoint did not come up on port ${CDP_PORT}" >&2
+    cat /tmp/wasm-dbi-dac-browser.log >&2 || true
+    exit 1
+fi
+echo "==> CDP endpoint is live"
+
+# Step 3: run cdp-driver in watch mode (foreground). Whenever the user
+# navigates a tab to hello-async-break.html?wait-for-external-dbi=1
+# (e.g. by clicking the link in index.html), the watcher drives the
+# 8-step IDE/mscordbi demo on that tab.
+echo "==> starting cdp-driver.mjs --watch in background"
+echo "==> open the smoke index in the browser window that just opened"
+echo "==> and click 'hello-async-break' to trigger the IDE-driven demo"
+echo "==> (Ctrl-C in this terminal to tear down)"
 echo
-exec ./demo-async-break.sh \
-    --skip-prepare \
-    --port="${PORT}" \
-    --cdp-port="${CDP_PORT}" \
-    $( [ -n "${BROWSER}" ] && echo "--browser=${BROWSER}" ) \
-    $( [ "${KEEP_PROFILE}" -eq 1 ] && echo "--keep-profile" )
+node cdp-driver.mjs --port="${CDP_PORT}" --watch &
+WATCHER_PID=$!
+
+# Block until the user closes the browser or Ctrl-Cs.
+wait "${BROWSER_PID}" 2>/dev/null || true

@@ -24,15 +24,14 @@
 
     <ul>
         <li>
-            <a href="hello-async-break.html">hello-async-break</a>
+            <a href="hello-async-break.html?wait-for-external-dbi=1">hello-async-break</a>
             <span class="desc">
-                The cooperative IDE-driven async-break demo. The page is a passive runtime host;
-                an external CDP driver plays the IDE/mscordbi role. Run with the IDE driver via:
-                <ul style="margin: 0.4em 0 0; padding-left: 1.4em; font-size: 0.95em;">
-                    <li><code>./serve-smokes.sh</code> &nbsp;(or <code>./demo-async-break.sh</code>) — single command; launches Chrome with <code>--remote-debugging-port=9222</code> and runs the 8-step orchestration.</li>
-                    <li>Or load <code>extension/</code> as an unpacked Chrome extension and click its action icon.</li>
-                </ul>
-                Opening the page link directly here will run the busy loop without any async-break — the page will show instructions.
+                The cooperative IDE-driven async-break demo. Clicks the link with
+                <code>?wait-for-external-dbi=1</code> so the page waits for the
+                external CDP orchestrator (started automatically by
+                <code>./serve-smokes.sh</code>) to drive the 8-step demo.
+                Without that gate (e.g. opening <a href="hello-async-break.html">this URL</a>
+                directly), the page runs the bare busy loop with no async-break.
             </span>
         </li>
         <li>

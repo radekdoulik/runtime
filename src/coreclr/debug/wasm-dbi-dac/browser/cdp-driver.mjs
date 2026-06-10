@@ -12,16 +12,24 @@
 // external process speaking CDP), bundled into our serve script.
 //
 // Usage:
-//   node cdp-driver.mjs [--port=9222] [--target-url-substring=hello-async-break.html]
+//   node cdp-driver.mjs [--port=9222] [--target-url-substring=hello-async-break.html] [--watch]
+//
+//   --watch  Loop forever: wait for a tab whose URL contains the
+//            demo substring, drive the 8-step demo on it, then go
+//            back to waiting. Useful when serve-smokes.sh launches
+//            chrome on index.html and the user later clicks the
+//            async-break link.
 
 const argv = process.argv.slice(2);
 let cdpPort = 9222;
 let targetSubstring = 'hello-async-break.html';
+let watchMode = false;
 for (const arg of argv) {
     if (arg.startsWith('--port=')) cdpPort = Number(arg.slice('--port='.length));
     else if (arg.startsWith('--target-url-substring=')) targetSubstring = arg.slice('--target-url-substring='.length);
+    else if (arg === '--watch') watchMode = true;
     else if (arg === '-h' || arg === '--help') {
-        console.log('Usage: cdp-driver.mjs [--port=9222] [--target-url-substring=hello-async-break.html]');
+        console.log('Usage: cdp-driver.mjs [--port=9222] [--target-url-substring=hello-async-break.html] [--watch]');
         process.exit(0);
     } else {
         console.error('Unknown arg:', arg);
@@ -30,8 +38,12 @@ for (const arg of argv) {
 }
 
 function log(text, kind) {
+    // Use stderr because Node line-buffers stderr unconditionally, but
+    // BLOCK-buffers stdout when it is piped (which it is when the
+    // watcher is spawned by serve-smokes.sh). Without this, logs sit
+    // in the buffer until it flushes (often after the process exits).
     const prefix = kind === 'err' ? '\x1b[31m[cdp-driver]\x1b[0m' : '\x1b[36m[cdp-driver]\x1b[0m';
-    console.log(`${prefix} ${text}`);
+    process.stderr.write(`${prefix} ${text}\n`);
 }
 
 function sleep(ms) {
@@ -50,23 +62,38 @@ async function waitFor(probe, description, timeoutMs, intervalMs = 100) {
     throw new Error(`timed out waiting for ${description} (${timeoutMs}ms)`);
 }
 
-async function discoverTarget(port, urlSubstring) {
-    const deadline = Date.now() + 30000;
+async function listTargets(port) {
+    try {
+        const response = await fetch(`http://localhost:${port}/json`);
+        if (!response.ok) return null;
+        return await response.json();
+    } catch {
+        return null;
+    }
+}
+
+async function discoverTarget(port, urlSubstring, timeoutMs = 30000, requireQueryParam = null) {
+    const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-        try {
-            const response = await fetch(`http://localhost:${port}/json`);
-            if (response.ok) {
-                const targets = await response.json();
-                const match = targets.find(t =>
-                    t.type === 'page' &&
-                    typeof t.url === 'string' &&
-                    t.url.includes(urlSubstring));
-                if (match && match.webSocketDebuggerUrl) {
-                    return match;
+        const targets = await listTargets(port);
+        if (targets) {
+            const match = targets.find(t => {
+                if (t.type !== 'page' || typeof t.url !== 'string') return false;
+                if (!t.url.includes(urlSubstring)) return false;
+                if (requireQueryParam) {
+                    try {
+                        const url = new URL(t.url);
+                        const [k, v] = requireQueryParam.split('=');
+                        if (url.searchParams.get(k) !== v) return false;
+                    } catch {
+                        return false;
+                    }
                 }
+                return true;
+            });
+            if (match && match.webSocketDebuggerUrl) {
+                return match;
             }
-        } catch {
-            // chrome not up yet
         }
         await sleep(250);
     }
@@ -82,8 +109,11 @@ class CdpClient {
         this.pending = new Map();
         this.eventListeners = new Map();
         this._readyPromise = new Promise((resolve, reject) => {
-            this.ws.addEventListener('open', () => resolve());
-            this.ws.addEventListener('error', e => reject(new Error('ws error: ' + (e?.message ?? e))));
+            const timer = setTimeout(() => {
+                reject(new Error(`WebSocket open timed out after 15s (perhaps another client is attached?)`));
+            }, 15000);
+            this.ws.addEventListener('open', () => { clearTimeout(timer); resolve(); });
+            this.ws.addEventListener('error', e => { clearTimeout(timer); reject(new Error('ws error: ' + (e?.message ?? e))); });
         });
         this.ws.addEventListener('message', e => this._onMessage(e));
         this.ws.addEventListener('close', () => {
@@ -172,6 +202,10 @@ async function runDemo(cdp) {
     await cdp.send('Runtime.enable');
     await cdp.send('Debugger.enable');
     await cdp.send('Debugger.setSkipAllPauses', { skip: false });
+    // Bring the tab to the foreground so Chrome does not throttle
+    // its wasm-instantiation timers. Backgrounded tabs can stall
+    // the runtime startup for tens of seconds.
+    await cdp.send('Page.bringToFront').catch(() => { /* not all targets support this */ });
 
     // Catch-all incidental-pause auto-resumer.
     // libCorerun's debugger; statement fires for every event the runtime
@@ -258,6 +292,48 @@ async function runDemo(cdp) {
 }
 
 async function main() {
+    if (watchMode) {
+        log(`watching for targets on localhost:${cdpPort} matching "${targetSubstring}" with ?wait-for-external-dbi=1`);
+        log('chrome is running; the user can browse the index and click hello-async-break to trigger the demo');
+        const seenTargetIds = new Set();
+        // Wait forever; exit only on SIGINT/SIGTERM.
+        for (;;) {
+            // Look for a NEW tab whose URL contains the demo substring
+            // AND has ?wait-for-external-dbi=1. The user-clicked link
+            // from index.html does not include that param by default,
+            // so we treat the bare URL as "do nothing here" (the page
+            // already shows its own notice). Only the gated URL means
+            // "demo is waiting for us".
+            let match;
+            try {
+                match = await discoverTarget(cdpPort, targetSubstring, 24 * 60 * 60 * 1000, 'wait-for-external-dbi=1');
+            } catch (e) {
+                log('watch poll error: ' + e.message, 'err');
+                await sleep(2000);
+                continue;
+            }
+            if (seenTargetIds.has(match.id)) {
+                // we already drove this exact tab; wait a bit and re-poll
+                await sleep(1000);
+                continue;
+            }
+            seenTargetIds.add(match.id);
+
+            log(`new gated target detected: ${match.url}`);
+            log(`connecting to ${match.webSocketDebuggerUrl}`);
+            const cdp = new CdpClient(match.webSocketDebuggerUrl);
+            try {
+                await cdp.ready();
+                await runDemo(cdp);
+            } catch (e) {
+                log('demo run failed: ' + (e.stack || e.message || e), 'err');
+            } finally {
+                cdp.close();
+            }
+            log('--- demo complete; back to watching for next gated URL ---');
+        }
+    }
+
     log(`discovering CDP target on localhost:${cdpPort} matching "${targetSubstring}"...`);
     const target = await discoverTarget(cdpPort, targetSubstring);
     log(`connecting to ${target.webSocketDebuggerUrl}`);

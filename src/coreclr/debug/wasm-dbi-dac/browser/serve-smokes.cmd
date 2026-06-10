@@ -2,14 +2,14 @@
 rem Licensed to the .NET Foundation under one or more agreements.
 rem The .NET Foundation licenses this file to you under the MIT license.
 rem
-rem serve-smokes.cmd — prepare + serve the browser smoke harness AND
-rem launch the IDE-driven async-break demo (chrome --remote-debugging
-rem + cdp-driver.mjs orchestrator). All other smokes are still available
-rem via the same dotnet serve; open index.html to pick one.
+rem serve-smokes.cmd — prepare + serve the browser smoke harness, launch
+rem Chrome with --remote-debugging-port=9222 on the smoke index, and
+rem start cdp-driver.mjs in watch mode so the async-break demo runs
+rem automatically when the user clicks the hello-async-break link.
 rem
 rem Usage:
-rem   serve-smokes.cmd                  Serve + run the async demo
-rem   serve-smokes.cmd --just-serve     Serve only; no demo / no chrome
+rem   serve-smokes.cmd                  Serve + chrome + watcher
+rem   serve-smokes.cmd --just-serve     Serve only; no chrome / no watcher
 rem   serve-smokes.cmd [--port=8080] [--skip-prepare] [--cdp-port=9222] [--browser=chrome^|edge] [--keep-profile]
 
 setlocal enabledelayedexpansion
@@ -39,8 +39,8 @@ exit /b 2
 
 :print_help
 echo Usage:
-echo   serve-smokes.cmd                  Serve + run the async demo
-echo   serve-smokes.cmd --just-serve     Serve only; no demo
+echo   serve-smokes.cmd                  Serve + chrome + watcher
+echo   serve-smokes.cmd --just-serve     Serve only; no chrome / no watcher
 echo   serve-smokes.cmd [--port=8080] [--skip-prepare] [--cdp-port=9222] [--browser=chrome^|edge] [--keep-profile]
 exit /b 0
 
@@ -66,21 +66,79 @@ if not exist "%ARTIFACT_DIR%" (
 )
 
 if "%JUST_SERVE%"=="1" (
-    echo ==^> --just-serve: dotnet serve only ^(no async-demo orchestrator^)
-    echo ==^> Open in Chrome:
+    echo ==^> --just-serve: dotnet serve only ^(no chrome / no watcher^)
+    echo ==^> Open in any browser:
     echo        http://localhost:%PORT%/index.html
-    echo        http://localhost:%PORT%/hello-breakpoint.html
-    echo        http://localhost:%PORT%/hello-cdp-pause.html
-    echo        http://localhost:%PORT%/hello-async-break.html
     echo.
     dotnet serve -d "%ARTIFACT_DIR%" -p %PORT% -o:/index.html
     exit /b %ERRORLEVEL%
 )
 
-echo ==^> serving + running IDE-driven async-break demo ^(use --just-serve to skip the demo^)
+rem Default: serve + chrome + watcher
+set "BROWSER_BIN="
+if /I "%BROWSER%"=="" goto resolve_auto
+if /I "%BROWSER%"=="chrome" goto resolve_chrome
+if /I "%BROWSER%"=="edge" goto resolve_edge
+set "BROWSER_BIN=%BROWSER%"
+goto resolve_done
+:resolve_chrome
+if exist "%ProgramFiles%\Google\Chrome\Application\chrome.exe" set "BROWSER_BIN=%ProgramFiles%\Google\Chrome\Application\chrome.exe"
+if exist "%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe" set "BROWSER_BIN=%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"
+goto resolve_done
+:resolve_edge
+if exist "%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe" set "BROWSER_BIN=%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"
+if exist "%ProgramFiles%\Microsoft\Edge\Application\msedge.exe" set "BROWSER_BIN=%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"
+goto resolve_done
+:resolve_auto
+if exist "%ProgramFiles%\Google\Chrome\Application\chrome.exe" set "BROWSER_BIN=%ProgramFiles%\Google\Chrome\Application\chrome.exe" & goto resolve_done
+if exist "%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe" set "BROWSER_BIN=%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe" & goto resolve_done
+if exist "%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe" set "BROWSER_BIN=%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe" & goto resolve_done
+if exist "%ProgramFiles%\Microsoft\Edge\Application\msedge.exe" set "BROWSER_BIN=%ProgramFiles%\Microsoft\Edge\Application\msedge.exe" & goto resolve_done
+:resolve_done
+if "%BROWSER_BIN%"=="" (
+    echo Error: no Chrome/Edge binary found. Use --browser=^<path^>. 1>&2
+    exit /b 1
+)
+
+set "USER_DATA_DIR=%TEMP%\wasm-dbi-dac-demo-%RANDOM%-%RANDOM%"
+mkdir "%USER_DATA_DIR%"
+
+rem dotnet serve
+echo ==^> dotnet serve on port %PORT%
+start "wasm-dbi-dac dotnet serve" /min cmd /c "dotnet serve -d ""%ARTIFACT_DIR%"" -p %PORT% > %TEMP%\wasm-dbi-dac-serve.log 2>&1"
+for /L %%i in (1,1,20) do (
+    curl -fsS http://localhost:%PORT%/ >nul 2>&1 && goto serve_ok
+    timeout /t 1 /nobreak >nul
+)
+echo Error: dotnet serve did not come up on port %PORT% 1>&2
+exit /b 1
+:serve_ok
+
+rem launch chrome on index.html with the CDP port open
+set "INDEX_URL=http://localhost:%PORT%/index.html"
+echo ==^> launching browser: %BROWSER_BIN%
+echo ==^>   --remote-debugging-port=%CDP_PORT%
+echo ==^>   --user-data-dir=%USER_DATA_DIR%
+echo ==^>   URL: %INDEX_URL%
+start "" "%BROWSER_BIN%" --remote-debugging-port=%CDP_PORT% --user-data-dir="%USER_DATA_DIR%" --no-first-run --no-default-browser-check --new-window "%INDEX_URL%"
+
+echo ==^> waiting for CDP endpoint http://localhost:%CDP_PORT%/json/version ...
+for /L %%i in (1,1,30) do (
+    curl -fsS http://localhost:%CDP_PORT%/json/version >nul 2>&1 && goto cdp_ok
+    timeout /t 1 /nobreak >nul
+)
+echo Error: CDP endpoint did not come up on port %CDP_PORT% 1>&2
+exit /b 1
+:cdp_ok
+echo ==^> CDP endpoint is live
+
+echo ==^> starting cdp-driver.mjs --watch
+echo ==^> open the smoke index in the browser window that just opened
+echo ==^> and click 'hello-async-break' to trigger the IDE-driven demo
+echo ==^> ^(Ctrl-C in this terminal to tear down^)
 echo.
-set "DEMO_ARGS=--skip-prepare --port=%PORT% --cdp-port=%CDP_PORT%"
-if not "%BROWSER%"=="" set "DEMO_ARGS=%DEMO_ARGS% --browser=%BROWSER%"
-if "%KEEP_PROFILE%"=="1" set "DEMO_ARGS=%DEMO_ARGS% --keep-profile"
-call demo-async-break.cmd %DEMO_ARGS%
-exit /b %ERRORLEVEL%
+node cdp-driver.mjs --port=%CDP_PORT% --watch
+
+if "%KEEP_PROFILE%"=="0" if exist "%USER_DATA_DIR%" rmdir /s /q "%USER_DATA_DIR%"
+
+exit /b 0
