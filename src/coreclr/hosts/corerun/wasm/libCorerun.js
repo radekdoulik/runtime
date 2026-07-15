@@ -34,50 +34,6 @@ function libCoreRunFactory() {
         },
         $CORERUN__postset: "CORERUN.selfInitialize()",
         $CORERUN__deps: commonDeps,
-        CoreClrWasmDebugOnBreakpointHit: (eventAddress, eventLength) => {
-            if (typeof globalThis.CoreClrWasmDebugOnBreakpointHit === "function") {
-                return globalThis.CoreClrWasmDebugOnBreakpointHit(eventAddress >>> 0, eventLength >>> 0) | 0;
-            }
-
-            return 0;
-        },
-        coreClrDebugLookupSourceLocation: (methodToken, moduleAddress, modulePathAddress, modulePathLength, ilOffset, outFileAddress, outFileCapacity, outLineAddress, outColumnAddress) => {
-            if (typeof globalThis.coreClrDebugLookupSourceLocation === "function") {
-                return globalThis.coreClrDebugLookupSourceLocation(
-                    methodToken >>> 0,
-                    moduleAddress >>> 0,
-                    modulePathAddress >>> 0,
-                    modulePathLength >>> 0,
-                    ilOffset >>> 0,
-                    outFileAddress >>> 0,
-                    outFileCapacity >>> 0,
-                    outLineAddress >>> 0,
-                    outColumnAddress >>> 0) | 0;
-            }
-
-            return -1;
-        },
-        // Phase 6 stop trigger (Mono pattern). The runtime calls this when a
-        // managed event (breakpoint / step / exception) needs the IDE to
-        // stop. In browser context the `debugger;` statement halts V8 if an
-        // inspector is attached; the future browser proxy recognizes this
-        // function's frame in Debugger.paused callFrames and translates it
-        // into a managed Debugger.paused event with managed call frames
-        // sourced from the sidecar DBI. In Node smoke context (no
-        // inspector), `debugger;` is a no-op and the registered
-        // globalThis.coreClrDebugFireEventToPause handler captures the
-        // payload for assertions.
-        //
-        // Mirrors Mono mono_wasm_fire_debugger_agent_message_with_data_to_pause
-        // (src/mono/mono/component/mini-wasm-debugger.c:455-near +
-        // src/mono/browser/runtime/debug.ts:36-43).
-        coreClrDebugFireEventToPause: (eventAddress, eventLength) => {
-            const handlerResult = (typeof globalThis.coreClrDebugFireEventToPause === "function")
-                ? globalThis.coreClrDebugFireEventToPause(eventAddress >>> 0, eventLength >>> 0) | 0
-                : 0;
-            debugger;
-            return handlerResult;
-        },
         BrowserHost_ShutdownDotnet: (exitCode) => _corerun_shutdown(exitCode),
         BrowserHost_ExternalAssemblyProbe: (pathPtr, outDataStartPtr, outSize) => {
             function asUint8Array(bufferSource) {

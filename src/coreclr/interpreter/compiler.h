@@ -858,6 +858,7 @@ private:
     InterpBasicBlock**  m_ppOffsetToBB;
 
     ICorDebugInfo::OffsetMapping* m_pILToNativeMap = NULL;
+    InterpILToNativeMapEntry* m_pPersistentILToNativeMap = NULL;
 #ifdef DEBUG
     int32_t* m_pNativeMapIndexToILOffset = NULL;
 #endif

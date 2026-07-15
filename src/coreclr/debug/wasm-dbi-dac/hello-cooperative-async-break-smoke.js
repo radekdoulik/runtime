@@ -9,7 +9,7 @@ const { spawnSync } = require("child_process");
 
 const ExpectedVersionBlobMagic = 0x42564457;
 const ExpectedAbiVersion = 1;
-const ExpectedProtocolBreakingChangeCounter = 14;
+const ExpectedProtocolBreakingChangeCounter = 16;
 const IpcAsyncBreakSize = 88;
 const IpcAsyncBreakMagic = 0x41435049;
 const IpcAsyncBreakType = 0x0107;

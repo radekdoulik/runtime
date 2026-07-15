@@ -21,7 +21,7 @@ const IpcStepCompleteType = 0x0104;
 
 const ExpectedVersionBlobMagic = 0x42564457;
 const ExpectedAbiVersion = 1;
-const ExpectedProtocolBreakingChangeCounter = 14;
+const ExpectedProtocolBreakingChangeCounter = 16;
 const IpcModuleLoadSize = 312;
 
 function fail(message) {
@@ -606,7 +606,7 @@ async function main() {
             stepComplete?.originalStepRequestToken !== initialBreakpoint.breakpointToken ||
             continueCount !== 1 ||
             fireEventToPauseCount < 2 ||
-            fireEventToPauseLastKind !== "breakpoint" ||
+            fireEventToPauseLastKind !== "step-complete" ||
             disconnectResult !== 0 ||
             sessionDestroyResult !== 0) {
             fail(`HelloWorld ${StepKindName} did not land at the expected caller offset`);

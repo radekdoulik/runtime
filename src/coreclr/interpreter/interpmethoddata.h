@@ -43,6 +43,7 @@ enum class InterpMethodDataSection : uint8_t
     DataItems,        // void*[] array
     AsyncSuspendData, // InterpAsyncSuspendData structs
     IntervalMaps,     // InterpIntervalMapEntry arrays
+    ILToNativeMap,    // InterpILToNativeMapEntry array
     Count
 };
 
@@ -115,6 +116,9 @@ public:
 
     // Helper: Allocate local descriptor array
     InterpSectionRef AllocateLocalDescriptors(int32_t count);
+
+    // Helper: Allocate IL-to-native map
+    InterpSectionRef AllocateILToNativeMap(int32_t count);
 
     // Helper: Allocate data items array
     InterpSectionRef AllocateDataItems(int32_t count);

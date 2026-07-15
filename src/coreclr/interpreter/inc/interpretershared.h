@@ -41,6 +41,12 @@ struct WalkInterpMethodLocal
     const char* Name;
 };
 
+struct InterpILToNativeMapEntry
+{
+    uint32_t ILOffset;
+    uint32_t NativeOffset;
+};
+
 struct InterpMethod
 {
 #if DEBUG
@@ -61,13 +67,19 @@ struct InterpMethod
     // INTOP_HANDLE_CONTINUATION_RESUME opcode from InterpByteCodeStart.
     int32_t numSuspensionPoints;
     int32_t* suspensionPointIPOffsets;
+    int32_t numArguments;
+    WalkInterpMethodLocal* arguments;
     int32_t numLocals;
     WalkInterpMethodLocal* locals;
+    int32_t ilToNativeMapSize;
+    InterpILToNativeMapEntry* ilToNativeMap;
 
 #ifdef INTERPRETER_COMPILER_INTERNAL
     InterpMethod(
         CORINFO_METHOD_HANDLE methodHnd, int32_t argsSize, int32_t allocaSize,
-        void** pDataItems, int32_t numLocals, WalkInterpMethodLocal* locals,
+        void** pDataItems, int32_t numArguments, WalkInterpMethodLocal* arguments,
+        int32_t numLocals, WalkInterpMethodLocal* locals,
+        int32_t ilToNativeMapSize, InterpILToNativeMapEntry* ilToNativeMap,
         bool initLocals, bool unmanagedCallersOnly, bool publishSecretStubParam,
         int32_t codeSize
     )
@@ -85,8 +97,12 @@ struct InterpMethod
         this->codeSize = codeSize;
         this->numSuspensionPoints = 0;
         this->suspensionPointIPOffsets = NULL;
+        this->numArguments = numArguments;
+        this->arguments = arguments;
         this->numLocals = numLocals;
         this->locals = locals;
+        this->ilToNativeMapSize = ilToNativeMapSize;
+        this->ilToNativeMap = ilToNativeMap;
         pCallStub = NULL;
     }
 #endif
@@ -101,6 +117,7 @@ struct InterpMethod
     }
 };
 
+INTERP_API int WalkInterpMethodArguments(const InterpMethod* method, WalkInterpMethodLocal* outBuffer, uint32_t bufferCapacity);
 INTERP_API int WalkInterpMethodLocals(const InterpMethod* method, WalkInterpMethodLocal* outBuffer, uint32_t bufferCapacity);
 
 struct InterpByteCodeStart

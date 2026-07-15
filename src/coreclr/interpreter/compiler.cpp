@@ -1280,6 +1280,16 @@ void InterpCompiler::EmitCode()
         m_compHnd->freeArray(m_pILToNativeMap);
         m_pILToNativeMap = NULL;
     }
+    if (m_ILToNativeMapSize > 0)
+    {
+        m_pPersistentILToNativeMap =
+            getAllocator(IMK_NativeToILMapping).allocate<InterpILToNativeMapEntry>(m_ILToNativeMapSize);
+        for (int32_t i = 0; i < m_ILToNativeMapSize; i++)
+        {
+            m_pPersistentILToNativeMap[i].ILOffset = m_pILToNativeMap[i].ilOffset;
+            m_pPersistentILToNativeMap[i].NativeOffset = m_pILToNativeMap[i].nativeOffset;
+        }
+    }
     m_compHnd->setBoundaries(m_methodInfo->ftn, m_ILToNativeMapSize, m_pILToNativeMap);
     m_pILToNativeMap = NULL; // Ownership transferred to the VM
 
@@ -1939,9 +1949,14 @@ void InterpCompiler::PrepareInterpMethod()
     m_methodDataBuilder.AllocateInterpMethod();
 
     // Local descriptors section
-    if (m_numILLocals > 0)
+    if (m_numILArgs + m_numILLocals > 0)
     {
-        m_methodDataBuilder.AllocateLocalDescriptors(m_numILLocals);
+        m_methodDataBuilder.AllocateLocalDescriptors(m_numILArgs + m_numILLocals);
+    }
+
+    if (m_ILToNativeMapSize > 0)
+    {
+        m_methodDataBuilder.AllocateILToNativeMap(m_ILToNativeMapSize);
     }
 
     // DataItems section
@@ -2002,6 +2017,7 @@ InterpMethod* InterpCompiler::FinalizeMethodData(void* baseAddressRW, void* base
     uint32_t dataItemsOffset = m_methodDataBuilder.GetSectionOffset(InterpMethodDataSection::DataItems);
     uint32_t asyncSuspendDataOffset = m_methodDataBuilder.GetSectionOffset(InterpMethodDataSection::AsyncSuspendData);
     uint32_t intervalMapsOffset = m_methodDataBuilder.GetSectionOffset(InterpMethodDataSection::IntervalMaps);
+    uint32_t ilToNativeMapOffset = m_methodDataBuilder.GetSectionOffset(InterpMethodDataSection::ILToNativeMap);
 
     const uint32_t bytecodeSectionSize = m_methodDataBuilder.GetSectionSize(InterpMethodDataSection::Bytecode);
     const uint32_t interpMethodSectionSize = m_methodDataBuilder.GetSectionSize(InterpMethodDataSection::InterpMethod);
@@ -2009,6 +2025,7 @@ InterpMethod* InterpCompiler::FinalizeMethodData(void* baseAddressRW, void* base
     const uint32_t dataItemsSectionSize = m_methodDataBuilder.GetSectionSize(InterpMethodDataSection::DataItems);
     const uint32_t asyncSuspendDataSectionSize = m_methodDataBuilder.GetSectionSize(InterpMethodDataSection::AsyncSuspendData);
     const uint32_t intervalMapsSectionSize = m_methodDataBuilder.GetSectionSize(InterpMethodDataSection::IntervalMaps);
+    const uint32_t ilToNativeMapSectionSize = m_methodDataBuilder.GetSectionSize(InterpMethodDataSection::ILToNativeMap);
 
     assert((uint64_t)m_methodCodeSize * sizeof(int32_t) <= bytecodeSectionSize);
     assert(sizeof(InterpMethod) <= interpMethodSectionSize);
@@ -2032,27 +2049,59 @@ InterpMethod* InterpCompiler::FinalizeMethodData(void* baseAddressRW, void* base
         }
     }
 
+    WalkInterpMethodLocal* pArgumentDescriptors = nullptr;
     WalkInterpMethodLocal* pLocalDescriptors = nullptr;
-    if (m_numILLocals > 0)
+    int32_t descriptorCount = m_numILArgs + m_numILLocals;
+    if (descriptorCount > 0)
     {
-        assert((uint64_t)m_numILLocals * sizeof(WalkInterpMethodLocal) <= localDescriptorsSectionSize);
+        assert((uint64_t)descriptorCount * sizeof(WalkInterpMethodLocal) <= localDescriptorsSectionSize);
         assert(m_numILArgs >= 0);
         assert(m_numILArgs + m_numILLocals <= m_varsSize);
-        WalkInterpMethodLocal* pLocalDescriptorsRW = (WalkInterpMethodLocal*)(rwBase + localDescriptorsOffset);
-        pLocalDescriptors = (WalkInterpMethodLocal*)(rxBase + localDescriptorsOffset);
+        WalkInterpMethodLocal* pDescriptorsRW = (WalkInterpMethodLocal*)(rwBase + localDescriptorsOffset);
+        WalkInterpMethodLocal* pDescriptors = (WalkInterpMethodLocal*)(rxBase + localDescriptorsOffset);
+        pArgumentDescriptors = m_numILArgs > 0 ? pDescriptors : nullptr;
+        pLocalDescriptors = m_numILLocals > 0 ? pDescriptors + m_numILArgs : nullptr;
+        for (int32_t i = 0; i < m_numILArgs; i++)
+        {
+            const InterpVar& argumentVar = m_pVars[i];
+            assert(argumentVar.offset >= 0);
+            assert(argumentVar.size > 0);
+            pDescriptorsRW[i] = {};
+            pDescriptorsRW[i].ILSlot = static_cast<uint32_t>(i);
+            pDescriptorsRW[i].TypeTag = argumentVar.typeTag != 0
+                ? argumentVar.typeTag
+                : GetElementTypeForInterpType(argumentVar.interpType);
+            pDescriptorsRW[i].ByteOffset = static_cast<uint32_t>(argumentVar.offset);
+            pDescriptorsRW[i].ByteSize = static_cast<uint32_t>(argumentVar.size);
+            pDescriptorsRW[i].Name = nullptr;
+        }
         for (int32_t i = 0; i < m_numILLocals; i++)
         {
             const InterpVar& localVar = m_pVars[m_numILArgs + i];
             assert(localVar.offset >= 0);
             assert(localVar.size > 0);
-            pLocalDescriptorsRW[i] = {};
-            pLocalDescriptorsRW[i].ILSlot = static_cast<uint32_t>(i);
-            pLocalDescriptorsRW[i].TypeTag = localVar.typeTag != 0
+            WalkInterpMethodLocal& localDescriptor = pDescriptorsRW[m_numILArgs + i];
+            localDescriptor = {};
+            localDescriptor.ILSlot = static_cast<uint32_t>(i);
+            localDescriptor.TypeTag = localVar.typeTag != 0
                 ? localVar.typeTag
                 : GetElementTypeForInterpType(localVar.interpType);
-            pLocalDescriptorsRW[i].ByteOffset = static_cast<uint32_t>(localVar.offset);
-            pLocalDescriptorsRW[i].ByteSize = static_cast<uint32_t>(localVar.size);
-            pLocalDescriptorsRW[i].Name = nullptr;
+            localDescriptor.ByteOffset = static_cast<uint32_t>(localVar.offset);
+            localDescriptor.ByteSize = static_cast<uint32_t>(localVar.size);
+            localDescriptor.Name = nullptr;
+        }
+    }
+
+    InterpILToNativeMapEntry* pILToNativeMap = nullptr;
+    if (m_ILToNativeMapSize > 0)
+    {
+        assert((uint64_t)m_ILToNativeMapSize * sizeof(InterpILToNativeMapEntry) <= ilToNativeMapSectionSize);
+        InterpILToNativeMapEntry* pILToNativeMapRW =
+            (InterpILToNativeMapEntry*)(rwBase + ilToNativeMapOffset);
+        pILToNativeMap = (InterpILToNativeMapEntry*)(rxBase + ilToNativeMapOffset);
+        for (int32_t i = 0; i < m_ILToNativeMapSize; i++)
+        {
+            pILToNativeMapRW[i] = m_pPersistentILToNativeMap[i];
         }
     }
 
@@ -2060,7 +2109,9 @@ InterpMethod* InterpCompiler::FinalizeMethodData(void* baseAddressRW, void* base
     InterpMethod* pMethodRW = (InterpMethod*)(rwBase + interpMethodOffset);
     InterpMethod* pMethodRX = (InterpMethod*)(rxBase + interpMethodOffset);
     new (pMethodRW) InterpMethod(m_methodHnd, m_ILLocalsOffset, m_totalVarsStackSize, pDataItems,
-                                  m_numILLocals, pLocalDescriptors, m_initLocals, m_unmanagedCallersOnly,
+                                  m_numILArgs, pArgumentDescriptors, m_numILLocals, pLocalDescriptors,
+                                  m_ILToNativeMapSize, pILToNativeMap,
+                                  m_initLocals, m_unmanagedCallersOnly,
                                   m_publishSecretStubParam, m_methodCodeSize);
 
     // Copy async suspend data and fix up pointers

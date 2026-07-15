@@ -7,9 +7,9 @@
 // as a structured step-complete DBI event (isIL=1, ilOffset=0,
 // funcMetadataToken=StepIntoTarget); on that event the harness issues a
 // step-out request (StepKind 2) which returns to the caller BreakHere
-// and produces a second step-complete plus a second breakpoint event.
-// Both breakpoint events (via OnBreakpointHit) and step-complete events
-// (via coreClrDebugFireEventToPause) are drained via the sidecar DAC.
+// and produces a second step-complete event. The initial breakpoint
+// (via OnBreakpointHit) and step-complete events (via
+// coreClrDebugFireEventToPause) are drained via the sidecar DAC.
 
 import {
     IpcModuleLoadSize,
@@ -94,6 +94,8 @@ export async function runSmoke() {
     let stepOutCompleteBreakpointCount = -1;
     let stepOutFromMethodEnterRequestResult = -1;
     let stepOutFromMethodEnterRequestToken = 0n;
+    let stepIntoTargetComplete = null;
+    let stepOutComplete = null;
     const breakpointEvents = [];
     const stepCompleteEvents = [];
     const stepRequestResults = [];
@@ -146,19 +148,28 @@ export async function runSmoke() {
                         stepCompleteEvents.push(stepComplete.payload);
                     }
                     const active = enumerateBreakpoints(sidecar);
-                    if (stepCompleteEvents.length === 1) {
+                    if (stepCompleteBreakpointCount < 0) {
                         stepCompleteBreakpointCount = active.enumerateResult === 0 ? active.activeCount : -1;
-                    } else if (stepCompleteEvents.length === 2) {
-                        stepOutCompleteBreakpointCount = active.enumerateResult === 0 ? active.activeCount : -1;
                     }
 
                     const payload = stepComplete.payload;
                     if (payload !== null &&
-                        stepCompleteEvents.length === 1 &&
                         payload.funcMetadataToken === ExpectedStepIntoTargetToken &&
                         payload.isIL === 1) {
+                        stepIntoTargetComplete = payload;
                         stepOutFromMethodEnterRequestToken = payload.originalStepRequestToken;
                         stepOutFromMethodEnterRequestResult = sendStepRequest(sidecar, payload.originalStepRequestToken, StepKindOut);
+                    } else if (payload !== null &&
+                        stepOutFromMethodEnterRequestResult === 0 &&
+                        payload.funcMetadataToken === ExpectedStepIntoCallerToken) {
+                        stepOutComplete = payload;
+                        stepOutCompleteBreakpointCount = active.enumerateResult === 0 ? active.activeCount : -1;
+                    } else if (payload !== null &&
+                        payload.funcMetadataToken === ExpectedStepIntoCallerToken &&
+                        stepCompleteEvents.length <= MaxStepRequests) {
+                        const stepResult = sendStepRequest(sidecar, payload.originalStepRequestToken, StepKindInto);
+                        stepRequestResults.push(stepResult);
+                        stepRequestTokens.push(payload.originalStepRequestToken);
                     }
                     return 0;
                 }
@@ -210,9 +221,6 @@ export async function runSmoke() {
                     }
                 }
 
-                if (breakpointEvents.length === 2) {
-                    // landing after step-out is reported as a breakpoint
-                }
             }
 
             return receiveResult;
@@ -247,7 +255,9 @@ export async function runSmoke() {
             }
         });
 
-        await waitForCounts(() => breakpointEvents.length >= 2 && stepCompleteEvents.length >= 2, CompletionTimeoutMs);
+        await waitForCounts(
+            () => breakpointEvents.length >= 1 && stepIntoTargetComplete !== null && stepOutComplete !== null,
+            CompletionTimeoutMs);
         const continueCount = runtimeExports.CoreClrWasmDebugGetContinueCount();
         const methodEnterQueryCount = runtimeExports.CoreClrWasmDebugGetMethodEnterEnabledQueryCount() >>> 0;
         const disconnectResult = connected ? sidecar.module._coreclr_wasm_dbi_dac_dbi_disconnect_runtime() : 0;
@@ -256,18 +266,14 @@ export async function runSmoke() {
         sessionCreated = false;
 
         const firstEvent = breakpointEvents[0];
-        const stepEvent = breakpointEvents[1];
-        const stepComplete = stepCompleteEvents[0];
-        const stepOutComplete = stepCompleteEvents[1];
+        const stepComplete = stepIntoTargetComplete;
 
-        assert(breakpointEvents.length >= 2, `expected >= 2 breakpoint events, got ${breakpointEvents.length}`);
+        assert(breakpointEvents.length === 1, `expected one ordinary breakpoint event, got ${breakpointEvents.length}`);
         assert(stepCompleteEvents.length >= 2, `expected >= 2 step-complete events, got ${stepCompleteEvents.length}`);
-        assert(firstEvent?.magic === BreakpointIpcMagic && stepEvent?.magic === BreakpointIpcMagic, 'breakpoint IPC magic mismatch');
-        assert(firstEvent?.type === BreakpointIpcType && stepEvent?.type === BreakpointIpcType, 'breakpoint IPC type mismatch');
+        assert(firstEvent?.magic === BreakpointIpcMagic, 'breakpoint IPC magic mismatch');
+        assert(firstEvent?.type === BreakpointIpcType, 'breakpoint IPC type mismatch');
         assert(firstEvent?.isIL === 1 && firstEvent?.offset === 0, 'first breakpoint should be at IL offset 0');
-        assert(stepEvent?.isIL === 0 && stepEvent?.offset > firstEvent?.offset, 'second breakpoint did not advance');
         assert(firstEvent?.breakpointToken !== 0n, 'first breakpoint token missing');
-        assert(stepEvent?.breakpointToken > firstEvent?.breakpointToken, 'second breakpoint token did not advance');
         assert(stepRequestResults.length > 0 && stepRequestResults.every(r => r === 0), 'a step-into request failed');
         assert(preStepBreakpointCount >= 1, `unexpected pre-step breakpoint count: ${preStepBreakpointCount}`);
         assert(afterStepRequestBreakpointCount === preStepBreakpointCount + 1, 'step request did not add a transient breakpoint');
@@ -297,7 +303,6 @@ export async function runSmoke() {
             breakpointEventCount: breakpointEvents.length,
             stepCompleteEventCount: stepCompleteEvents.length,
             firstOffset: firstEvent.offset,
-            stepOffset: stepEvent.offset,
             stepIntoTarget: {
                 funcMetadataToken: stepComplete.funcMetadataToken,
                 ilOffset: stepComplete.ilOffset,

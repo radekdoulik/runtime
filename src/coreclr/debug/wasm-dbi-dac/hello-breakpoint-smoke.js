@@ -18,7 +18,7 @@ const ExpectedLocalTypeTags = [0x08, 0x0a, 0x0d]; // int, long, double
 // point will run (CORDBG_E_INCOMPATIBLE_PROTOCOL otherwise).
 const ExpectedVersionBlobMagic = 0x42564457; // 'WDVB' little-endian
 const ExpectedAbiVersion = 1;
-const ExpectedProtocolBreakingChangeCounter = 14;
+const ExpectedProtocolBreakingChangeCounter = 16;
 const IpcModuleLoadSize = 312;
 const ValueRecordSize = 104;
 const ValueRecordFlagReadFailed = 1;

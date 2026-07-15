@@ -10,5 +10,6 @@ test('hello-step smoke', async ({ page }) => {
   const result = await page.evaluate(() => globalThis.__smokeResult);
   if (!result.passed) console.error('Smoke failed:', result.error);
   expect(result.passed).toBe(true);
-  expect(result.result.stepOffset).toBeGreaterThan(result.result.firstOffset);
+  expect(result.result.stepComplete.funcMetadataToken).toBe(0x06000002);
+  expect(result.result.stepComplete.isIL).toBe(0);
 });

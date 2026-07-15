@@ -30,8 +30,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-extern "C" int32_t CoreClrWasmDebugOnBreakpointHit(uint32_t eventAddress, uint32_t eventLength);
-extern "C" int32_t coreClrDebugLookupSourceLocation(
+EM_JS(int32_t, CoreClrWasmDebugOnBreakpointHit, (uint32_t eventAddress, uint32_t eventLength), {
+    if (typeof globalThis.CoreClrWasmDebugOnBreakpointHit === "function") {
+        return globalThis.CoreClrWasmDebugOnBreakpointHit(eventAddress >>> 0, eventLength >>> 0) | 0;
+    }
+    return 0;
+});
+
+EM_JS(int32_t, coreClrDebugLookupSourceLocation, (
     uint32_t methodToken,
     uint32_t moduleAddress,
     uint32_t modulePathAddress,
@@ -40,7 +46,21 @@ extern "C" int32_t coreClrDebugLookupSourceLocation(
     uint32_t outFileAddress,
     uint32_t outFileCapacity,
     uint32_t outLineAddress,
-    uint32_t outColumnAddress);
+    uint32_t outColumnAddress), {
+    if (typeof globalThis.coreClrDebugLookupSourceLocation === "function") {
+        return globalThis.coreClrDebugLookupSourceLocation(
+            methodToken >>> 0,
+            moduleAddress >>> 0,
+            modulePathAddress >>> 0,
+            modulePathLength >>> 0,
+            ilOffset >>> 0,
+            outFileAddress >>> 0,
+            outFileCapacity >>> 0,
+            outLineAddress >>> 0,
+            outColumnAddress >>> 0) | 0;
+    }
+    return -1;
+});
 
 // Phase 6 stop-trigger JS import. Mirrors Mono
 // mono_wasm_fire_debugger_agent_message_with_data_to_pause
@@ -54,7 +74,13 @@ extern "C" int32_t coreClrDebugLookupSourceLocation(
 // browser proxy recognizes the function name in the CDP Debugger.paused
 // callFrames (the Mono parallel pattern is BrowserDebugProxy's filter
 // for mono_wasm_fire_debugger_agent_message*).
-extern "C" int32_t coreClrDebugFireEventToPause(uint32_t eventAddress, uint32_t eventLength);
+EM_JS(int32_t, coreClrDebugFireEventToPause, (uint32_t eventAddress, uint32_t eventLength), {
+    const handlerResult = (typeof globalThis.coreClrDebugFireEventToPause === "function")
+        ? globalThis.coreClrDebugFireEventToPause(eventAddress >>> 0, eventLength >>> 0) | 0
+        : 0;
+    debugger;
+    return handlerResult;
+});
 extern "C" uint32_t CoreClrWasmDebugCallInterpreterStepHelperProbeImpl();
 extern "C" uint32_t CoreClrWasmDebugGetMethodEnterEnabledQueryCountImpl();
 extern "C" void CoreClrWasmDebugEnsureDebuggerEEInterface();
@@ -85,6 +111,7 @@ enum class WasmDebugCommandKind : uint32_t
     SetBreakpointByName = 1,
     SetBreakpointByToken = 2,
     Continue = 3,
+    ClearBreakpointByToken = 4,
 };
 
 enum class WasmDebugEventKind : uint32_t
@@ -280,6 +307,8 @@ struct WasmDebugFrameRecord
 };
 
 constexpr uint32_t WasmDebugMaxLocalsPerFrame = 32;
+constexpr uint32_t WasmDebugMaxArgumentsPerFrame = 32;
+constexpr uint32_t WasmDebugArgumentsRecordMagic = 0x52414457; // 'WDAR'
 constexpr uint32_t WasmDebugLocalsRecordMagic = 0x524C4457; // 'WDLR'
 
 struct WasmDebugLocalRecord
@@ -300,10 +329,20 @@ struct WasmDebugLocalsRecord
     WasmDebugLocalRecord Locals[WasmDebugMaxLocalsPerFrame];
 };
 
+struct WasmDebugArgumentsRecord
+{
+    uint32_t Magic;
+    uint32_t Version;
+    uint32_t MethodToken;
+    uint32_t ArgumentCount;
+    WasmDebugLocalRecord Arguments[WasmDebugMaxArgumentsPerFrame];
+};
+
 static_assert(sizeof(WasmDebugCommandRecord) == 80);
 static_assert(sizeof(WasmDebugEventRecord) == 340);
 static_assert(sizeof(WasmDebugFrameRecord) == 88);
 static_assert(sizeof(WasmDebugLocalRecord) == 48);
+static_assert(sizeof(WasmDebugArgumentsRecord) == 16 + 32 * 48);
 static_assert(sizeof(WasmDebugLocalsRecord) == 16 + 32 * 48);
 static_assert(offsetof(InterpMethodContextFrame, pStack) == 2 * sizeof(void*));
 static_assert(sizeof(WasmDbgIpcEventBreakpointRuntime) == 96,
@@ -356,6 +395,7 @@ uint8_t g_wasmDebugLastEvent[WasmDebugMessageBufferSize];
 uint32_t g_wasmDebugLastEventLength;
 WasmDebugEventRecord g_wasmDebugLastEventRecord;
 WasmDebugFrameRecord g_wasmDebugLastFrameRecord;
+WasmDebugArgumentsRecord g_wasmDebugLastArgumentsRecord;
 WasmDebugLocalsRecord g_wasmDebugLastLocalsRecord;
 // Phase 4 slice 2: the structured DebuggerIPCEvent payload populated on
 // every breakpoint hit. g_wasmDebugLastIpcEventValid is set to 1 by
@@ -406,6 +446,7 @@ struct WasmDebugBreakpointSlot
 static_assert(sizeof(WasmDebugBreakpointSlot) == 88);
 
 WasmDebugBreakpointSlot g_wasmDebugBreakpoints[WasmDebugMaxBreakpoints];
+uint32_t g_wasmDebugBreakpointILOffsets[WasmDebugMaxBreakpoints];
 
 // Session-level breakpoint state. Single-threaded wasm means only one
 // breakpoint can be "stopped" at a time; tracking which slot fired
@@ -435,6 +476,7 @@ uint64_t g_wasmDebugOneShotStepRequestToken;
 
 void ClearWasmDebugStepIntoCallState(bool clearFallbackBreakpoint);
 void ClearWasmDebugOneShotStepState(bool clearBreakpoints);
+extern "C" void CoreClrWasmDebugMaybePatchInterpreterMethod(MethodDesc* methodDesc, uint32_t ilOffset, int32_t* ip);
 
 // Phase 6 connection-state gate. Mirrors Mono's
 // mono_wasm_set_is_debugger_attached (src/mono/mono/component/mini-wasm-debugger.c:38).
@@ -647,6 +689,40 @@ void SetWasmDebugBreakpointLocalsRecord(MethodDesc* methodDesc, InterpMethodCont
     }
 }
 
+void SetWasmDebugBreakpointArgumentsRecord(MethodDesc* methodDesc, InterpMethodContextFrame* frame)
+{
+    memset(&g_wasmDebugLastArgumentsRecord, 0, sizeof(g_wasmDebugLastArgumentsRecord));
+    g_wasmDebugLastArgumentsRecord.Magic = WasmDebugArgumentsRecordMagic;
+    g_wasmDebugLastArgumentsRecord.Version = 1;
+    g_wasmDebugLastArgumentsRecord.MethodToken = methodDesc->GetMemberDef();
+
+    if (frame == nullptr || frame->startIp == nullptr)
+    {
+        return;
+    }
+
+    WalkInterpMethodLocal arguments[WasmDebugMaxArgumentsPerFrame];
+    int argumentCount = WalkInterpMethodArguments(frame->startIp->Method, arguments, WasmDebugMaxArgumentsPerFrame);
+    if (argumentCount <= 0)
+    {
+        return;
+    }
+
+    g_wasmDebugLastArgumentsRecord.ArgumentCount = static_cast<uint32_t>(argumentCount);
+    for (int i = 0; i < argumentCount; i++)
+    {
+        WasmDebugLocalRecord& argument = g_wasmDebugLastArgumentsRecord.Arguments[i];
+        argument.ILSlot = arguments[i].ILSlot;
+        argument.TypeTag = arguments[i].TypeTag;
+        argument.ByteOffset = arguments[i].ByteOffset;
+        argument.ByteSize = arguments[i].ByteSize;
+        if (arguments[i].Name != nullptr)
+        {
+            CopyWasmDebugString(argument.Name, sizeof(argument.Name), arguments[i].Name);
+        }
+    }
+}
+
 void EmitWasmDebugException(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, OBJECTREF exceptionObj)
 {
     if (g_wasmDebugOneShotStepPending)
@@ -734,13 +810,16 @@ void EmitWasmDebugAsyncBreak(MethodDesc* methodDesc, uint32_t ilOffset, const in
     g_wasmDebugLastStoppedILOffset = ilOffset;
     g_wasmDebugLastStoppedFrame = reinterpret_cast<InterpMethodContextFrame*>(frameAddress);
 
-    // Populate the locals schema record so the debugger can enumerate
-    // the current frame's IL local slots while the runtime is halted.
-    // The interpreter has the frame in hand at INTOP_DEBUG_SEQ_POINT
-    // and forwards it here; populating the record is cheap and gives
-    // the IDE-side path the same inspection surface that breakpoint
-    // stops already expose.
-    SetWasmDebugBreakpointLocalsRecord(methodDesc, reinterpret_cast<InterpMethodContextFrame*>(frameAddress));
+    InterpMethodContextFrame* frame = reinterpret_cast<InterpMethodContextFrame*>(frameAddress);
+    uintptr_t stackAddress = frame != nullptr ? reinterpret_cast<uintptr_t>(frame->pStack) : 0;
+    SetWasmDebugBreakpointFrameRecord(
+        methodDesc,
+        ilOffset,
+        ip,
+        reinterpret_cast<uintptr_t>(frameAddress),
+        stackAddress);
+    SetWasmDebugBreakpointArgumentsRecord(methodDesc, frame);
+    SetWasmDebugBreakpointLocalsRecord(methodDesc, frame);
 
     coreClrDebugFireEventToPause(
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_wasmDebugLastIpcAsyncBreak)),
@@ -845,6 +924,12 @@ void EmitWasmDebugStepComplete(
     g_wasmDebugLastStoppedILOffset = ilOffset;
     g_wasmDebugLastStoppedFrame = frame;
 
+    uintptr_t frameAddress = reinterpret_cast<uintptr_t>(frame);
+    uintptr_t stackAddress = frame != nullptr ? reinterpret_cast<uintptr_t>(frame->pStack) : 0;
+    SetWasmDebugBreakpointFrameRecord(methodDesc, ilOffset, ip, frameAddress, stackAddress);
+    SetWasmDebugBreakpointArgumentsRecord(methodDesc, frame);
+    SetWasmDebugBreakpointLocalsRecord(methodDesc, frame);
+
     coreClrDebugFireEventToPause(
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_wasmDebugLastIpcStepComplete)),
         static_cast<uint32_t>(sizeof(g_wasmDebugLastIpcStepComplete)));
@@ -904,6 +989,8 @@ void ClearWasmDebugBreakpointSlot(WasmDebugBreakpointSlot& slot)
     slot.IsOneShot = false;
     slot.MethodName[0] = 0;
     slot.MethodToken = 0;
+    uint32_t slotIndex = static_cast<uint32_t>(&slot - g_wasmDebugBreakpoints);
+    g_wasmDebugBreakpointILOffsets[slotIndex] = 0;
     slot.HitCount = 0;
 }
 
@@ -985,6 +1072,93 @@ bool TryGetWasmDebugInterpreterIPOffset(MethodDesc* methodDesc, const int32_t* i
     return true;
 }
 
+bool TryGetWasmDebugInterpreterIPForILOffset(MethodDesc* methodDesc, uint32_t ilOffset, int32_t** outIP)
+{
+    if (outIP != nullptr)
+    {
+        *outIP = nullptr;
+    }
+
+    if (methodDesc == nullptr || outIP == nullptr)
+    {
+        return false;
+    }
+
+    PTR_InterpByteCodeStart byteCodeStart = methodDesc->GetInterpreterCode();
+    if (byteCodeStart == nullptr || byteCodeStart->Method == nullptr)
+    {
+        return false;
+    }
+
+    PTR_InterpMethod method = byteCodeStart->Method;
+    const InterpILToNativeMapEntry* selectedEntry = nullptr;
+    for (int32_t i = 0; i < method->ilToNativeMapSize; i++)
+    {
+        const InterpILToNativeMapEntry& entry = method->ilToNativeMap[i];
+        if (entry.ILOffset < ilOffset)
+        {
+            continue;
+        }
+
+        if (selectedEntry == nullptr || entry.ILOffset < selectedEntry->ILOffset)
+        {
+            selectedEntry = &entry;
+        }
+    }
+
+    if (selectedEntry == nullptr ||
+        selectedEntry->NativeOffset < sizeof(InterpByteCodeStart) ||
+        (selectedEntry->NativeOffset % sizeof(int32_t)) != 0)
+    {
+        return false;
+    }
+
+    uint32_t byteCodeOffset =
+        (selectedEntry->NativeOffset - sizeof(InterpByteCodeStart)) / sizeof(int32_t);
+    if (byteCodeOffset >= static_cast<uint32_t>(method->codeSize))
+    {
+        return false;
+    }
+
+    *outIP = const_cast<int32_t*>(byteCodeStart->GetByteCodes() + byteCodeOffset);
+    return true;
+}
+
+bool TryGetWasmDebugInterpreterILOffset(MethodDesc* methodDesc, const int32_t* ip, uint32_t* outILOffset)
+{
+    uint32_t byteCodeOffset = 0;
+    if (!TryGetWasmDebugInterpreterIPOffset(methodDesc, ip, &byteCodeOffset))
+    {
+        return false;
+    }
+
+    PTR_InterpByteCodeStart byteCodeStart = methodDesc->GetInterpreterCode();
+    PTR_InterpMethod method = byteCodeStart->Method;
+    uint32_t nativeOffset = static_cast<uint32_t>(sizeof(InterpByteCodeStart)) +
+        byteCodeOffset * static_cast<uint32_t>(sizeof(int32_t));
+    const InterpILToNativeMapEntry* selectedEntry = nullptr;
+    for (int32_t i = 0; i < method->ilToNativeMapSize; i++)
+    {
+        const InterpILToNativeMapEntry& entry = method->ilToNativeMap[i];
+        if (entry.NativeOffset <= nativeOffset &&
+            (selectedEntry == nullptr || entry.NativeOffset > selectedEntry->NativeOffset))
+        {
+            selectedEntry = &entry;
+        }
+    }
+
+    if (selectedEntry == nullptr)
+    {
+        return false;
+    }
+
+    if (outILOffset != nullptr)
+    {
+        *outILOffset = selectedEntry->ILOffset;
+    }
+    return true;
+}
+
 bool IsWasmDebugInterpreterIPInMethod(MethodDesc* methodDesc, const int32_t* ip)
 {
     return TryGetWasmDebugInterpreterIPOffset(methodDesc, ip, nullptr);
@@ -1011,6 +1185,7 @@ bool TryGetOriginalOpcodeForActivePatch(const int32_t* ip, int32_t* originalOpco
 bool ArmWasmDebugBreakpointSlot(
     WasmDebugBreakpointSlot& slot,
     uint32_t methodToken,
+    uint32_t ilOffset,
     const char* methodName,
     bool isOneShot)
 {
@@ -1025,6 +1200,8 @@ bool ArmWasmDebugBreakpointSlot(
     memcpy(slot.MethodName, name, nameLength);
     slot.MethodName[nameLength] = 0;
     slot.MethodToken = (nameLength != 0) ? 0 : methodToken;
+    uint32_t slotIndex = static_cast<uint32_t>(&slot - g_wasmDebugBreakpoints);
+    g_wasmDebugBreakpointILOffsets[slotIndex] = ilOffset;
     slot.HitCount = 0;
     slot.IsOneShot = isOneShot;
     slot.Armed = true;
@@ -1044,7 +1221,7 @@ bool ArmWasmDebugBreakpointSlot(
     return true;
 }
 
-bool ArmWasmDebugBreakpoint(uint32_t methodToken, const char* methodName)
+bool ArmWasmDebugBreakpoint(uint32_t methodToken, uint32_t ilOffset, const char* methodName)
 {
     uint32_t slotIndex = WasmDebugMaxBreakpoints;
     WasmDebugBreakpointSlot* slot = FindFreeWasmDebugBreakpointSlot(&slotIndex);
@@ -1053,7 +1230,7 @@ bool ArmWasmDebugBreakpoint(uint32_t methodToken, const char* methodName)
         return false;
     }
 
-    return ArmWasmDebugBreakpointSlot(*slot, methodToken, methodName, false);
+    return ArmWasmDebugBreakpointSlot(*slot, methodToken, ilOffset, methodName, false);
 }
 
 bool ArmWasmDebugOneShotBreakpoint(MethodDesc* methodDesc, const int32_t* targetIP)
@@ -1082,7 +1259,7 @@ bool ArmWasmDebugOneShotBreakpoint(MethodDesc* methodDesc, const int32_t* target
         }
     }
 
-    if (!ArmWasmDebugBreakpointSlot(*slot, methodDesc->GetMemberDef(), "", true))
+    if (!ArmWasmDebugBreakpointSlot(*slot, methodDesc->GetMemberDef(), 0, "", true))
     {
         return false;
     }
@@ -1248,7 +1425,7 @@ bool ArmWasmDebugBreakpointFromCommand(const char* command)
         name = "";
     }
 
-    return ArmWasmDebugBreakpoint(methodToken, name);
+    return ArmWasmDebugBreakpoint(methodToken, 0, name);
 }
 
 bool WasmDebugBreakpointSlotMatches(const WasmDebugBreakpointSlot& slot, MethodDesc* methodDesc, uint32_t ilOffset)
@@ -1258,7 +1435,8 @@ bool WasmDebugBreakpointSlotMatches(const WasmDebugBreakpointSlot& slot, MethodD
         return false;
     }
 
-    if (!slot.IsOneShot && ilOffset != 0)
+    uint32_t slotIndex = static_cast<uint32_t>(&slot - g_wasmDebugBreakpoints);
+    if (!slot.IsOneShot && ilOffset != g_wasmDebugBreakpointILOffsets[slotIndex])
     {
         return false;
     }
@@ -1295,6 +1473,33 @@ void RequestWasmDebugContinue()
 {
     if (g_wasmDebugBreakpointStopped)
     {
+        // Reinstall persistent patches before the breakpoint callback returns.
+        // During a step, leave the stopped method unpatched so its ordinary
+        // breakpoints cannot preempt the step's one-shot target. A later stop
+        // and continue re-patches every active interpreted frame.
+        bool stepPending = g_wasmDebugOneShotStepPending || g_wasmDebugStepIntoCallPending;
+        for (InterpMethodContextFrame* frame = g_wasmDebugLastStoppedFrame;
+             frame != nullptr;
+             frame = frame->pParent)
+        {
+            if (frame->startIp == nullptr || frame->startIp->Method == nullptr)
+            {
+                continue;
+            }
+
+            MethodDesc* methodDesc = frame->startIp->Method->methodHnd;
+            if (methodDesc == nullptr ||
+                (stepPending && methodDesc == g_wasmDebugLastStoppedMethodDesc))
+            {
+                continue;
+            }
+
+            CoreClrWasmDebugMaybePatchInterpreterMethod(
+                methodDesc,
+                0,
+                const_cast<int32_t*>(frame->startIp->GetByteCodes()));
+        }
+
         g_wasmDebugContinueRequested = true;
         g_wasmDebugContinueCount++;
     }
@@ -1376,6 +1581,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastIpcModuleLoadValid()
 extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugBreakpoints()
 {
     return &g_wasmDebugBreakpoints[0];
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastArgumentsRecord()
+{
+    return &g_wasmDebugLastArgumentsRecord;
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE void* Getg_wasmDebugLastLocalsRecord()
@@ -1587,19 +1797,17 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugReceiveCommandRecord(con
             // Returns false when all WasmDebugMaxBreakpoints slots are
             // armed. Surface that as an error to the caller; the existing
             // protocol uses -1 for all command-record failures.
-            return ArmWasmDebugBreakpoint(0, record.MethodName) ? 0 : -1;
+            return ArmWasmDebugBreakpoint(0, 0, record.MethodName) ? 0 : -1;
 
         case WasmDebugCommandKind::SetBreakpointByToken:
-            if (record.ILOffset != 0)
-            {
-                return -1;
-            }
-
-            return ArmWasmDebugBreakpoint(record.MethodToken, "") ? 0 : -1;
+            return ArmWasmDebugBreakpoint(record.MethodToken, record.ILOffset, "") ? 0 : -1;
 
         case WasmDebugCommandKind::Continue:
             RequestWasmDebugContinue();
             return 0;
+
+        case WasmDebugCommandKind::ClearBreakpointByToken:
+            return static_cast<int32_t>(ClearWasmDebugBreakpointByToken(record.MethodToken));
 
         default:
             return -1;
@@ -1621,6 +1829,41 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugSubmitContinueRequest(co
         return -1;
     }
 
+    RequestWasmDebugContinue();
+    return 0;
+}
+
+int32_t RequestWasmDebugStepOut(uint64_t originalStepRequestToken)
+{
+    if (g_wasmDebugLastStoppedFrame == nullptr)
+    {
+        return -3;
+    }
+
+    InterpMethodContextFrame* callerFrame = g_wasmDebugLastStoppedFrame->pParent;
+    if (callerFrame == nullptr ||
+        callerFrame->startIp == nullptr ||
+        callerFrame->startIp->Method == nullptr ||
+        callerFrame->ip == nullptr)
+    {
+        return -3;
+    }
+
+    MethodDesc* callerMethodDesc = callerFrame->startIp->Method->methodHnd;
+    const int32_t* callerResumeIP = callerFrame->ip;
+    if (callerMethodDesc == nullptr ||
+        !IsWasmDebugInterpreterIPInMethod(callerMethodDesc, callerResumeIP))
+    {
+        return -3;
+    }
+
+    if (CountFreeWasmDebugBreakpointSlots() < 1 ||
+        !ArmWasmDebugOneShotBreakpoint(callerMethodDesc, callerResumeIP))
+    {
+        return -3;
+    }
+
+    SetWasmDebugOneShotStepState(originalStepRequestToken);
     RequestWasmDebugContinue();
     return 0;
 }
@@ -1676,41 +1919,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugSubmitStepIntoRequest(co
 
     if (stepKind == WasmDebugStepKind::Out)
     {
-        if (g_wasmDebugLastStoppedFrame == nullptr)
-        {
-            return -3;
-        }
-
-        InterpMethodContextFrame* callerFrame = g_wasmDebugLastStoppedFrame->pParent;
-        if (callerFrame == nullptr ||
-            callerFrame->startIp == nullptr ||
-            callerFrame->startIp->Method == nullptr ||
-            callerFrame->ip == nullptr)
-        {
-            return -3;
-        }
-
-        MethodDesc* callerMethodDesc = callerFrame->startIp->Method->methodHnd;
-        const int32_t* callerResumeIP = callerFrame->ip;
-        if (callerMethodDesc == nullptr ||
-            !IsWasmDebugInterpreterIPInMethod(callerMethodDesc, callerResumeIP))
-        {
-            return -3;
-        }
-
-        if (CountFreeWasmDebugBreakpointSlots() < 1)
-        {
-            return -3;
-        }
-
-        if (!ArmWasmDebugOneShotBreakpoint(callerMethodDesc, callerResumeIP))
-        {
-            return -3;
-        }
-
-        SetWasmDebugOneShotStepState(originalStepRequestToken);
-        RequestWasmDebugContinue();
-        return 0;
+        return RequestWasmDebugStepOut(originalStepRequestToken);
     }
 
     const int32_t* targets[2] = { nullptr, nullptr };
@@ -1788,6 +1997,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugSubmitStepIntoRequest(co
         }
 
         case WALK_RETURN:
+            return RequestWasmDebugStepOut(originalStepRequestToken);
+
         case WALK_THROW:
         default:
             return -2;
@@ -1838,10 +2049,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugSubmitStepIntoRequest(co
         }
     }
 
-    if (stepKind != WasmDebugStepKind::Into)
-    {
-        SetWasmDebugOneShotStepState(originalStepRequestToken);
-    }
+    SetWasmDebugOneShotStepState(originalStepRequestToken);
     RequestWasmDebugContinue();
     return 0;
 }
@@ -1905,6 +2113,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE int32_t CoreClrWasmDebugCopyLastEventRecord(uint
 extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetLastFrameRecordSize()
 {
     return sizeof(WasmDebugFrameRecord);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetLastArgumentsRecordSize()
+{
+    return sizeof(WasmDebugArgumentsRecord);
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE uint32_t CoreClrWasmDebugGetLastLocalsRecordSize()
@@ -2172,14 +2385,14 @@ extern "C" void CoreClrWasmDebugAsyncBreakAtSequencePoint(MethodDesc* methodDesc
         return;
     }
 
-    // INTOP_DEBUG_SEQ_POINT carries no IL-offset operand today. Keep the
-    // event field at the caller-provided value (0 for the current hook) until
-    // the interpreter exposes a real sequence-point IL map.
-    EmitWasmDebugAsyncBreak(methodDesc, ilOffset, ip, frameAddress);
+    uint32_t effectiveILOffset = ilOffset;
+    TryGetWasmDebugInterpreterILOffset(methodDesc, ip, &effectiveILOffset);
+    EmitWasmDebugAsyncBreak(methodDesc, effectiveILOffset, ip, frameAddress);
 }
 
 extern "C" void CoreClrWasmDebugMaybePatchInterpreterMethod(MethodDesc* methodDesc, uint32_t ilOffset, int32_t* ip)
 {
+    (void)ilOffset;
     // Phase 6 gate: never patch interpreter opcodes when the debugger is
     // not connected. Arming via ArmWasmDebugBreakpoint*() can still set
     // a slot (the protocol is "set a breakpoint, connect, run"), but the
@@ -2191,38 +2404,43 @@ extern "C" void CoreClrWasmDebugMaybePatchInterpreterMethod(MethodDesc* methodDe
         return;
     }
 
-    // Phase 7 multi-bp: scan all armed slots. Patch the IP once for
-    // the first matching un-patched slot; subsequent matching slots
-    // "ride along" by sharing the same PatchAddress + OriginalOpcode
-    // so the IP holds INTOP_BREAKPOINT exactly once. When the patch
-    // fires, HandleInterpreterBreakpoint identifies every PatchActive
-    // slot at this IP, bumps each one's HitCount, and clears each
-    // one's PatchActive — so cleanup via Clear* never tries to write
-    // a stale opcode back into the interpreter stream.
-    //
-    // Correctness invariant: every slot that is PatchActive at a given
-    // IP holds the *same* OriginalOpcode (captured BEFORE any patch is
-    // installed). The code below guarantees that by capturing *ip
-    // exactly once per call, before any write.
-    int32_t originalOpcode = 0;
-    bool patched = false;
-    for (auto& slot : g_wasmDebugBreakpoints)
+    for (uint32_t i = 0; i < WasmDebugMaxBreakpoints; i++)
     {
+        WasmDebugBreakpointSlot& slot = g_wasmDebugBreakpoints[i];
         if (slot.PatchActive)
         {
             continue;
         }
-        if (!WasmDebugBreakpointSlotMatches(slot, methodDesc, ilOffset))
+
+        uint32_t requestedILOffset = g_wasmDebugBreakpointILOffsets[i];
+        if (!WasmDebugBreakpointSlotMatches(slot, methodDesc, requestedILOffset))
         {
             continue;
         }
-        if (!patched)
+
+        int32_t* targetIP = nullptr;
+        if (requestedILOffset == 0)
         {
-            originalOpcode = *ip;
-            *ip = INTOP_BREAKPOINT;
-            patched = true;
+            targetIP = ip;
         }
-        slot.PatchAddress = ip;
+        else if (!TryGetWasmDebugInterpreterIPForILOffset(methodDesc, requestedILOffset, &targetIP))
+        {
+            continue;
+        }
+
+        int32_t originalOpcode = 0;
+        if (!TryGetOriginalOpcodeForActivePatch(targetIP, &originalOpcode))
+        {
+            originalOpcode = *targetIP;
+            if (originalOpcode == INTOP_BREAKPOINT)
+            {
+                continue;
+            }
+
+            *targetIP = INTOP_BREAKPOINT;
+        }
+
+        slot.PatchAddress = targetIP;
         slot.OriginalOpcode = originalOpcode;
         slot.PatchActive = true;
     }
@@ -2257,18 +2475,25 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     bool firedStepIntoCallFallback = false;
     bool firedTrackedOneShotStep = false;
     uint64_t stepCompleteOriginalToken = 0;
-    TryGetWasmDebugInterpreterIPOffset(methodDesc, ip, &effectiveILOffset);
+    TryGetWasmDebugInterpreterILOffset(methodDesc, ip, &effectiveILOffset);
     for (uint32_t i = 0; i < WasmDebugMaxBreakpoints; i++)
     {
         WasmDebugBreakpointSlot& slot = g_wasmDebugBreakpoints[i];
+        uint32_t slotILOffset = slot.IsOneShot
+            ? effectiveILOffset
+            : g_wasmDebugBreakpointILOffsets[i];
         if (slot.PatchActive &&
             slot.PatchAddress == ip &&
-            WasmDebugBreakpointSlotMatches(slot, methodDesc, effectiveILOffset))
+            WasmDebugBreakpointSlotMatches(slot, methodDesc, slotILOffset))
         {
             if (firingSlot == nullptr)
             {
                 firingSlot = &slot;
                 firingSlotIndex = i;
+                if (!slot.IsOneShot)
+                {
+                    effectiveILOffset = slotILOffset;
+                }
             }
             slot.HitCount++;
             if (slot.IsOneShot)
@@ -2299,10 +2524,10 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     // that was pointing at this IP — the INTOP_BREAKPOINT is gone, so
     // leaving any slot PatchActive would be a stale lie that would
     // cause a future Clear* call to write a wrong opcode back into the
-    // interpreter stream. Each slot remains Armed; the next interpreter
-    // entry into the matching method will re-patch via
-    // MaybePatchInterpreterMethod. We use the firing slot for the
-    // actual *ip write (via RestoreWasmDebugBreakpointPatchSlot) so the
+    // interpreter stream. Each slot remains Armed; continue re-patches
+    // persistent breakpoints before the callback returns, while the
+    // interpreter bypass executes this restored opcode once. We use the
+    // firing slot for the actual *ip write (via RestoreWasmDebugBreakpointPatchSlot) so the
     // helper-defined invariant "patched IP holds OriginalOpcode after
     // restore" lives in one place; the loop below only clears state on
     // the other piggy-backing slots since their PatchAddress already
@@ -2341,6 +2566,7 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
 
     if (firedStepIntoCallFallback)
     {
+        stepCompleteOriginalToken = g_wasmDebugStepIntoTokenAtCall;
         ClearWasmDebugStepIntoCallState(false);
     }
     else if (firedTrackedOneShotStep)
@@ -2360,7 +2586,7 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     g_wasmDebugLastStoppedILOffset = effectiveILOffset;
     g_wasmDebugLastStoppedFrame = reinterpret_cast<InterpMethodContextFrame*>(frameAddress);
 
-    if (firedTrackedOneShotStep)
+    if (firedTrackedOneShotStep || firedStepIntoCallFallback)
     {
         EmitWasmDebugStepComplete(
             methodDesc,
@@ -2369,8 +2595,7 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
             stepCompleteOriginalToken,
             false,
             reinterpret_cast<InterpMethodContextFrame*>(frameAddress));
-        g_wasmDebugBreakpointStopped = true;
-        g_wasmDebugContinueRequested = false;
+        return true;
     }
 
     LPCUTF8 methodName = methodDesc->GetName();
@@ -2386,6 +2611,7 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     SetWasmDebugEvent(event);
     SetWasmDebugBreakpointEventRecord(methodDesc, effectiveILOffset);
     SetWasmDebugBreakpointFrameRecord(methodDesc, effectiveILOffset, ip, frameAddress, stackAddress);
+    SetWasmDebugBreakpointArgumentsRecord(methodDesc, reinterpret_cast<InterpMethodContextFrame*>(frameAddress));
     SetWasmDebugBreakpointLocalsRecord(methodDesc, reinterpret_cast<InterpMethodContextFrame*>(frameAddress));
 
     // Phase 4 slice 2: populate the structured DebuggerIPCEvent payload

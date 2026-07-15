@@ -21,7 +21,7 @@ const IpcStepCompleteType = 0x0104;
 
 const ExpectedVersionBlobMagic = 0x42564457;
 const ExpectedAbiVersion = 1;
-const ExpectedProtocolBreakingChangeCounter = 14;
+const ExpectedProtocolBreakingChangeCounter = 16;
 const IpcModuleLoadSize = 312;
 
 function fail(message) {

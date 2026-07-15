@@ -7,7 +7,7 @@ export const CommandRecordSize = 80;
 export const ExpectedLocalTypeTags = [0x08, 0x0a, 0x0d];
 export const ExpectedVersionBlobMagic = 0x42564457;
 export const ExpectedAbiVersion = 1;
-export const ExpectedProtocolBreakingChangeCounter = 14;
+export const ExpectedProtocolBreakingChangeCounter = 16;
 export const IpcAsyncBreakMagic = 0x41435049;
 export const IpcAsyncBreakSize = 88;
 export const IpcAsyncBreakType = 0x0107;
@@ -647,18 +647,18 @@ export function pollDbiFrameRecord(sidecar) {
     return { pollResult, bytesWritten, record };
 }
 
-function readLocalsRecord(memory, address) {
+function readFrameVariablesRecord(memory, address, countName, variablesName) {
     const view = new DataView(memory.buffer, address, 1552);
-    const localCount = view.getUint32(12, true);
-    const locals = [];
-    for (let index = 0; index < Math.min(localCount, 32); index++) {
-        const localOffset = 16 + (index * 48);
-        locals.push({
-            ilSlot: view.getUint32(localOffset, true),
-            typeTag: view.getUint32(localOffset + 4, true),
-            byteOffset: view.getUint32(localOffset + 8, true),
-            byteSize: view.getUint32(localOffset + 12, true),
-            name: readNullTerminatedAscii(memory, address + localOffset + 16, 32)
+    const variableCount = view.getUint32(12, true);
+    const variables = [];
+    for (let index = 0; index < Math.min(variableCount, 32); index++) {
+        const variableOffset = 16 + (index * 48);
+        variables.push({
+            ilSlot: view.getUint32(variableOffset, true),
+            typeTag: view.getUint32(variableOffset + 4, true),
+            byteOffset: view.getUint32(variableOffset + 8, true),
+            byteSize: view.getUint32(variableOffset + 12, true),
+            name: readNullTerminatedAscii(memory, address + variableOffset + 16, 32)
         });
     }
 
@@ -666,9 +666,24 @@ function readLocalsRecord(memory, address) {
         magic: view.getUint32(0, true),
         version: view.getUint32(4, true),
         methodToken: view.getUint32(8, true),
-        localCount,
-        locals
+        [countName]: variableCount,
+        [variablesName]: variables
     };
+}
+
+export function pollDbiArguments(sidecar) {
+    const recordSize = 1552;
+    const stack = sidecar.exports.stackSave();
+    const recordAddress = sidecar.exports.stackAlloc(recordSize);
+    const bytesWrittenAddress = sidecar.exports.stackAlloc(4);
+    const pollResult = sidecar.module._coreclr_wasm_dbi_dac_dbi_enumerate_arguments(recordAddress, recordSize, bytesWrittenAddress);
+    const bytesWritten = new DataView(sidecar.module.HEAPU8.buffer, bytesWrittenAddress, 4).getUint32(0, true);
+    const record = pollResult === 0
+        ? readFrameVariablesRecord(sidecar.module.HEAPU8, recordAddress, 'argumentCount', 'arguments')
+        : null;
+    sidecar.exports.stackRestore(stack);
+
+    return { pollResult, bytesWritten, record };
 }
 
 export function pollDbiLocals(sidecar) {
@@ -678,7 +693,9 @@ export function pollDbiLocals(sidecar) {
     const bytesWrittenAddress = sidecar.exports.stackAlloc(4);
     const pollResult = sidecar.module._coreclr_wasm_dbi_dac_dbi_enumerate_locals(recordAddress, recordSize, bytesWrittenAddress);
     const bytesWritten = new DataView(sidecar.module.HEAPU8.buffer, bytesWrittenAddress, 4).getUint32(0, true);
-    const record = pollResult === 0 ? readLocalsRecord(sidecar.module.HEAPU8, recordAddress) : null;
+    const record = pollResult === 0
+        ? readFrameVariablesRecord(sidecar.module.HEAPU8, recordAddress, 'localCount', 'locals')
+        : null;
     sidecar.exports.stackRestore(stack);
 
     return { pollResult, bytesWritten, record };
@@ -725,6 +742,15 @@ export function readDbiLocalValues(sidecar, frameRecord, localsRecord) {
     }
 
     return localsRecord.locals.map(local => readDbiLocalValue(sidecar, frameRecord.frameAddress, local));
+}
+
+export function readDbiArgumentValues(sidecar, frameRecord, argumentsRecord) {
+    if (frameRecord === null || argumentsRecord === null) {
+        return [];
+    }
+
+    return argumentsRecord.arguments.map(argument =>
+        readDbiLocalValue(sidecar, frameRecord.frameAddress, argument));
 }
 
 export function lookupDbiSourceLocation(sidecar, methodToken, ilOffset) {
@@ -860,6 +886,7 @@ export function installDebuggerImports(ctx) {
             symbolName === 'g_wasmDebugLastIpcModuleLoad' ? runtimeExports.Getg_wasmDebugLastIpcModuleLoad() >>> 0 :
             symbolName === 'g_wasmDebugLastIpcModuleLoadValid' ? runtimeExports.Getg_wasmDebugLastIpcModuleLoadValid() >>> 0 :
             symbolName === 'g_wasmDebugBreakpoints' ? runtimeExports.Getg_wasmDebugBreakpoints() >>> 0 :
+            symbolName === 'g_wasmDebugLastArgumentsRecord' ? runtimeExports.Getg_wasmDebugLastArgumentsRecord() >>> 0 :
             symbolName === 'g_wasmDebugLastLocalsRecord' ? runtimeExports.Getg_wasmDebugLastLocalsRecord() >>> 0 :
             0;
         if (symbolAddress === 0 || addressOutAddress + 8 > dbg.length) {

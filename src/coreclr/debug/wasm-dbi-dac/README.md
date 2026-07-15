@@ -261,8 +261,9 @@ acknowledged handshake returns `HrIncompatibleProtocol`.
 | `coreclr_wasm_dbi_dac_dbi_poll_ipc_step_complete`   | Drain structured step-complete event (`WasmDbgIpcEventStepComplete`, 96 bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_poll_ipc_module_load`     | Drain structured module load/unload event (`WasmDbgIpcEventModuleLoad`, 312 bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints`    | Drain the runtime breakpoint slot table (`8 + 16 * 88` bytes) via DAC `ReadVirtual`. |
+| `coreclr_wasm_dbi_dac_dbi_enumerate_arguments`      | Drain the stopped-frame argument record (`16 + 32 * 48` bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_locals`         | Drain the stopped-frame locals record (`16 + 32 * 48` bytes) via DAC `ReadVirtual`. |
-| `coreclr_wasm_dbi_dac_dbi_read_local_value`         | Read a stopped-frame local slot (`WasmDbgValueRecord`, 104 bytes) via DAC `ReadVirtual`. |
+| `coreclr_wasm_dbi_dac_dbi_read_local_value`         | Read a stopped-frame argument or local slot (`WasmDbgValueRecord`, 104 bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_lookup_source_location`   | Resolve source `(file, line, column)` for the stopped method token + IL offset through the managed-BCL host bridge. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_appdomains`     | Enumerate DAC `IXCLRDataProcess` AppDomains (`8 + Count * 68` bytes). |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_assemblies`     | Enumerate DAC assemblies for the selected AppDomain (`8 + Count * 264` bytes). |
@@ -388,7 +389,8 @@ numerous and need a paged cursor rather than a single fixed buffer.
 byteSize, typeTag, outBufferAddress, outBufferLength)` reads the
 `InterpMethodContextFrame::pStack` pointer from `frameAddress`, then
 reads the slot at `pStack + byteOffset` and writes this fixed record to
-the sidecar buffer. Pointer-like element types read the 32-bit wasm
+the sidecar buffer. Both argument and local enumeration records provide
+offsets into this same interpreter frame. Pointer-like element types read the 32-bit wasm
 pointer from the frame slot. Object-reference element types also read the
 object's first word as the MethodTable address when the object pointer is
 non-null; non-object pointer-like element types leave MethodTableAddress

@@ -23,7 +23,7 @@ const CommandRecordSize = 80;
 // point will run (CORDBG_E_INCOMPATIBLE_PROTOCOL otherwise).
 const ExpectedVersionBlobMagic = 0x42564457; // 'WDVB' little-endian
 const ExpectedAbiVersion = 1;
-const ExpectedProtocolBreakingChangeCounter = 14;
+const ExpectedProtocolBreakingChangeCounter = 16;
 const IpcModuleLoadSize = 312;
 
 function fail(message) {
@@ -621,11 +621,12 @@ async function main() {
     let stepRequestDuringCallbackResult = -1;
     let preStepBreakpointCount = -1;
     let afterStepRequestBreakpointCount = -1;
-    let stepLandingBreakpointCount = -1;
     let stepCompleteBreakpointCount = -1;
     let stepOutFromMethodEnterRequestResult = -1;
     let stepOutFromMethodEnterRequestToken = 0n;
     let stepOutCompleteBreakpointCount = -1;
+    let stepIntoTargetComplete = null;
+    let stepOutComplete = null;
     const breakpointEvents = [];
     const stepCompleteEvents = [];
     const stepRequestResults = [];
@@ -800,21 +801,35 @@ async function main() {
                             stepCompleteEvents.push(dbiStepCompleteDuringCallback.payload);
                         }
                         const stepCompleteBreakpoints = enumerateBreakpoints(debuggerInstance);
-                        if (stepCompleteEvents.length === 1) {
+                        if (stepCompleteBreakpointCount < 0) {
                             stepCompleteBreakpointCount = stepCompleteBreakpoints.enumerateResult === 0 ? stepCompleteBreakpoints.activeCount : -1;
-                        } else if (stepCompleteEvents.length === 2) {
-                            stepOutCompleteBreakpointCount = stepCompleteBreakpoints.enumerateResult === 0 ? stepCompleteBreakpoints.activeCount : -1;
                         }
                         const stepComplete = dbiStepCompleteDuringCallback.payload;
                         if (stepComplete !== null &&
-                            stepCompleteEvents.length === 1 &&
                             stepComplete.funcMetadataToken === ExpectedStepIntoTargetToken &&
                             stepComplete.isIL === 1) {
+                            stepIntoTargetComplete = stepComplete;
                             stepOutFromMethodEnterRequestToken = stepComplete.originalStepRequestToken;
                             stepOutFromMethodEnterRequestResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request(
                                 Number(stepOutFromMethodEnterRequestToken & 0xffffffffn),
                                 Number(stepOutFromMethodEnterRequestToken >> 32n),
                                 2);
+                        } else if (stepComplete !== null &&
+                            stepOutFromMethodEnterRequestResult === 0 &&
+                            stepComplete.funcMetadataToken === ExpectedStepIntoCallerToken) {
+                            stepOutComplete = stepComplete;
+                            stepOutCompleteBreakpointCount = stepCompleteBreakpoints.enumerateResult === 0
+                                ? stepCompleteBreakpoints.activeCount
+                                : -1;
+                        } else if (stepComplete !== null &&
+                            stepComplete.funcMetadataToken === ExpectedStepIntoCallerToken &&
+                            stepCompleteEvents.length <= MaxStepRequests) {
+                            const stepResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request(
+                                Number(stepComplete.originalStepRequestToken & 0xffffffffn),
+                                Number(stepComplete.originalStepRequestToken >> 32n),
+                                0);
+                            stepRequestResults.push(stepResult);
+                            stepRequestTokens.push(stepComplete.originalStepRequestToken);
                         }
                         return 0;
                     }
@@ -957,10 +972,6 @@ async function main() {
                         }
                     }
 
-                    if (breakpointEvents.length === 2) {
-                        const stepLanding = enumerateBreakpoints(debuggerInstance);
-                        stepLandingBreakpointCount = stepLanding.enumerateResult === 0 ? stepLanding.activeCount : -1;
-                    }
                 }
 
                 return receiveResult;
@@ -1016,9 +1027,7 @@ async function main() {
         const disconnectResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_disconnect_runtime();
         const sessionDestroyResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_session_destroy();
         const firstEvent = breakpointEvents[0];
-        const stepEvent = breakpointEvents[1];
-        const stepComplete = stepCompleteEvents[0];
-        const stepOutComplete = stepCompleteEvents[1];
+        const stepComplete = stepIntoTargetComplete;
         const summaryStepComplete = stepComplete === undefined ? null : {
             ...stepComplete,
             stepToken: `0x${stepComplete.stepToken.toString(16)}`,
@@ -1038,14 +1047,10 @@ async function main() {
             breakpointEventCount: breakpointEvents.length,
             firstOffset: firstEvent?.ipc?.offset,
             firstIsIL: firstEvent?.ipc?.isIL,
-            stepOffset: stepEvent?.ipc?.offset,
-            stepIsIL: stepEvent?.ipc?.isIL,
             firstToken: firstEvent?.ipc?.breakpointToken !== undefined ? `0x${firstEvent.ipc.breakpointToken.toString(16)}` : null,
-            stepToken: stepEvent?.ipc?.breakpointToken !== undefined ? `0x${stepEvent.ipc.breakpointToken.toString(16)}` : null,
             stepRequestDuringCallbackResult,
             preStepBreakpointCount,
             afterStepRequestBreakpointCount,
-            stepLandingBreakpointCount,
             stepCompleteBreakpointCount,
             stepOutCompleteBreakpointCount,
             stepOutFromMethodEnterRequestResult,
@@ -1065,19 +1070,14 @@ async function main() {
         };
         console.log(JSON.stringify(summary, null, 2));
 
-        if (result.hitCount < 2 ||
+        if (result.hitCount !== 1 ||
             result.copyResult !== 0 ||
-            breakpointEvents.length < 2 ||
+            breakpointEvents.length !== 1 ||
             firstEvent?.ipc?.magic !== 0x42435049 ||
-            stepEvent?.ipc?.magic !== 0x42435049 ||
             firstEvent?.ipc?.type !== 0x100 ||
-            stepEvent?.ipc?.type !== 0x100 ||
             firstEvent?.ipc?.isIL !== 1 ||
-            stepEvent?.ipc?.isIL !== 0 ||
             firstEvent?.ipc?.offset !== 0 ||
-            stepEvent?.ipc?.offset <= firstEvent?.ipc?.offset ||
             firstEvent?.ipc?.breakpointToken === 0n ||
-            stepEvent?.ipc?.breakpointToken <= firstEvent?.ipc?.breakpointToken ||
             stepRequestResults.length === 0 ||
             stepRequestResults.some(result => result !== 0) ||
             preStepBreakpointCount < 1 ||

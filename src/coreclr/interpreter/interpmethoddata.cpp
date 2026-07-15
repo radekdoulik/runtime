@@ -21,6 +21,7 @@ InterpMethodDataBuilder::InterpMethodDataBuilder()
     m_sections[(int)InterpMethodDataSection::DataItems].alignment = sizeof(void*);
     m_sections[(int)InterpMethodDataSection::AsyncSuspendData].alignment = sizeof(void*);
     m_sections[(int)InterpMethodDataSection::IntervalMaps].alignment = sizeof(uint32_t);
+    m_sections[(int)InterpMethodDataSection::ILToNativeMap].alignment = sizeof(uint32_t);
 
     // Header is always sizeof(InterpMethod*) for the InterpByteCodeStart
     m_sections[(int)InterpMethodDataSection::Header].size = sizeof(InterpMethod*);
@@ -121,6 +122,11 @@ InterpSectionRef InterpMethodDataBuilder::AllocateLocalDescriptors(int32_t count
     return AllocateInSection(InterpMethodDataSection::LocalDescriptors, count * sizeof(WalkInterpMethodLocal));
 }
 
+InterpSectionRef InterpMethodDataBuilder::AllocateILToNativeMap(int32_t count)
+{
+    return AllocateInSection(InterpMethodDataSection::ILToNativeMap, count * sizeof(InterpILToNativeMapEntry));
+}
+
 InterpSectionRef InterpMethodDataBuilder::AllocateDataItems(int32_t count)
 {
     return AllocateInSection(InterpMethodDataSection::DataItems, count * sizeof(void*));
@@ -136,9 +142,14 @@ InterpSectionRef InterpMethodDataBuilder::AllocateIntervalMap(int32_t count)
     return AllocateInSection(InterpMethodDataSection::IntervalMaps, count * sizeof(InterpIntervalMapEntry));
 }
 
-INTERP_API int WalkInterpMethodLocals(const InterpMethod* method, WalkInterpMethodLocal* outBuffer, uint32_t bufferCapacity)
+static int WalkInterpMethodVariables(
+    const InterpMethod* method,
+    int32_t variableCount,
+    const WalkInterpMethodLocal* variables,
+    WalkInterpMethodLocal* outBuffer,
+    uint32_t bufferCapacity)
 {
-    if (method == nullptr || !method->CheckIntegrity() || method->numLocals < 0)
+    if (method == nullptr || !method->CheckIntegrity() || variableCount < 0)
     {
         return -1;
     }
@@ -148,21 +159,33 @@ INTERP_API int WalkInterpMethodLocals(const InterpMethod* method, WalkInterpMeth
         return -1;
     }
 
-    if (method->numLocals != 0 && method->locals == nullptr)
+    if (variableCount != 0 && variables == nullptr)
     {
         return -1;
     }
 
-    uint32_t localCount = static_cast<uint32_t>(method->numLocals);
-    if (localCount > bufferCapacity)
+    uint32_t variableCountToCopy = static_cast<uint32_t>(variableCount);
+    if (variableCountToCopy > bufferCapacity)
     {
-        localCount = bufferCapacity;
+        variableCountToCopy = bufferCapacity;
     }
 
-    for (uint32_t i = 0; i < localCount; i++)
+    for (uint32_t i = 0; i < variableCountToCopy; i++)
     {
-        outBuffer[i] = method->locals[i];
+        outBuffer[i] = variables[i];
     }
 
-    return static_cast<int>(localCount);
+    return static_cast<int>(variableCountToCopy);
+}
+
+INTERP_API int WalkInterpMethodArguments(const InterpMethod* method, WalkInterpMethodLocal* outBuffer, uint32_t bufferCapacity)
+{
+    return WalkInterpMethodVariables(method, method != nullptr ? method->numArguments : -1,
+                                     method != nullptr ? method->arguments : nullptr, outBuffer, bufferCapacity);
+}
+
+INTERP_API int WalkInterpMethodLocals(const InterpMethod* method, WalkInterpMethodLocal* outBuffer, uint32_t bufferCapacity)
+{
+    return WalkInterpMethodVariables(method, method != nullptr ? method->numLocals : -1,
+                                     method != nullptr ? method->locals : nullptr, outBuffer, bufferCapacity);
 }

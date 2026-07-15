@@ -77,7 +77,8 @@ export async function runStepCompleteSmoke(options) {
         stepKind,
         stepKindName,
         expectedLandingMethodToken,
-        forbiddenLandingMethodToken
+        forbiddenLandingMethodToken,
+        requireOffsetAdvance = true
     } = options;
     globalThis.__smokeResult = undefined;
     setStatus('loading runtime');
@@ -200,7 +201,7 @@ export async function runStepCompleteSmoke(options) {
         assert(stepComplete?.hr === 0, `step-complete hr nonzero: ${stepComplete?.hr}`);
         assert(stepComplete?.funcMetadataToken === expectedLandingMethodToken, `step landed in unexpected method: 0x${stepComplete?.funcMetadataToken.toString(16)}`);
         assert(stepComplete?.funcMetadataToken !== forbiddenLandingMethodToken, 'step landed in forbidden method');
-        assert(stepComplete?.ilOffset > initialBreakpoint.offset, 'step did not advance past the breakpoint offset');
+        assert(!requireOffsetAdvance || stepComplete?.ilOffset > initialBreakpoint.offset, 'step did not advance past the breakpoint offset');
         assert(stepComplete?.isIL === 0, 'step-complete isIL should be 0 (native offset)');
         assert(stepComplete?.stepToken !== 0n, 'step-complete token missing');
         assert(stepComplete?.originalStepRequestToken === initialBreakpoint.breakpointToken, 'step-complete original token mismatch');
