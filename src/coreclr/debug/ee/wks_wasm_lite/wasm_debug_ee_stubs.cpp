@@ -452,8 +452,6 @@ DebuggerJitInfo::DebuggerJitInfo(DebuggerMethodInfo *minfo, NativeCodeVersion na
       m_lastIL(0),
       m_sequenceMap(NULL),
       m_sequenceMapCount(0),
-      m_callsiteMap(NULL),
-      m_callsiteMapCount(0),
       m_sequenceMapSorted(false),
       m_varNativeInfo(NULL),
       m_varNativeInfoCount(0),

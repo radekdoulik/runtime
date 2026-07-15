@@ -105,6 +105,11 @@ public:
         LIMITED_METHOD_CONTRACT;
     }
 
+    void SendCreateThreadAtInterpreterEntry(Thread*) override
+    {
+        LIMITED_METHOD_CONTRACT;
+    }
+
     void DetachThread(Thread*) override
     {
         LIMITED_METHOD_CONTRACT;

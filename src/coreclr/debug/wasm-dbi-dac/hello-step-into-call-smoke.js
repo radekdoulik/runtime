@@ -77,7 +77,12 @@ async function loadDebugger(debuggerJsPath, sendToRuntime) {
             onAbort: reason => reject(new Error(String(reason))),
             onRuntimeInitialized: () => resolve({
                 module: context.Module,
-                exports: instance.exports
+                exports: {
+                    ...instance.exports,
+                    stackSave: context.Module.stackSave,
+                    stackRestore: context.Module.stackRestore,
+                    stackAlloc: context.Module.stackAlloc
+                }
             })
         };
 
@@ -283,8 +288,15 @@ async function loadAndRunRuntime(runtimeJsPath, appPath, sharedFrameworkPath, on
                 instantiateWasm(imports, receiveInstance) {
                     const wasmPath = path.join(runtimeDirectory, "corerun.wasm");
                     WebAssembly.instantiate(fs.readFileSync(wasmPath), imports).then(({ instance, module }) => {
-                        onRuntimeInstantiated(instance);
                         receiveInstance(instance, module);
+                        onRuntimeInstantiated({
+                            exports: {
+                                ...instance.exports,
+                                stackSave: () => moduleConfig.stackSave(),
+                                stackRestore: value => moduleConfig.stackRestore(value),
+                                stackAlloc: size => moduleConfig.stackAlloc(size)
+                            }
+                        });
                         resolve();
                     }).catch(reject);
 
@@ -444,10 +456,10 @@ function pollDbiIpcStepComplete(debuggerInstance) {
     return { pollResult, bytesWritten, payload };
 }
 
-async function waitForStepComplete(stepCompleteEvents) {
+async function waitForStepComplete(stepCompleteEvents, predicate) {
     const deadline = Date.now() + 5000;
     while (Date.now() < deadline) {
-        if (stepCompleteEvents.length > 0) {
+        if (stepCompleteEvents.some(predicate)) {
             return true;
         }
 
@@ -1017,7 +1029,9 @@ async function main() {
             }
         });
 
-        const stepCompleteSeen = await waitForStepComplete(stepCompleteEvents);
+        const stepCompleteSeen = await waitForStepComplete(
+            stepCompleteEvents,
+            () => stepIntoTargetComplete !== null && stepOutComplete !== null);
         const result = {
             hitCount: breakpointEvents.length,
             copyResult: breakpointEvents.length > 0 ? 0 : -1
@@ -1028,13 +1042,13 @@ async function main() {
         const sessionDestroyResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_session_destroy();
         const firstEvent = breakpointEvents[0];
         const stepComplete = stepIntoTargetComplete;
-        const summaryStepComplete = stepComplete === undefined ? null : {
+        const summaryStepComplete = stepComplete === null ? null : {
             ...stepComplete,
             stepToken: `0x${stepComplete.stepToken.toString(16)}`,
             originalStepRequestToken: `0x${stepComplete.originalStepRequestToken.toString(16)}`,
             codeStartAddress: `0x${stepComplete.codeStartAddress.toString(16)}`
         };
-        const summaryStepOutComplete = stepOutComplete === undefined ? null : {
+        const summaryStepOutComplete = stepOutComplete === null ? null : {
             ...stepOutComplete,
             stepToken: `0x${stepOutComplete.stepToken.toString(16)}`,
             originalStepRequestToken: `0x${stepOutComplete.originalStepRequestToken.toString(16)}`,

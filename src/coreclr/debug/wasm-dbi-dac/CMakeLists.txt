@@ -24,12 +24,13 @@ set(WASM_DBI_DAC_LINK_LIBS
   mscorrc
   coreclrpal
   coreclrminipal
-  coreclrpal_dac
 )
 
 set(WASM_DBI_DAC_BASE_LINK_OPTIONS
   --no-entry
   -sALLOW_MEMORY_GROWTH=1
+  -sEXPORTED_RUNTIME_METHODS=stackSave,stackRestore,stackAlloc,HEAPU8
+  -sWASM_BIGINT=0
   # The debugger module imports target-memory and symbol operations from the JS host.
   -sERROR_ON_UNDEFINED_SYMBOLS=0
   -sWARN_ON_UNDEFINED_SYMBOLS=0
@@ -68,62 +69,63 @@ target_compile_definitions(coreclr_dbi_dac_wasm_tests PRIVATE WASM_DBI_DAC_BUILD
 
 find_program(WASM_DBI_DAC_NODE node)
 if(WASM_DBI_DAC_NODE)
+  set(WASM_DBI_DAC_NODE_OPTIONS --experimental-wasm-exnref)
   add_custom_target(coreclr_dbi_dac_wasm_smoke
-    COMMAND "${WASM_DBI_DAC_NODE}" "${CMAKE_CURRENT_SOURCE_DIR}/smoke-test.js" "${CMAKE_BINARY_DIR}"
+    COMMAND "${WASM_DBI_DAC_NODE}" ${WASM_DBI_DAC_NODE_OPTIONS} "${CMAKE_CURRENT_SOURCE_DIR}/smoke-test.js" "${CMAKE_BINARY_DIR}"
     DEPENDS coreclr_dbi_dac_wasm_tests corerun
     COMMENT "Running WASM DBI/DAC two-module smoke test"
     VERBATIM
   )
   add_custom_target(coreclr_dbi_dac_wasm_hello_breakpoint_smoke
-    COMMAND "${WASM_DBI_DAC_NODE}" "${CMAKE_CURRENT_SOURCE_DIR}/hello-breakpoint-smoke.js" "${CMAKE_BINARY_DIR}"
+    COMMAND "${WASM_DBI_DAC_NODE}" ${WASM_DBI_DAC_NODE_OPTIONS} "${CMAKE_CURRENT_SOURCE_DIR}/hello-breakpoint-smoke.js" "${CMAKE_BINARY_DIR}"
     DEPENDS coreclr_dbi_dac_wasm_tests corerun
     COMMENT "Running WASM DBI/DAC HelloWorld breakpoint smoke test"
     VERBATIM
   )
   add_custom_target(coreclr_dbi_dac_wasm_hello_step_smoke
-    COMMAND "${WASM_DBI_DAC_NODE}" "${CMAKE_CURRENT_SOURCE_DIR}/hello-step-smoke.js" "${CMAKE_BINARY_DIR}"
+    COMMAND "${WASM_DBI_DAC_NODE}" ${WASM_DBI_DAC_NODE_OPTIONS} "${CMAKE_CURRENT_SOURCE_DIR}/hello-step-smoke.js" "${CMAKE_BINARY_DIR}"
     DEPENDS coreclr_dbi_dac_wasm_tests corerun
     COMMENT "Running WASM DBI/DAC HelloWorld step-into smoke test"
     VERBATIM
   )
   add_custom_target(coreclr_dbi_dac_wasm_hello_step_into_call_smoke
-    COMMAND "${WASM_DBI_DAC_NODE}" "${CMAKE_CURRENT_SOURCE_DIR}/hello-step-into-call-smoke.js" "${CMAKE_BINARY_DIR}"
+    COMMAND "${WASM_DBI_DAC_NODE}" ${WASM_DBI_DAC_NODE_OPTIONS} "${CMAKE_CURRENT_SOURCE_DIR}/hello-step-into-call-smoke.js" "${CMAKE_BINARY_DIR}"
     DEPENDS coreclr_dbi_dac_wasm_tests corerun
     COMMENT "Running WASM DBI/DAC HelloWorld step-into-call smoke test"
     VERBATIM
   )
   add_custom_target(coreclr_dbi_dac_wasm_hello_step_over_smoke
-    COMMAND "${WASM_DBI_DAC_NODE}" "${CMAKE_CURRENT_SOURCE_DIR}/hello-step-over-smoke.js" "${CMAKE_BINARY_DIR}"
+    COMMAND "${WASM_DBI_DAC_NODE}" ${WASM_DBI_DAC_NODE_OPTIONS} "${CMAKE_CURRENT_SOURCE_DIR}/hello-step-over-smoke.js" "${CMAKE_BINARY_DIR}"
     DEPENDS coreclr_dbi_dac_wasm_tests corerun
     COMMENT "Running WASM DBI/DAC HelloWorld step-over smoke test"
     VERBATIM
   )
   add_custom_target(coreclr_dbi_dac_wasm_hello_step_out_smoke
-    COMMAND "${WASM_DBI_DAC_NODE}" "${CMAKE_CURRENT_SOURCE_DIR}/hello-step-out-smoke.js" "${CMAKE_BINARY_DIR}"
+    COMMAND "${WASM_DBI_DAC_NODE}" ${WASM_DBI_DAC_NODE_OPTIONS} "${CMAKE_CURRENT_SOURCE_DIR}/hello-step-out-smoke.js" "${CMAKE_BINARY_DIR}"
     DEPENDS coreclr_dbi_dac_wasm_tests corerun
     COMMENT "Running WASM DBI/DAC HelloWorld step-out smoke test"
     VERBATIM
   )
   add_custom_target(coreclr_dbi_dac_wasm_hello_exception_smoke
-    COMMAND "${WASM_DBI_DAC_NODE}" "${CMAKE_CURRENT_SOURCE_DIR}/hello-exception-smoke.js" "${CMAKE_BINARY_DIR}"
+    COMMAND "${WASM_DBI_DAC_NODE}" ${WASM_DBI_DAC_NODE_OPTIONS} "${CMAKE_CURRENT_SOURCE_DIR}/hello-exception-smoke.js" "${CMAKE_BINARY_DIR}"
     DEPENDS coreclr_dbi_dac_wasm_tests corerun
     COMMENT "Running WASM DBI/DAC HelloWorld exception smoke test"
     VERBATIM
   )
   add_custom_target(coreclr_dbi_dac_wasm_hello_module_load_smoke
-    COMMAND "${WASM_DBI_DAC_NODE}" "${CMAKE_CURRENT_SOURCE_DIR}/hello-module-load-smoke.js" "${CMAKE_BINARY_DIR}"
+    COMMAND "${WASM_DBI_DAC_NODE}" ${WASM_DBI_DAC_NODE_OPTIONS} "${CMAKE_CURRENT_SOURCE_DIR}/hello-module-load-smoke.js" "${CMAKE_BINARY_DIR}"
     DEPENDS coreclr_dbi_dac_wasm_tests corerun
     COMMENT "Running WASM DBI/DAC HelloWorld module-load smoke test"
     VERBATIM
   )
   add_custom_target(coreclr_dbi_dac_wasm_hello_cdp_pause_smoke
-    COMMAND "${WASM_DBI_DAC_NODE}" "${CMAKE_CURRENT_SOURCE_DIR}/hello-cdp-pause-smoke.js" "${CMAKE_BINARY_DIR}"
+    COMMAND "${WASM_DBI_DAC_NODE}" ${WASM_DBI_DAC_NODE_OPTIONS} "${CMAKE_CURRENT_SOURCE_DIR}/hello-cdp-pause-smoke.js" "${CMAKE_BINARY_DIR}"
     DEPENDS coreclr_dbi_dac_wasm_tests corerun
     COMMENT "Running WASM DBI/DAC HelloWorld CDP pause smoke test"
     VERBATIM
   )
   add_custom_target(coreclr_dbi_dac_wasm_hello_cooperative_async_break_smoke
-    COMMAND "${WASM_DBI_DAC_NODE}" "${CMAKE_CURRENT_SOURCE_DIR}/hello-cooperative-async-break-smoke.js" "${CMAKE_BINARY_DIR}"
+    COMMAND "${WASM_DBI_DAC_NODE}" ${WASM_DBI_DAC_NODE_OPTIONS} "${CMAKE_CURRENT_SOURCE_DIR}/hello-cooperative-async-break-smoke.js" "${CMAKE_BINARY_DIR}"
     DEPENDS coreclr_dbi_dac_wasm_tests corerun
     COMMENT "Running WASM DBI/DAC HelloWorld cooperative async-break smoke test"
     VERBATIM

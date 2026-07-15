@@ -37,10 +37,9 @@ RSDebuggingInfo g_RSDebuggingInfo_OutOfProc = {0 }; // set to NULL
 RSDebuggingInfo * g_pRSDebuggingInfo = &g_RSDebuggingInfo_OutOfProc;
 
 // The following instances are used for invoking overloaded new/delete
-#if defined(TARGET_WASM)
-inline
-#endif // TARGET_WASM
+#if !defined(TARGET_WASM)
 forDbiWorker forDbi;
+#endif // !TARGET_WASM
 
 #ifdef _DEBUG
 // For logs, we can print the string name for the debug codes.

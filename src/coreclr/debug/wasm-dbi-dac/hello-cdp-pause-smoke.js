@@ -400,8 +400,15 @@ async function loadAndRunRuntime(runtimeJsPath, appPath, sharedFrameworkPath, on
                     const wasmPath = path.join(runtimeDirectory, "corerun.wasm");
                     WebAssembly.instantiate(fs.readFileSync(wasmPath), imports).then(({ instance, module }) => {
                         runtimeInstance = instance;
-                        onRuntimeInstantiated(instance);
                         receiveInstance(instance, module);
+                        onRuntimeInstantiated({
+                            exports: {
+                                ...instance.exports,
+                                stackSave: () => moduleConfig.stackSave(),
+                                stackRestore: value => moduleConfig.stackRestore(value),
+                                stackAlloc: size => moduleConfig.stackAlloc(size)
+                            }
+                        });
                         resolve();
                     }).catch(reject);
 
@@ -749,6 +756,7 @@ async function runParent() {
     const child = spawn(process.execPath, [
         "--inspect=0",
         "--experimental-vm-modules",
+        "--experimental-wasm-exnref",
         __filename,
         "--child",
         coreclrObjDirectory,

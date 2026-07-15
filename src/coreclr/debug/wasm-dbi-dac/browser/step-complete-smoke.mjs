@@ -15,6 +15,7 @@ import {
     IpcStepCompleteMagic,
     IpcStepCompleteSize,
     IpcStepCompleteType,
+    StepKindOver,
     acknowledgeProtocol,
     assert,
     enumerateBreakpoints,
@@ -31,6 +32,7 @@ import {
 
 const TextEncoderInstance = new TextEncoder();
 const CompletionTimeoutMs = 120000;
+const MaxStepRequests = 16;
 
 function setStatus(text) {
     const status = document.getElementById('status');
@@ -56,16 +58,17 @@ async function fetchJson(url) {
     return response.json();
 }
 
-async function waitForStepComplete(stepCompleteEvents, timeoutMs) {
+async function waitForStepComplete(stepCompleteEvents, predicate, timeoutMs) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-        if (stepCompleteEvents.length > 0) {
-            return true;
+        const stepComplete = stepCompleteEvents.find(predicate);
+        if (stepComplete !== undefined) {
+            return stepComplete;
         }
         await sleep(10);
     }
 
-    return false;
+    return null;
 }
 
 // stepKind: StepKindOver | StepKindOut
@@ -93,6 +96,7 @@ export async function runStepCompleteSmoke(options) {
     let callbackEvent = '';
     let initialBreakpoint = null;
     let stepRequestResult = -1;
+    const stepRequestResults = [];
     let preStepBreakpointCount = -1;
     let afterStepRequestBreakpointCount = -1;
     let stepCompleteBreakpointCount = -1;
@@ -125,6 +129,16 @@ export async function runStepCompleteSmoke(options) {
                     const stepComplete = pollDbiIpcStepComplete(sidecar);
                     if (stepComplete.payload !== null) {
                         stepCompleteEvents.push(stepComplete.payload);
+                        if (stepKind === StepKindOver &&
+                            stepComplete.payload.funcMetadataToken === expectedLandingMethodToken &&
+                            requireOffsetAdvance &&
+                            stepComplete.payload.ilOffset <= initialBreakpoint.offset &&
+                            stepCompleteEvents.length < MaxStepRequests) {
+                            stepRequestResults.push(sendStepRequest(
+                                sidecar,
+                                stepComplete.payload.originalStepRequestToken,
+                                stepKind));
+                        }
                     }
                     const active = enumerateBreakpoints(sidecar);
                     stepCompleteBreakpointCount = active.enumerateResult === 0 ? active.activeCount : -1;
@@ -146,6 +160,7 @@ export async function runStepCompleteSmoke(options) {
                 initialBreakpoint = ipc.payload;
                 preStepBreakpointCount = enumerateBreakpoints(sidecar).activeCount;
                 stepRequestResult = sendStepRequest(sidecar, ipc.payload.breakpointToken, stepKind);
+                stepRequestResults.push(stepRequestResult);
                 afterStepRequestBreakpointCount = enumerateBreakpoints(sidecar).activeCount;
             }
             return 0;
@@ -179,8 +194,12 @@ export async function runStepCompleteSmoke(options) {
             }
         });
 
-        const stepCompleteSeen = await waitForStepComplete(stepCompleteEvents, CompletionTimeoutMs);
-        const stepComplete = stepCompleteEvents[0];
+        const stepComplete = await waitForStepComplete(
+            stepCompleteEvents,
+            event => event.funcMetadataToken === expectedLandingMethodToken &&
+                (!requireOffsetAdvance || event.ilOffset > initialBreakpoint.offset),
+            CompletionTimeoutMs);
+        const stepCompleteSeen = stepComplete !== null;
         const continueCount = runtimeExports.CoreClrWasmDebugGetContinueCount();
         const disconnectResult = connected ? sidecar.module._coreclr_wasm_dbi_dac_dbi_disconnect_runtime() : 0;
         connected = false;
@@ -192,6 +211,7 @@ export async function runStepCompleteSmoke(options) {
         assert(initialBreakpoint.type === 0x100, `initial breakpoint type mismatch: 0x${initialBreakpoint.type.toString(16)}`);
         assert(initialBreakpoint.breakpointToken !== 0n, 'initial breakpoint token missing');
         assert(stepRequestResult === 0, `step request failed: ${stepRequestResult}`);
+        assert(stepRequestResults.every(result => result === 0), `step request failed: ${stepRequestResults.join(', ')}`);
         assert(preStepBreakpointCount >= 1, `unexpected pre-step breakpoint count: ${preStepBreakpointCount}`);
         assert(afterStepRequestBreakpointCount === preStepBreakpointCount + 1, 'step request did not add a transient breakpoint');
         assert(stepCompleteBreakpointCount === preStepBreakpointCount, 'transient step breakpoint was not removed on landing');

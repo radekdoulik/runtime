@@ -13,6 +13,7 @@ const ExpectedLandingMethodToken = 0x06000002;
 const ForbiddenLandingMethodToken = 0x06000003;
 const StepKind = 1;
 const StepKindName = "step-over";
+const MaxStepRequests = 16;
 const CommandRecordMagic = 0x434d4457;
 const CommandRecordSize = 80;
 const IpcStepCompleteSize = 96;
@@ -95,7 +96,12 @@ async function loadDebugger(debuggerJsPath, sendToRuntime) {
             onAbort: reason => reject(new Error(String(reason))),
             onRuntimeInitialized: () => resolve({
                 module: context.Module,
-                exports: instance.exports
+                exports: {
+                    ...instance.exports,
+                    stackSave: context.Module.stackSave,
+                    stackRestore: context.Module.stackRestore,
+                    stackAlloc: context.Module.stackAlloc
+                }
             })
         };
 
@@ -293,8 +299,15 @@ async function loadAndRunRuntime(runtimeJsPath, appPath, sharedFrameworkPath, on
                 instantiateWasm(imports, receiveInstance) {
                     const wasmPath = path.join(runtimeDirectory, "corerun.wasm");
                     WebAssembly.instantiate(fs.readFileSync(wasmPath), imports).then(({ instance, module }) => {
-                        onRuntimeInstantiated(instance);
                         receiveInstance(instance, module);
+                        onRuntimeInstantiated({
+                            exports: {
+                                ...instance.exports,
+                                stackSave: () => moduleConfig.stackSave(),
+                                stackRestore: value => moduleConfig.stackRestore(value),
+                                stackAlloc: size => moduleConfig.stackAlloc(size)
+                            }
+                        });
                         resolve();
                     }).catch(reject);
                     return {};
@@ -360,10 +373,10 @@ function enumerateBreakpoints(debuggerInstance) {
     return { enumerateResult, activeCount };
 }
 
-async function waitForStepComplete(stepCompleteEvents) {
+async function waitForStepComplete(stepCompleteEvents, predicate) {
     const deadline = Date.now() + 5000;
     while (Date.now() < deadline) {
-        if (stepCompleteEvents.length > 0) {
+        if (stepCompleteEvents.some(predicate)) {
             return true;
         }
         await new Promise(resolve => setTimeout(resolve, 10));
@@ -388,6 +401,7 @@ async function main() {
     let debuggerInstance;
     let callbackEvent = "";
     let initialBreakpoint = null;
+    let landingStepComplete = null;
     let stepRequestResult = -1;
     let preStepBreakpointCount = -1;
     let afterStepRequestBreakpointCount = -1;
@@ -395,6 +409,7 @@ async function main() {
     let fireEventToPauseCount = 0;
     let fireEventToPauseLastKind = "";
     const stepCompleteEvents = [];
+    const stepRequestResults = [];
 
     const getRuntimeHeap = () => new Uint8Array(runtimeExports.memory.buffer);
     const getDebuggerHeap = () => new Uint8Array(debuggerInstance.exports.memory.buffer);
@@ -497,6 +512,17 @@ async function main() {
                         const stepComplete = pollDbiIpcStepComplete(debuggerInstance);
                         if (stepComplete.payload !== null) {
                             stepCompleteEvents.push(stepComplete.payload);
+                            if (stepComplete.payload.funcMetadataToken === ExpectedLandingMethodToken &&
+                                stepComplete.payload.ilOffset > initialBreakpoint.offset) {
+                                landingStepComplete = stepComplete.payload;
+                            } else if (stepComplete.payload.funcMetadataToken === ExpectedLandingMethodToken &&
+                                stepCompleteEvents.length < MaxStepRequests) {
+                                const stepToken = stepComplete.payload.originalStepRequestToken;
+                                stepRequestResults.push(debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request(
+                                    Number(stepToken & 0xffffffffn),
+                                    Number(stepToken >> 32n),
+                                    StepKind));
+                            }
                         }
                         const active = enumerateBreakpoints(debuggerInstance);
                         stepCompleteBreakpointCount = active.enumerateResult === 0 ? active.activeCount : -1;
@@ -521,6 +547,7 @@ async function main() {
                         Number(stepToken & 0xffffffffn),
                         Number(stepToken >> 32n),
                         StepKind);
+                    stepRequestResults.push(stepRequestResult);
                     afterStepRequestBreakpointCount = enumerateBreakpoints(debuggerInstance).activeCount;
                 }
                 return 0;
@@ -556,8 +583,11 @@ async function main() {
             }
         });
 
-        const stepCompleteSeen = await waitForStepComplete(stepCompleteEvents);
-        const stepComplete = stepCompleteEvents[0];
+        const stepCompleteSeen = await waitForStepComplete(
+            stepCompleteEvents,
+            event => event.funcMetadataToken === ExpectedLandingMethodToken &&
+                event.ilOffset > initialBreakpoint.offset);
+        const stepComplete = landingStepComplete;
         const continueCount = runtimeExports.CoreClrWasmDebugGetContinueCount();
         const disconnectResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_disconnect_runtime();
         const sessionDestroyResult = debuggerInstance.module._coreclr_wasm_dbi_dac_dbi_session_destroy();
@@ -567,11 +597,12 @@ async function main() {
             initialOffset: initialBreakpoint?.offset,
             initialToken: initialBreakpoint?.breakpointToken !== undefined ? `0x${initialBreakpoint.breakpointToken.toString(16)}` : null,
             stepRequestResult,
+            stepRequestResults,
             preStepBreakpointCount,
             afterStepRequestBreakpointCount,
             stepCompleteBreakpointCount,
             stepCompleteSeen,
-            stepComplete: stepComplete === undefined ? null : {
+            stepComplete: stepComplete === null ? null : {
                 ...stepComplete,
                 stepToken: `0x${stepComplete.stepToken.toString(16)}`,
                 originalStepRequestToken: `0x${stepComplete.originalStepRequestToken.toString(16)}`,
@@ -591,6 +622,7 @@ async function main() {
             initialBreakpoint.type !== 0x100 ||
             initialBreakpoint.breakpointToken === 0n ||
             stepRequestResult !== 0 ||
+            stepRequestResults.some(result => result !== 0) ||
             preStepBreakpointCount < 1 ||
             afterStepRequestBreakpointCount !== preStepBreakpointCount + 1 ||
             stepCompleteBreakpointCount !== preStepBreakpointCount ||
@@ -606,7 +638,7 @@ async function main() {
             stepComplete?.originalStepRequestToken !== initialBreakpoint.breakpointToken ||
             continueCount !== 1 ||
             fireEventToPauseCount < 2 ||
-            fireEventToPauseLastKind !== "breakpoint" ||
+            fireEventToPauseLastKind !== "step-complete" ||
             disconnectResult !== 0 ||
             sessionDestroyResult !== 0) {
             fail(`HelloWorld ${StepKindName} did not land at the expected caller offset`);

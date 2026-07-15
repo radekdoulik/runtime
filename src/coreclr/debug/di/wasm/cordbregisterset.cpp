@@ -33,13 +33,13 @@ HRESULT CordbRegisterSet::GetRegisters(ULONG64 mask, ULONG32 regCount, CORDB_REG
         switch (i)
         {
         case REGISTER_INSTRUCTION_POINTER:
-            regBuffer[iRegister++] = m_rd->PC;
+            regBuffer[iRegister++] = m_context.InterpreterIP;
             break;
         case REGISTER_STACK_POINTER:
-            regBuffer[iRegister++] = m_rd->SP;
+            regBuffer[iRegister++] = m_context.InterpreterSP;
             break;
         case REGISTER_FRAME_POINTER:
-            regBuffer[iRegister++] = m_rd->FP;
+            regBuffer[iRegister++] = m_context.InterpreterFP;
             break;
         default:
             return E_INVALIDARG;
@@ -57,13 +57,4 @@ HRESULT CordbRegisterSet::GetRegistersAvailable(ULONG32 regCount, BYTE pAvailabl
 HRESULT CordbRegisterSet::GetRegisters(ULONG32 maskCount, BYTE mask[], ULONG32 regCount, CORDB_REGISTER regBuffer[])
 {
     return GetRegistersAdapter(maskCount, mask, regCount, regBuffer);
-}
-
-void CordbRegisterSet::InternalCopyRDToContext(DT_CONTEXT* pInputContext)
-{
-    LIMITED_METHOD_CONTRACT;
-
-    pInputContext->InterpreterIP = static_cast<uint32_t>(m_rd->PC);
-    pInputContext->InterpreterSP = static_cast<uint32_t>(m_rd->SP);
-    pInputContext->InterpreterFP = static_cast<uint32_t>(m_rd->FP);
 }

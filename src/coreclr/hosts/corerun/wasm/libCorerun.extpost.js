@@ -36,7 +36,7 @@ export function selfRun(moduleConfig) {
 
     // this will create the emscripten emulator and run corerun.cpp main()
     // but the nodejs process will be kept alive by any pending async work
-    createDotnetRuntime(runtimeApi.Module);
+    return createDotnetRuntime(runtimeApi.Module);
 }
 
 // Auto-run only in Node.js; in browser, selfRun is called from corerun.html.

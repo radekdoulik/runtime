@@ -476,6 +476,7 @@ uint64_t g_wasmDebugOneShotStepRequestToken;
 
 void ClearWasmDebugStepIntoCallState(bool clearFallbackBreakpoint);
 void ClearWasmDebugOneShotStepState(bool clearBreakpoints);
+bool TryGetWasmDebugInterpreterILOffset(MethodDesc* methodDesc, const int32_t* ip, uint32_t* outILOffset);
 extern "C" void CoreClrWasmDebugMaybePatchInterpreterMethod(MethodDesc* methodDesc, uint32_t ilOffset, int32_t* ip);
 
 // Phase 6 connection-state gate. Mirrors Mono's
@@ -740,6 +741,9 @@ void EmitWasmDebugException(MethodDesc* methodDesc, uint32_t ilOffset, const int
         return;
     }
 
+    uint32_t effectiveILOffset = ilOffset;
+    TryGetWasmDebugInterpreterILOffset(methodDesc, ip, &effectiveILOffset);
+
     g_wasmDebugExceptionTokenCounter++;
     memset(&g_wasmDebugLastIpcException, 0, sizeof(g_wasmDebugLastIpcException));
     g_wasmDebugLastIpcException.Magic = WasmDbgIpcEventExceptionMagic;
@@ -750,12 +754,12 @@ void EmitWasmDebugException(MethodDesc* methodDesc, uint32_t ilOffset, const int
     g_wasmDebugLastIpcException.Flags = 0;
     g_wasmDebugLastIpcException.ExceptionToken = g_wasmDebugExceptionTokenCounter;
     g_wasmDebugLastIpcException.FuncMetadataToken = methodDesc->GetMemberDef();
-    g_wasmDebugLastIpcException.ILOffset = ilOffset;
+    g_wasmDebugLastIpcException.ILOffset = effectiveILOffset;
     g_wasmDebugLastIpcException.ExceptionAddress = reinterpret_cast<uintptr_t>(ip);
 
     g_wasmDebugLastStoppedMethodDesc = methodDesc;
     g_wasmDebugLastStoppedIP = ip;
-    g_wasmDebugLastStoppedILOffset = ilOffset;
+    g_wasmDebugLastStoppedILOffset = effectiveILOffset;
     g_wasmDebugLastStoppedFrame = nullptr;
 
     if (exceptionObj != NULL)

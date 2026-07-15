@@ -51,5 +51,8 @@ add_library_clr(cordbee_wks_wasm_lite
 )
 
 target_compile_definitions(cordbee_wks_wasm_lite PRIVATE FEATURE_WASM_DEBUG_EE_LITE)
+if (FEATURE_PERFTRACING AND FEATURE_PERFTRACING_DISABLE_THREADS)
+    target_compile_definitions(cordbee_wks_wasm_lite PRIVATE PERFTRACING_DISABLE_THREADS)
+endif()
 target_precompile_headers(cordbee_wks_wasm_lite PRIVATE [["stdafx.h"]])
 add_dependencies(cordbee_wks_wasm_lite eventing_headers)

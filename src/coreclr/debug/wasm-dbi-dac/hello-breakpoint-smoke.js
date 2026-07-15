@@ -79,7 +79,12 @@ async function loadDebugger(debuggerJsPath, sendToRuntime) {
             onAbort: reason => reject(new Error(String(reason))),
             onRuntimeInitialized: () => resolve({
                 module: context.Module,
-                exports: instance.exports
+                exports: {
+                    ...instance.exports,
+                    stackSave: context.Module.stackSave,
+                    stackRestore: context.Module.stackRestore,
+                    stackAlloc: context.Module.stackAlloc
+                }
             })
         };
 
@@ -466,8 +471,15 @@ async function loadAndRunRuntime(runtimeJsPath, appPath, sharedFrameworkPath, on
                 instantiateWasm(imports, receiveInstance) {
                     const wasmPath = path.join(runtimeDirectory, "corerun.wasm");
                     WebAssembly.instantiate(fs.readFileSync(wasmPath), imports).then(({ instance, module }) => {
-                        onRuntimeInstantiated(instance);
                         receiveInstance(instance, module);
+                        onRuntimeInstantiated({
+                            exports: {
+                                ...instance.exports,
+                                stackSave: () => moduleConfig.stackSave(),
+                                stackRestore: value => moduleConfig.stackRestore(value),
+                                stackAlloc: size => moduleConfig.stackAlloc(size)
+                            }
+                        });
                         resolve();
                     }).catch(reject);
 

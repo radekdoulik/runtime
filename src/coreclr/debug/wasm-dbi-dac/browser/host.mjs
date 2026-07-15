@@ -181,14 +181,35 @@ async function importRuntimeEsm(url) {
     }
 
     let source = await response.text();
-    source = source.replace('} else {\n throw new Error("NODERAWFS is currently only supported on Node.js environment.");\n}\n', '} else {\n // Browser smoke uses MEMFS files preloaded below instead of NODERAWFS.\n}\n');
-    const patched = source.replace('var Module = moduleArg;\n', 'var Module = moduleArg;\nvar nodePath = moduleArg.__nodePathPolyfill;\n');
-    const objectUrl = URL.createObjectURL(new Blob([patched], { type: 'text/javascript' }));
+    source = replaceRequired(
+        source,
+        'var nodePath = require("node:path");',
+        'var nodePath = ENVIRONMENT_IS_NODE ? require("node:path") : Module.__nodePathPolyfill;',
+        'Node path import');
+    source = replaceRequired(
+        source,
+        'if (!ENVIRONMENT_IS_NODE) {\n  throw new Error("NODERAWFS is currently only supported on Node.js environment.");\n}\n',
+        'if (ENVIRONMENT_IS_NODE) {\n',
+        'NODERAWFS environment guard');
+    source = replaceRequired(
+        source,
+        'for (const [key, value] of Object.entries(NODERAWFS_stream_funcs)) {\n  FS[key] = _wrapNodeStreamFunc(value, FS[key]);\n}\n',
+        'for (const [key, value] of Object.entries(NODERAWFS_stream_funcs)) {\n  FS[key] = _wrapNodeStreamFunc(value, FS[key]);\n}\n}\n',
+        'NODERAWFS activation block');
+    const objectUrl = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
     try {
         return await import(objectUrl);
     } finally {
         URL.revokeObjectURL(objectUrl);
     }
+}
+
+function replaceRequired(source, search, replacement, description) {
+    if (!source.includes(search)) {
+        throw new Error(`failed to patch generated runtime: ${description} was not found`);
+    }
+
+    return source.replace(search, replacement);
 }
 
 async function fetchBytes(url) {
@@ -344,7 +365,15 @@ export async function loadSidecar(jsUrl) {
     const module = await importClassicEmscripten(absoluteUrl, moduleConfig);
     await instanceReady;
     await initialized;
-    return { module, exports: instance.exports };
+    return {
+        module,
+        exports: {
+            ...instance.exports,
+            stackSave: module.stackSave,
+            stackRestore: module.stackRestore,
+            stackAlloc: module.stackAlloc
+        }
+    };
 }
 
 function createVirtualFiles(Module, files) {
@@ -407,10 +436,17 @@ export async function loadRuntime(jsUrl, options) {
                 .catch(async () => WebAssembly.instantiate(await fetchBytes(wasmUrl), imports))
                 .then(({ instance: wasmInstance, module }) => {
                     try {
-                        instance = wasmInstance;
-                        options.onInstance?.(wasmInstance);
+                        instance = {
+                            exports: {
+                                ...wasmInstance.exports,
+                                stackSave: wasmInstance.exports.emscripten_stack_get_current,
+                                stackRestore: wasmInstance.exports._emscripten_stack_restore,
+                                stackAlloc: wasmInstance.exports._emscripten_stack_alloc
+                            }
+                        };
+                        options.onInstance?.(instance);
                         receiveInstance(wasmInstance, module);
-                        resolveInstanceReady(wasmInstance);
+                        resolveInstanceReady(instance);
                     } catch (error) {
                         rejectInstanceReady(error);
                     }
@@ -423,9 +459,17 @@ export async function loadRuntime(jsUrl, options) {
         }
     };
 
-    moduleFactory.selfRun(moduleConfig);
-    await Promise.all([moduleConfig.ready, instanceReady]);
-    return { module: moduleConfig, exports: instance.exports };
+    const modulePromise = moduleFactory.selfRun(moduleConfig);
+    const [module] = await Promise.all([modulePromise, instanceReady]);
+    return {
+        module,
+        exports: {
+            ...instance.exports,
+            stackSave: module.stackSave,
+            stackRestore: module.stackRestore,
+            stackAlloc: module.stackAlloc
+        }
+    };
 }
 
 export function acknowledgeProtocol(sidecar) {

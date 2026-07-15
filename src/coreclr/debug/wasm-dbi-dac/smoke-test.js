@@ -133,6 +133,12 @@ async function loadRuntime(runtimeJsPath, runtimeArguments) {
     source = source.replace(/if \(_isNode\) \{\s*selfRun\(\);\s*\}\s*$/m, "");
 
     let instance;
+    let resolveInstance;
+    let rejectInstance;
+    const instanceReady = new Promise((resolve, reject) => {
+        resolveInstance = resolve;
+        rejectInstance = reject;
+    });
     const moduleFactory = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
     const moduleConfig = {
         noExitRuntime: true,
@@ -145,19 +151,25 @@ async function loadRuntime(runtimeJsPath, runtimeArguments) {
             WebAssembly.instantiate(fs.readFileSync(wasmPath), imports).then(({ instance: wasmInstance, module }) => {
                 instance = wasmInstance;
                 receiveInstance(wasmInstance, module);
+                resolveInstance();
             }).catch(error => {
-                throw error;
+                rejectInstance(error);
             });
 
             return {};
         }
     };
 
-    moduleFactory.selfRun(moduleConfig);
-
+    const modulePromise = moduleFactory.selfRun(moduleConfig);
+    const [module] = await Promise.all([modulePromise, instanceReady]);
     return {
-        module: await moduleConfig.ready,
-        exports: instance.exports
+        module,
+        exports: {
+            ...instance.exports,
+            stackSave: module.stackSave,
+            stackRestore: module.stackRestore,
+            stackAlloc: module.stackAlloc
+        }
     };
 }
 
@@ -176,7 +188,12 @@ function loadDebugger(debuggerJsPath, configureImports) {
             onAbort: reason => reject(new Error(String(reason))),
             onRuntimeInitialized: () => resolve({
                 module: context.Module,
-                exports: instance.exports
+                exports: {
+                    ...instance.exports,
+                    stackSave: context.Module.stackSave,
+                    stackRestore: context.Module.stackRestore,
+                    stackAlloc: context.Module.stackAlloc
+                }
             })
         };
 
