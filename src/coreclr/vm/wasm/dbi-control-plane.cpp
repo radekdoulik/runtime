@@ -1473,6 +1473,21 @@ bool WasmDebugBreakpointSlotMatches(const WasmDebugBreakpointSlot& slot, MethodD
     return true;
 }
 
+void SuspendWasmDebugPersistentBreakpointPatches(MethodDesc* methodDesc)
+{
+    for (uint32_t i = 0; i < WasmDebugMaxBreakpoints; i++)
+    {
+        WasmDebugBreakpointSlot& slot = g_wasmDebugBreakpoints[i];
+        if (slot.Armed &&
+            !slot.IsOneShot &&
+            slot.PatchActive &&
+            WasmDebugBreakpointSlotMatches(slot, methodDesc, g_wasmDebugBreakpointILOffsets[i]))
+        {
+            RestoreWasmDebugBreakpointPatchSlot(slot);
+        }
+    }
+}
+
 void RequestWasmDebugContinue()
 {
     if (g_wasmDebugBreakpointStopped)
@@ -1862,8 +1877,22 @@ int32_t RequestWasmDebugStepOut(uint64_t originalStepRequestToken)
     }
 
     if (CountFreeWasmDebugBreakpointSlots() < 1 ||
-        !ArmWasmDebugOneShotBreakpoint(callerMethodDesc, callerResumeIP))
+        g_wasmDebugLastStoppedMethodDesc == nullptr)
     {
+        return -3;
+    }
+
+    SuspendWasmDebugPersistentBreakpointPatches(g_wasmDebugLastStoppedMethodDesc);
+    if (!ArmWasmDebugOneShotBreakpoint(callerMethodDesc, callerResumeIP))
+    {
+        PTR_InterpByteCodeStart byteCodeStart = g_wasmDebugLastStoppedMethodDesc->GetInterpreterCode();
+        if (byteCodeStart != nullptr)
+        {
+            CoreClrWasmDebugMaybePatchInterpreterMethod(
+                g_wasmDebugLastStoppedMethodDesc,
+                0,
+                const_cast<int32_t*>(byteCodeStart->GetByteCodes()));
+        }
         return -3;
     }
 
