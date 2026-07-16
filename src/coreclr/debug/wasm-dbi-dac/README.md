@@ -251,6 +251,8 @@ acknowledged handshake returns `HrIncompatibleProtocol`.
 | `coreclr_wasm_dbi_dac_dbi_disconnect_runtime`       | Unbind; invalidates the page cache.                    |
 | `coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_name`   | Send `SetBreakpointByName` command record to runtime.  |
 | `coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_token`  | Send `SetBreakpointByToken` command record to runtime. |
+| `coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_module_and_token` | Send a module-scoped token/IL breakpoint command so equal metadata tokens in different modules cannot collide. |
+| `coreclr_wasm_dbi_dac_dbi_clear_breakpoints_by_module_and_token` | Clear only breakpoints matching the module name and method token. |
 | `coreclr_wasm_dbi_dac_dbi_continue`                 | Send `Continue` command record; invalidates the page cache. |
 | `coreclr_wasm_dbi_dac_dbi_send_ipc_continue_request` | Send structured `DB_IPCE_CONTINUE` request; invalidates the page cache on success. |
 | `coreclr_wasm_dbi_dac_dbi_async_break_request`       | Request a cooperative runtime async-break through `submit_async_break_request`; invalidates the page cache on success. |
@@ -261,6 +263,7 @@ acknowledged handshake returns `HrIncompatibleProtocol`.
 | `coreclr_wasm_dbi_dac_dbi_poll_ipc_step_complete`   | Drain structured step-complete event (`WasmDbgIpcEventStepComplete`, 96 bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_poll_ipc_module_load`     | Drain structured module load/unload event (`WasmDbgIpcEventModuleLoad`, 312 bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints`    | Drain the runtime breakpoint slot table (`8 + 16 * 88` bytes) via DAC `ReadVirtual`. |
+| `coreclr_wasm_dbi_dac_dbi_enumerate_stack_frames`   | Drain the bounded managed interpreter stack (`16 + 64 * 96` bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_arguments`      | Drain the stopped-frame argument record (`16 + 32 * 48` bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_locals`         | Drain the stopped-frame locals record (`16 + 32 * 48` bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_read_local_value`         | Read a stopped-frame argument or local slot (`WasmDbgValueRecord`, 104 bytes) via DAC `ReadVirtual`. |
@@ -275,6 +278,28 @@ acknowledged handshake returns `HrIncompatibleProtocol`.
 | `coreclr_wasm_dbi_dac_receive_runtime_event_record` | Push a `WasmDebugEventRecord`.                         |
 | `coreclr_wasm_dbi_dac_receive_runtime_frame_record` | Push a `WasmDebugFrameRecord`.                         |
 | `coreclr_wasm_dbi_dac_invalidate_page_cache`        | Force-invalidate the in-sidecar page cache (epoch bump). |
+
+#### `WasmDebugStackRecord` (6160 bytes, little-endian)
+
+The runtime snapshots up to 64 active interpreted methods at every managed
+stop. Frame zero is the stopped method; subsequent frames follow
+`InterpMethodContextFrame::pParent`, matching the CoreCLR cDAC interpreter
+stack walk by omitting inactive frames whose interpreter IP is null.
+
+```text
+offset  size       field
+   0      4        Magic       // 'WDSK' = 0x4B534457
+   4      4        Version     // 1
+   8      4        FrameCount  // 0..64
+  12      4        Flags       // bit 0: stack truncated
+  16   64 * 96     Frames
+```
+
+Each frame contains the method token, IL offset, interpreter IP, context-frame
+and stack addresses, runtime module address, frame flags, and a 64-byte method
+name. Hosts may call `CoreClrWasmDebugSelectStackFrame` while stopped before
+enumerating arguments or locals; selection is validated against the current
+snapshot, and source lookup then uses the selected frame's module.
 
 #### `WasmDbgIpcEventAsyncBreakComplete` (88 bytes, little-endian)
 
@@ -407,6 +432,24 @@ offset  size  field
   32     64   InlineBytes         // inline frame bytes when IsRef == 0
   96      8   Reserved            // zero today
 ```
+
+#### Expandable stopped-state values
+
+`CoreClrWasmDebugDescribeObject` asks the paused runtime control plane to
+classify and name a non-null object reference. The browser host converts the
+fixed record to the serializable `dac.currentStop`/`dac.objectChildren`
+JSON-RPC model; no runtime pointer is exposed as remote COM. The descriptor
+contains the object kind, element type, child count, array component size/data
+address, MethodTable, 128 bytes for the type name, and 256 bytes for a string
+preview.
+
+`CoreClrWasmDebugEnumerateObjectChildren` accepts `start` and
+`count`, reports the total and written child counts, and emits up to 256
+168-byte records per request: a `WasmDbgValueRecord` followed by a 64-byte
+name. Array children are named `[index]`; object children use metadata field
+names. Static fields are omitted.
+All reads are valid only while the managed runtime is stopped, and frontends
+must invalidate object handles on continue, step, or a later stop.
 
 ### Session teardown (product, ungated)
 

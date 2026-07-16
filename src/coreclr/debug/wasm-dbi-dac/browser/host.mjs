@@ -7,7 +7,7 @@ export const CommandRecordSize = 80;
 export const ExpectedLocalTypeTags = [0x08, 0x0a, 0x0d];
 export const ExpectedVersionBlobMagic = 0x42564457;
 export const ExpectedAbiVersion = 1;
-export const ExpectedProtocolBreakingChangeCounter = 16;
+export const ExpectedProtocolBreakingChangeCounter = 18;
 export const IpcAsyncBreakMagic = 0x41435049;
 export const IpcAsyncBreakSize = 88;
 export const IpcAsyncBreakType = 0x0107;
@@ -25,7 +25,13 @@ export const StepKindOver = 1;
 export const StepKindOut = 2;
 export const ValueRecordSize = 104;
 export const ValueRecordFlagReadFailed = 1;
+export const ObjectDescriptorSize = 432;
+export const ChildValueRecordSize = 168;
+const MaxObjectChildrenPerRequest = 256;
 export const SourceLocationFileCapacity = 256;
+export const StackRecordSize = 16 + 64 * 96;
+export const StackRecordFlagTruncated = 1;
+const Utf8Decoder = new TextDecoder();
 
 export function assert(condition, message) {
     if (!condition) {
@@ -55,12 +61,11 @@ export function readAscii(memory, address, byteCount) {
 }
 
 export function readNullTerminatedAscii(memory, address, byteCount) {
-    let result = '';
-    for (let index = 0; index < byteCount && memory[address + index] !== 0; index++) {
-        result += String.fromCharCode(memory[address + index]);
+    let length = 0;
+    while (length < byteCount && memory[address + length] !== 0) {
+        length++;
     }
-
-    return result;
+    return Utf8Decoder.decode(memory.subarray(address, address + length));
 }
 
 function dirname(virtualPath) {
@@ -691,6 +696,52 @@ export function pollDbiFrameRecord(sidecar) {
     return { pollResult, bytesWritten, record };
 }
 
+function readStackFrameRecord(memory, address) {
+    const view = new DataView(memory.buffer, address, 96);
+    return {
+        methodToken: view.getUint32(0, true),
+        ilOffset: view.getUint32(4, true),
+        interpreterIP: view.getUint32(8, true),
+        frameAddress: view.getUint32(12, true),
+        stackAddress: view.getUint32(16, true),
+        moduleAddress: view.getUint32(20, true),
+        flags: view.getUint32(24, true),
+        methodName: readNullTerminatedAscii(memory, address + 32, 64)
+    };
+}
+
+export function pollDbiStackFrames(sidecar) {
+    const stack = sidecar.exports.stackSave();
+    const recordAddress = sidecar.exports.stackAlloc(StackRecordSize);
+    const bytesWrittenAddress = sidecar.exports.stackAlloc(4);
+    const pollResult = sidecar.module._coreclr_wasm_dbi_dac_dbi_enumerate_stack_frames(
+        recordAddress,
+        StackRecordSize,
+        bytesWrittenAddress);
+    const bytesWritten = new DataView(sidecar.module.HEAPU8.buffer, bytesWrittenAddress, 4).getUint32(0, true);
+    let record = null;
+    if (pollResult === 0 && bytesWritten === StackRecordSize) {
+        const view = new DataView(sidecar.module.HEAPU8.buffer, recordAddress, StackRecordSize);
+        const frameCount = view.getUint32(8, true);
+        const flags = view.getUint32(12, true);
+        const frames = [];
+        for (let index = 0; index < Math.min(frameCount, 64); index++) {
+            frames.push(readStackFrameRecord(sidecar.module.HEAPU8, recordAddress + 16 + index * 96));
+        }
+        record = {
+            magic: view.getUint32(0, true),
+            version: view.getUint32(4, true),
+            frameCount,
+            flags,
+            truncated: (flags & StackRecordFlagTruncated) !== 0,
+            frames
+        };
+    }
+    sidecar.exports.stackRestore(stack);
+
+    return { pollResult, bytesWritten, record };
+}
+
 function readFrameVariablesRecord(memory, address, countName, variablesName) {
     const view = new DataView(memory.buffer, address, 1552);
     const variableCount = view.getUint32(12, true);
@@ -745,7 +796,7 @@ export function pollDbiLocals(sidecar) {
     return { pollResult, bytesWritten, record };
 }
 
-function readValueRecord(memory, address) {
+export function readValueRecord(memory, address) {
     const view = new DataView(memory.buffer, address, ValueRecordSize);
     return {
         typeTag: view.getUint32(0, true),
@@ -795,6 +846,79 @@ export function readDbiArgumentValues(sidecar, frameRecord, argumentsRecord) {
 
     return argumentsRecord.arguments.map(argument =>
         readDbiLocalValue(sidecar, frameRecord.frameAddress, argument));
+}
+
+export function describeDbiObject(runtimeExports, objectAddress) {
+    const address = BigInt(objectAddress);
+    const stack = runtimeExports.stackSave();
+    const descriptorAddress = runtimeExports.stackAlloc(ObjectDescriptorSize);
+    const describeResult = runtimeExports.CoreClrWasmDebugDescribeObject(
+        Number(address & 0xffffffffn),
+        descriptorAddress,
+        ObjectDescriptorSize);
+    let descriptor = null;
+    if (describeResult === 0) {
+        const memory = new Uint8Array(runtimeExports.memory.buffer);
+        const view = new DataView(memory.buffer, descriptorAddress, ObjectDescriptorSize);
+        descriptor = {
+            magic: view.getUint32(0, true),
+            version: view.getUint32(4, true),
+            kind: view.getUint32(8, true),
+            elementType: view.getUint32(12, true),
+            flags: view.getUint32(16, true),
+            childCount: view.getUint32(20, true),
+            componentSize: view.getUint32(24, true),
+            methodTableAddress: view.getBigUint64(32, true),
+            dataAddress: view.getBigUint64(40, true),
+            typeName: readNullTerminatedAscii(memory, descriptorAddress + 48, 128),
+            value: readNullTerminatedAscii(memory, descriptorAddress + 176, 256)
+        };
+    }
+    runtimeExports.stackRestore(stack);
+    return { describeResult, descriptor };
+}
+
+export function enumerateDbiObjectChildren(runtimeExports, objectAddress, start, count) {
+    if (!Number.isInteger(start) || start < 0 || !Number.isInteger(count) || count < 0) {
+        throw new Error(`invalid object child range: ${start}, ${count}`);
+    }
+    if (count > MaxObjectChildrenPerRequest) {
+        throw new Error(`object child count exceeds ${MaxObjectChildrenPerRequest}: ${count}`);
+    }
+
+    const address = BigInt(objectAddress);
+    const stack = runtimeExports.stackSave();
+    const recordsAddress = runtimeExports.stackAlloc(Math.max(1, count * ChildValueRecordSize));
+    const totalAddress = runtimeExports.stackAlloc(4);
+    const writtenAddress = runtimeExports.stackAlloc(4);
+    const enumerateResult = runtimeExports.CoreClrWasmDebugEnumerateObjectChildren(
+        Number(address & 0xffffffffn),
+        start,
+        count,
+        recordsAddress,
+        count * ChildValueRecordSize,
+        totalAddress,
+        writtenAddress);
+
+    let total = 0;
+    let written = 0;
+    const children = [];
+    if (enumerateResult === 0) {
+        const memory = new Uint8Array(runtimeExports.memory.buffer);
+        const counts = new DataView(memory.buffer);
+        total = counts.getUint32(totalAddress, true);
+        written = counts.getUint32(writtenAddress, true);
+        for (let index = 0; index < written; index++) {
+            const recordAddress = recordsAddress + index * ChildValueRecordSize;
+            children.push({
+                name: readNullTerminatedAscii(memory, recordAddress + ValueRecordSize, 64),
+                record: readValueRecord(memory, recordAddress)
+            });
+        }
+    }
+
+    runtimeExports.stackRestore(stack);
+    return { enumerateResult, total, written, children };
 }
 
 export function lookupDbiSourceLocation(sidecar, methodToken, ilOffset) {
@@ -930,6 +1054,7 @@ export function installDebuggerImports(ctx) {
             symbolName === 'g_wasmDebugLastIpcModuleLoad' ? runtimeExports.Getg_wasmDebugLastIpcModuleLoad() >>> 0 :
             symbolName === 'g_wasmDebugLastIpcModuleLoadValid' ? runtimeExports.Getg_wasmDebugLastIpcModuleLoadValid() >>> 0 :
             symbolName === 'g_wasmDebugBreakpoints' ? runtimeExports.Getg_wasmDebugBreakpoints() >>> 0 :
+            symbolName === 'g_wasmDebugLastStackRecord' ? runtimeExports.Getg_wasmDebugLastStackRecord() >>> 0 :
             symbolName === 'g_wasmDebugLastArgumentsRecord' ? runtimeExports.Getg_wasmDebugLastArgumentsRecord() >>> 0 :
             symbolName === 'g_wasmDebugLastLocalsRecord' ? runtimeExports.Getg_wasmDebugLastLocalsRecord() >>> 0 :
             0;

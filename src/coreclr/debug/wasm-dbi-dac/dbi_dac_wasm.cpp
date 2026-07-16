@@ -60,8 +60,10 @@ constexpr uint32_t WasmDebugBreakpointSlotCapacity = 16;
 constexpr uint32_t WasmDebugBreakpointEnumerationHeaderSize = 8;
 constexpr uint32_t WasmDebugMaxArgumentsPerFrame = 32;
 constexpr uint32_t WasmDebugMaxLocalsPerFrame = 32;
+constexpr uint32_t WasmDebugMaxStackFrames = 64;
 constexpr uint32_t WasmDebugArgumentsRecordMagic = 0x52414457; // 'WDAR' little-endian
 constexpr uint32_t WasmDebugLocalsRecordMagic = 0x524C4457; // 'WDLR' little-endian
+constexpr uint32_t WasmDebugStackRecordMagic = 0x4B534457; // 'WDSK' little-endian
 
 // 'WDVB' (Wasm DAC/DBI Version Blob) - stored little-endian so the bytes
 // 'W','D','V','B' appear in that order on every wasm host.
@@ -90,7 +92,8 @@ constexpr uint32_t WasmDbiDacVersionBlobMagic = 0x42564457;
 //   14 - add cooperative async-break request bridge and event drain path.
 //   15 - honor token breakpoint IL offsets and add token breakpoint removal.
 //   16 - add stopped-frame argument enumeration.
-constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 16;
+//   17 - add DAC-backed managed stack enumeration.
+constexpr uint32_t WasmDbiDacProtocolBreakingChangeCounter = 18;
 
 // Sidecar build version - encoded VS_FIXEDFILEINFO-style as two 32-bit
 // words. Reserved for future use; today's PoC sidecar reports 0/0 so
@@ -119,6 +122,8 @@ enum class WasmDebugCommandKind : uint32_t
     SetBreakpointByToken = 2,
     Continue = 3,
     ClearBreakpointByToken = 4,
+    SetBreakpointByModuleAndToken = 5,
+    ClearBreakpointByModuleAndToken = 6,
 };
 
 enum Result : int32_t
@@ -317,6 +322,28 @@ struct WasmDebugFrameRecord
     uint32_t StackAddress;
     int32_t FirstStackSlotI32;
     char MethodName[64];
+};
+
+struct WasmDebugStackFrameRecord
+{
+    uint32_t MethodToken;
+    uint32_t ILOffset;
+    uint32_t InterpreterIP;
+    uint32_t FrameAddress;
+    uint32_t StackAddress;
+    uint32_t ModuleAddress;
+    uint32_t Flags;
+    uint32_t Reserved;
+    char MethodName[64];
+};
+
+struct WasmDebugStackRecord
+{
+    uint32_t Magic;
+    uint32_t Version;
+    uint32_t FrameCount;
+    uint32_t Flags;
+    WasmDebugStackFrameRecord Frames[WasmDebugMaxStackFrames];
 };
 
 struct WasmDebugLocalRecord
@@ -603,6 +630,8 @@ static_assert(sizeof(WasmDebugCommandRecord) == 80);
 static_assert(sizeof(WasmDebugBreakpointSlotMirror) == 88);
 static_assert(sizeof(WasmDebugEventRecord) == 340);
 static_assert(sizeof(WasmDebugFrameRecord) == 88);
+static_assert(sizeof(WasmDebugStackFrameRecord) == 96);
+static_assert(sizeof(WasmDebugStackRecord) == 16 + 64 * 96);
 static_assert(sizeof(WasmDebugLocalRecord) == 48);
 static_assert(sizeof(WasmDebugArgumentsRecord) == 16 + 32 * 48);
 static_assert(sizeof(WasmDebugLocalsRecord) == 16 + 32 * 48);
@@ -772,6 +801,7 @@ uint64_t g_cachedStepCompleteEventAddress = 0;
 uint64_t g_cachedModuleLoadEventValidAddress = 0;
 uint64_t g_cachedModuleLoadEventAddress = 0;
 uint64_t g_cachedBreakpointSlotsAddress = 0;
+uint64_t g_cachedStackRecordAddress = 0;
 uint64_t g_cachedArgumentsRecordAddress = 0;
 uint64_t g_cachedLocalsRecordAddress = 0;
 
@@ -803,6 +833,7 @@ void ClearRuntimeConnectionState()
     g_cachedModuleLoadEventValidAddress = 0;
     g_cachedModuleLoadEventAddress = 0;
     g_cachedBreakpointSlotsAddress = 0;
+    g_cachedStackRecordAddress = 0;
     g_cachedArgumentsRecordAddress = 0;
     g_cachedLocalsRecordAddress = 0;
     InvalidatePageCache();
@@ -1489,6 +1520,87 @@ HRESULT CreateClrDataProcess(IXCLRDataProcess** process)
 
     *process = static_cast<IXCLRDataProcess*>(dataProcess);
     return S_OK;
+}
+
+bool ReadValueAtTargetAddress(
+    WasmDacDataTarget& dataTarget,
+    uint64_t targetAddress,
+    uint32_t byteSize,
+    uint32_t typeTag,
+    WasmDbgValueRecord* record)
+{
+    record->TypeTag = typeTag;
+    record->ByteSize = byteSize;
+
+    if (targetAddress > UINT32_MAX)
+    {
+        record->Flags |= WasmDbgValueFlagReadFailed;
+        return false;
+    }
+
+    ULONG32 bytesRead = 0;
+    if (IsPointerLikeElementType(typeTag))
+    {
+        record->IsRef = 1;
+        if (byteSize < WasmTargetPointerSize)
+        {
+            record->Flags |= WasmDbgValueFlagReadFailed;
+            return false;
+        }
+
+        uint32_t objectAddress = 0;
+        HRESULT hr = dataTarget.ReadVirtual(
+            targetAddress,
+            reinterpret_cast<BYTE*>(&objectAddress),
+            sizeof(objectAddress),
+            &bytesRead);
+        if (FAILED(hr) || bytesRead != sizeof(objectAddress))
+        {
+            record->Flags |= WasmDbgValueFlagReadFailed;
+            return false;
+        }
+
+        record->ObjectAddress = objectAddress;
+        if (objectAddress != 0 && IsObjectReferenceElementType(typeTag))
+        {
+            uint32_t methodTableAddress = 0;
+            bytesRead = 0;
+            hr = dataTarget.ReadVirtual(
+                objectAddress,
+                reinterpret_cast<BYTE*>(&methodTableAddress),
+                sizeof(methodTableAddress),
+                &bytesRead);
+            if (FAILED(hr) || bytesRead != sizeof(methodTableAddress))
+            {
+                record->Flags |= WasmDbgValueFlagReadFailed;
+                return false;
+            }
+
+            record->MethodTableAddress = methodTableAddress;
+        }
+
+        return true;
+    }
+
+    uint32_t bytesToRead = byteSize < WasmDbgValueInlineByteCapacity ? byteSize : WasmDbgValueInlineByteCapacity;
+    if (bytesToRead == 0)
+    {
+        record->Flags |= WasmDbgValueFlagReadFailed;
+        return false;
+    }
+
+    HRESULT hr = dataTarget.ReadVirtual(
+        targetAddress,
+        reinterpret_cast<BYTE*>(record->InlineBytes),
+        bytesToRead,
+        &bytesRead);
+    if (FAILED(hr) || bytesRead != bytesToRead)
+    {
+        record->Flags |= WasmDbgValueFlagReadFailed;
+        return false;
+    }
+
+    return true;
 }
 
 HRESULT GetModuleAddress(IXCLRDataModule* module, uint64_t* address)
@@ -3348,6 +3460,74 @@ int32_t coreclr_wasm_dbi_dac_dbi_clear_breakpoints_by_token(uint32_t methodToken
     return SendRuntimeCommandRecord(command);
 }
 
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_module_and_token)
+int32_t coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_module_and_token(
+    uint32_t moduleNameAddress,
+    uint32_t moduleNameLength,
+    uint32_t methodToken,
+    uint32_t ilOffset)
+{
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
+    if (g_cordb == nullptr ||
+        !g_connectedToRuntime ||
+        moduleNameAddress == 0 ||
+        moduleNameLength == 0 ||
+        moduleNameLength >= 64 ||
+        methodToken == 0)
+    {
+        return InvalidArgument;
+    }
+
+    WasmDebugCommandRecord command{};
+    command.Magic = WasmDebugCommandRecordMagic;
+    command.Kind = static_cast<uint32_t>(WasmDebugCommandKind::SetBreakpointByModuleAndToken);
+    command.MethodToken = methodToken;
+    command.ILOffset = ilOffset;
+    memcpy(
+        command.MethodName,
+        reinterpret_cast<void*>(static_cast<uintptr_t>(moduleNameAddress)),
+        moduleNameLength);
+    return SendRuntimeCommandRecord(command);
+}
+
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_clear_breakpoints_by_module_and_token)
+int32_t coreclr_wasm_dbi_dac_dbi_clear_breakpoints_by_module_and_token(
+    uint32_t moduleNameAddress,
+    uint32_t moduleNameLength,
+    uint32_t methodToken)
+{
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
+    if (g_cordb == nullptr ||
+        !g_connectedToRuntime ||
+        moduleNameAddress == 0 ||
+        moduleNameLength == 0 ||
+        moduleNameLength >= 64 ||
+        methodToken == 0)
+    {
+        return InvalidArgument;
+    }
+
+    WasmDebugCommandRecord command{};
+    command.Magic = WasmDebugCommandRecordMagic;
+    command.Kind = static_cast<uint32_t>(WasmDebugCommandKind::ClearBreakpointByModuleAndToken);
+    command.MethodToken = methodToken;
+    memcpy(
+        command.MethodName,
+        reinterpret_cast<void*>(static_cast<uintptr_t>(moduleNameAddress)),
+        moduleNameLength);
+    return SendRuntimeCommandRecord(command);
+}
+
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_continue)
 int32_t coreclr_wasm_dbi_dac_dbi_continue()
 {
@@ -4401,6 +4581,23 @@ int32_t coreclr_wasm_dbi_dac_dbi_enumerate_arguments(
         WasmDebugMaxArgumentsPerFrame);
 }
 
+WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_enumerate_stack_frames)
+int32_t coreclr_wasm_dbi_dac_dbi_enumerate_stack_frames(
+    uint32_t bufferAddress,
+    uint32_t bufferLength,
+    uint32_t bytesWrittenAddress)
+{
+    return EnumerateFrameVariables<WasmDebugStackRecord>(
+        bufferAddress,
+        bufferLength,
+        bytesWrittenAddress,
+        &g_cachedStackRecordAddress,
+        "g_wasmDebugLastStackRecord",
+        WasmDebugStackRecordMagic,
+        &WasmDebugStackRecord::FrameCount,
+        WasmDebugMaxStackFrames);
+}
+
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_enumerate_locals)
 int32_t coreclr_wasm_dbi_dac_dbi_enumerate_locals(
     uint32_t bufferAddress,
@@ -4449,9 +4646,6 @@ int32_t coreclr_wasm_dbi_dac_dbi_read_local_value(
     }
 
     WasmDbgValueRecord record{};
-    record.TypeTag = typeTag;
-    record.ByteSize = byteSize;
-
     bool readFailed =
         frameAddress > UINT32_MAX ||
         InterpMethodContextFrameStackOffset > (UINT32_MAX - static_cast<uint32_t>(frameAddress));
@@ -4481,71 +4675,15 @@ int32_t coreclr_wasm_dbi_dac_dbi_read_local_value(
     }
 
     uint64_t slotAddress = readFailed ? 0 : static_cast<uint64_t>(stackAddress) + byteOffset;
-    if (!readFailed && IsPointerLikeElementType(typeTag))
-    {
-        record.IsRef = 1;
-        if (byteSize < WasmTargetPointerSize)
-        {
-            readFailed = true;
-        }
-        else
-        {
-            uint32_t objectAddress = 0;
-            ULONG32 bytesRead = 0;
-            HRESULT hr = dataTarget.ReadVirtual(
-                slotAddress,
-                reinterpret_cast<BYTE*>(&objectAddress),
-                sizeof(objectAddress),
-                &bytesRead);
-            if (FAILED(hr) || bytesRead != sizeof(objectAddress))
-            {
-                readFailed = true;
-            }
-            else
-            {
-                record.ObjectAddress = objectAddress;
-                if (objectAddress != 0 && IsObjectReferenceElementType(typeTag))
-                {
-                    uint32_t methodTableAddress = 0;
-                    bytesRead = 0;
-                    hr = dataTarget.ReadVirtual(
-                        objectAddress,
-                        reinterpret_cast<BYTE*>(&methodTableAddress),
-                        sizeof(methodTableAddress),
-                        &bytesRead);
-                    if (FAILED(hr) || bytesRead != sizeof(methodTableAddress))
-                    {
-                        readFailed = true;
-                    }
-                    else
-                    {
-                        record.MethodTableAddress = methodTableAddress;
-                    }
-                }
-            }
-        }
-    }
-    else if (!readFailed)
-    {
-        uint32_t bytesToRead = byteSize < WasmDbgValueInlineByteCapacity ? byteSize : WasmDbgValueInlineByteCapacity;
-        if (bytesToRead != 0)
-        {
-            ULONG32 bytesRead = 0;
-            HRESULT hr = dataTarget.ReadVirtual(
-                slotAddress,
-                reinterpret_cast<BYTE*>(record.InlineBytes),
-                bytesToRead,
-                &bytesRead);
-            if (FAILED(hr) || bytesRead != bytesToRead)
-            {
-                readFailed = true;
-            }
-        }
-    }
-
     if (readFailed)
     {
+        record.TypeTag = typeTag;
+        record.ByteSize = byteSize;
         record.Flags |= WasmDbgValueFlagReadFailed;
+    }
+    else
+    {
+        ReadValueAtTargetAddress(dataTarget, slotAddress, byteSize, typeTag, &record);
     }
 
     memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(outBufferAddress)), &record, sizeof(record));
