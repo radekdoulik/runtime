@@ -22,7 +22,14 @@
 
 #include "debugger.h"
 
-void EmitWasmDebugException(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, OBJECTREF exceptionObj);
+struct InterpMethodContextFrame;
+
+void EmitWasmDebugException(
+    MethodDesc* methodDesc,
+    uint32_t ilOffset,
+    const int32_t* ip,
+    InterpMethodContextFrame* frame,
+    OBJECTREF exceptionObj);
 void EmitWasmDebugModuleLoad(Module* pModule, bool isLoad);
 extern "C" bool CoreClrWasmDebugIsStepIntoCallPending();
 extern "C" void CoreClrWasmDebugHandleMethodEnter(const int32_t* ip);
@@ -42,6 +49,7 @@ struct WasmDebugPendingExceptionContext
     MethodDesc* MethodDesc;
     uint32_t ILOffset;
     const int32_t* IP;
+    InterpMethodContextFrame* Frame;
     OBJECTREF* ExceptionObj;
 };
 
@@ -190,6 +198,7 @@ public:
                 g_wasmDebugPendingException.MethodDesc,
                 g_wasmDebugPendingException.ILOffset,
                 g_wasmDebugPendingException.IP,
+                g_wasmDebugPendingException.Frame,
                 *g_wasmDebugPendingException.ExceptionObj);
         }
 
@@ -741,7 +750,12 @@ private:
 
 uint32_t WasmDebuggerEEInterface::s_isMethodEnterEnabledCallCount;
 
-extern "C" void CoreClrWasmDebugNotifyInterpreterException(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, OBJECTREF exceptionObj)
+extern "C" void CoreClrWasmDebugNotifyInterpreterException(
+    MethodDesc* methodDesc,
+    uint32_t ilOffset,
+    const int32_t* ip,
+    InterpMethodContextFrame* frame,
+    OBJECTREF exceptionObj)
 {
     CONTRACTL
     {
@@ -764,6 +778,7 @@ extern "C" void CoreClrWasmDebugNotifyInterpreterException(MethodDesc* methodDes
     g_wasmDebugPendingException.MethodDesc = methodDesc;
     g_wasmDebugPendingException.ILOffset = ilOffset;
     g_wasmDebugPendingException.IP = ip;
+    g_wasmDebugPendingException.Frame = frame;
     g_wasmDebugPendingException.ExceptionObj = &protectedException;
 
     EXCEPTION_RECORD exceptionRecord;

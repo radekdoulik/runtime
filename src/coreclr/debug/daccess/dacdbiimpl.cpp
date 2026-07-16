@@ -23,6 +23,10 @@
 
 #include "dacdbiimpl.h"
 
+#ifdef FEATURE_INTERPRETER
+#include "interpretershared.h"
+#endif
+
 #ifdef FEATURE_COMINTEROP
 #include "runtimecallablewrapper.h"
 #include "comcallablewrapper.h"
@@ -809,6 +813,43 @@ HRESULT STDMETHODCALLTYPE DacDbiInterfaceImpl::GetNativeCodeSequencePointsAndVar
         MethodDesc * pMD = vmMethodDesc.GetDacPtr();
 
         _ASSERTE(fCodeAvailable != 0);
+
+#ifdef FEATURE_INTERPRETER
+        // The interpreter persists the source map with its executable method
+        // data. Sequence-only consumers can read it without constructing a
+        // metadata importer, which is also important for targets whose
+        // metadata is not directly available to DBI.
+        if (pFixedArgCount == NULL &&
+            fpVarInfoCallback == NULL &&
+            fpSeqPointCallback != NULL)
+        {
+            PTR_InterpByteCodeStart pByteCode = pMD->GetInterpreterCode();
+            if (pByteCode != NULL && pByteCode->Method != NULL)
+            {
+                PTR_InterpMethod pMethod = pByteCode->Method;
+                int32_t mapSize = pMethod->ilToNativeMapSize;
+                TADDR mapAddress = TO_TADDR(pMethod->ilToNativeMap);
+                if (mapSize < 0 || (mapSize > 0 && mapAddress == 0))
+                {
+                    return E_FAIL;
+                }
+
+                typedef DPTR(InterpILToNativeMapEntry) PTR_InterpILToNativeMapEntry;
+                PTR_InterpILToNativeMapEntry pMap =
+                    dac_cast<PTR_InterpILToNativeMapEntry>(mapAddress);
+
+                for (int32_t i = 0; i < mapSize; i++)
+                {
+                    ICorDebugInfo::OffsetMapping mapping = {};
+                    mapping.ilOffset = pMap[i].ILOffset;
+                    mapping.nativeOffset = pMap[i].NativeOffset;
+                    mapping.source = ICorDebugInfo::STACK_EMPTY;
+                    fpSeqPointCallback(&mapping, pUserData);
+                }
+                return S_OK;
+            }
+        }
+#endif // FEATURE_INTERPRETER
 
         // Return the fixed argument count
         if (pFixedArgCount != NULL)

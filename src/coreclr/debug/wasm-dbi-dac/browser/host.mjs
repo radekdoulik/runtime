@@ -537,6 +537,8 @@ export function pollDbiIpcEvent(sidecar) {
             type: view.getUint32(4, true),
             processId: view.getUint32(8, true),
             threadId: view.getUint32(12, true),
+            vmAppDomain: view.getBigUint64(16, true),
+            vmThread: view.getBigUint64(24, true),
             hr: view.getInt32(32, true),
             flags: view.getUint32(36, true),
             breakpointToken: view.getBigUint64(40, true),
@@ -565,6 +567,8 @@ export function pollDbiIpcException(sidecar) {
             type: view.getUint32(4, true),
             processId: view.getUint32(8, true),
             threadId: view.getUint32(12, true),
+            vmAppDomain: view.getBigUint64(16, true),
+            vmThread: view.getBigUint64(24, true),
             hr: view.getInt32(32, true),
             flags: view.getUint32(36, true),
             exceptionToken: view.getBigUint64(40, true),
@@ -628,6 +632,8 @@ export function pollDbiIpcStepComplete(sidecar) {
             type: view.getUint32(4, true),
             processId: view.getUint32(8, true),
             threadId: view.getUint32(12, true),
+            vmAppDomain: view.getBigUint64(16, true),
+            vmThread: view.getBigUint64(24, true),
             hr: view.getInt32(32, true),
             flags: view.getUint32(36, true),
             stepToken: view.getBigUint64(40, true),
@@ -1054,7 +1060,6 @@ export function installDebuggerImports(ctx) {
             symbolName === 'g_wasmDebugLastIpcModuleLoad' ? runtimeExports.Getg_wasmDebugLastIpcModuleLoad() >>> 0 :
             symbolName === 'g_wasmDebugLastIpcModuleLoadValid' ? runtimeExports.Getg_wasmDebugLastIpcModuleLoadValid() >>> 0 :
             symbolName === 'g_wasmDebugBreakpoints' ? runtimeExports.Getg_wasmDebugBreakpoints() >>> 0 :
-            symbolName === 'g_wasmDebugLastStackRecord' ? runtimeExports.Getg_wasmDebugLastStackRecord() >>> 0 :
             symbolName === 'g_wasmDebugLastArgumentsRecord' ? runtimeExports.Getg_wasmDebugLastArgumentsRecord() >>> 0 :
             symbolName === 'g_wasmDebugLastLocalsRecord' ? runtimeExports.Getg_wasmDebugLastLocalsRecord() >>> 0 :
             0;

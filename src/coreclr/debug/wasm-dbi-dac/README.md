@@ -247,7 +247,7 @@ acknowledged handshake returns `HrIncompatibleProtocol`.
 |-----------------------------------------------------|--------------------------------------------------------|
 | `coreclr_wasm_dbi_dac_dbi_session_create`           | Create the persistent DBI session object.              |
 | `coreclr_wasm_dbi_dac_dbi_session_create_process`   | Attempt to create a `CordbProcess` (currently `E_NOTIMPL`). |
-| `coreclr_wasm_dbi_dac_dbi_connect_runtime`          | Bind the session to a runtime base address; invalidates the page cache. |
+| `coreclr_wasm_dbi_dac_dbi_connect_runtime`          | Bind the session to a runtime base address and create the real Cordb process; fails if `OpenVirtualProcessImpl` cannot attach. |
 | `coreclr_wasm_dbi_dac_dbi_disconnect_runtime`       | Unbind; invalidates the page cache.                    |
 | `coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_name`   | Send `SetBreakpointByName` command record to runtime.  |
 | `coreclr_wasm_dbi_dac_dbi_set_breakpoint_by_token`  | Send `SetBreakpointByToken` command record to runtime. |
@@ -263,7 +263,7 @@ acknowledged handshake returns `HrIncompatibleProtocol`.
 | `coreclr_wasm_dbi_dac_dbi_poll_ipc_step_complete`   | Drain structured step-complete event (`WasmDbgIpcEventStepComplete`, 96 bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_poll_ipc_module_load`     | Drain structured module load/unload event (`WasmDbgIpcEventModuleLoad`, 312 bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_breakpoints`    | Drain the runtime breakpoint slot table (`8 + 16 * 88` bytes) via DAC `ReadVirtual`. |
-| `coreclr_wasm_dbi_dac_dbi_enumerate_stack_frames`   | Drain the bounded managed interpreter stack (`16 + 64 * 96` bytes) via DAC `ReadVirtual`. |
+| `coreclr_wasm_dbi_dac_dbi_enumerate_stack_frames`   | Enumerate a bounded managed stack (`16 + 64 * 96` bytes) through the standard DBI/DAC stack walker. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_arguments`      | Drain the stopped-frame argument record (`16 + 32 * 48` bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_enumerate_locals`         | Drain the stopped-frame locals record (`16 + 32 * 48` bytes) via DAC `ReadVirtual`. |
 | `coreclr_wasm_dbi_dac_dbi_read_local_value`         | Read a stopped-frame argument or local slot (`WasmDbgValueRecord`, 104 bytes) via DAC `ReadVirtual`. |
@@ -281,10 +281,12 @@ acknowledged handshake returns `HrIncompatibleProtocol`.
 
 #### `WasmDebugStackRecord` (6160 bytes, little-endian)
 
-The runtime snapshots up to 64 active interpreted methods at every managed
-stop. Frame zero is the stopped method; subsequent frames follow
-`InterpMethodContextFrame::pParent`, matching the CoreCLR cDAC interpreter
-stack walk by omitting inactive frames whose interpreter IP is null.
+The sidecar asks the real Cordb process and `IDacDbiInterface` to enumerate
+threads and drive the standard DAC `StackFrameIterator`, the same stack-walking
+path used by CoreCLR on mobile platforms. The runtime stop event carries the
+stopped `Thread*` in its existing `VmThread` field, and Cordb walks only that
+thread. The sidecar serializes up to 64 visible managed frames; the runtime no
+longer formats a separate stack snapshot.
 
 ```text
 offset  size       field
@@ -296,10 +298,12 @@ offset  size       field
 ```
 
 Each frame contains the method token, IL offset, interpreter IP, context-frame
-and stack addresses, runtime module address, frame flags, and a 64-byte method
-name. Hosts may call `CoreClrWasmDebugSelectStackFrame` while stopped before
-enumerating arguments or locals; selection is validated against the current
-snapshot, and source lookup then uses the selected frame's module.
+and stack addresses, module address, frame flags, and a 64-byte method name.
+The current raw DAC bridge leaves the module address and method name empty, so
+the browser host resolves the display name and source from the Portable PDB
+map. Hosts may call `CoreClrWasmDebugSelectStackFrame` while stopped before
+enumerating arguments or locals; the remaining runtime bridge validates that
+address against the active interpreter-frame chain before reading values.
 
 #### `WasmDbgIpcEventAsyncBreakComplete` (88 bytes, little-endian)
 
@@ -310,7 +314,7 @@ offset  size  field
    8     4    ProcessId            // 1
   12     4    ThreadId             // 1
   16     8    VmAppDomain          // 0 today
-  24     8    VmThread             // 0 today
+  24     8    VmThread             // stopped Thread VMPTR
   32     4    Hr                   // 0
   36     4    Flags                // 0
   40     8    AsyncBreakToken      // monotonically increasing token
@@ -331,7 +335,7 @@ offset  size  field
    8     4    ProcessId                 // 1 today
   12     4    ThreadId                  // 1 today
   16     8    VmAppDomain               // reserved, 0 today
-  24     8    VmThread                  // reserved, 0 today
+  24     8    VmThread                  // stopped Thread VMPTR
   32     4    Hr                        // 0 on success
   36     4    Flags                     // reserved, 0 today
   40     8    StepToken                 // monotonic step-complete event token
@@ -492,7 +496,7 @@ offset  size  field
 | `coreclr_wasm_dbi_dac_probe_clr_instance_id`           | Phase 3 onramp: resolves `DotNetRuntimeContractDescriptor` via the host `try_get_symbol` callback and writes the address V3 `OpenVirtualProcessImpl` will pass as `clrInstanceId`, plus the resolution HRESULT. Validates `EnsureClrInstanceIdSet` will see a non-zero stable input before Phase 3 wires the real attach path. The probe is independent of `WasmDacDataTarget::ReadVirtual` because attach happens before any DAC reads. |
 | `coreclr_wasm_dbi_dac_probe_create_events`             | Phase 3 onramp: replicates the three unconditional `CreateEventW` calls that `CordbProcess::Init` (`src/coreclr/debug/di/process.cpp:1679-1695`) makes (auto-reset/auto-reset/manual-reset, all initial-state not-signaled). Calls `PAL_InitializeDLL()` first because the sidecar's partial PAL usage doesn't bootstrap `g_pObjectManager` on its own — without that init the sync subsystem traps. Writes a flag bitmask (0x7 == all created) and the first failure HRESULT (or 0 on success). Closes all created handles. |
 | `coreclr_wasm_dbi_dac_probe_static_dac_binding`        | Phase 3 onramp: walks the same in-sidecar static DAC binding path that the real `CordbProcess::CreateDacDbiInterface` (`process.cpp:650-701`) will use on wasm — bypasses `GetProcAddress`, calls `DacDbiInterfaceInstance` directly, then `DacSetTargetConsistencyChecks(FALSE)`. Writes both HRESULTs. Expected `createHr=0`, `consistencyHr=0`. |
-| `coreclr_wasm_dbi_dac_probe_open_virtual_process`      | Phase 3 acceptance gate: calls real V3 `OpenVirtualProcessImpl` against `WasmDacDataTarget` with the clrInstanceId resolved by `probe_clr_instance_id`. Writes the HRESULT and a boolean indicating whether a non-null `ICorDebugProcess` was returned. Today returns `CORDBG_E_DEBUG_COMPONENT_MISSING` (0x80131c3c) because `CordbProcess::CreateDacDbiInterface` calls `GetProcAddress` on a DAC module that doesn't exist on wasm; flips to `S_OK` + `hasRealCordbProcess=1` once a wasm-specialized branch in process.cpp routes through the helper that `probe_static_dac_binding` exercises. |
+| `coreclr_wasm_dbi_dac_probe_open_virtual_process`      | Phase 3 acceptance gate: calls real V3 `OpenVirtualProcessImpl` against `WasmDacDataTarget` with the clrInstanceId resolved by `probe_clr_instance_id`. Writes the HRESULT and a boolean indicating whether a non-null `ICorDebugProcess` was returned. The Wasm-specific static DAC binding path now returns `S_OK` with `hasRealCordbProcess=1`; `dbi_connect_runtime` enforces the same requirement. |
 | `coreclr_wasm_dbi_dac_probe_dbg_ipc_event_breakpoint_roundtrip` | Phase 4 first slice: constructs a synthetic `WasmDbgIpcEventBreakpoint` (96-byte mirror of `DebuggerIPCEvent::BreakpointData` + header fields), serializes it to the caller buffer via memcpy, deserializes back to a second struct, asserts byte-by-byte equality. Validates the on-wire layout before the Phase 4 transport layer starts sending real `DebuggerIPCEvent`s through the JSON-RPC + binary channels designed in `docs/design/coreclr/wasm-debug-transport.md`. |
 | `coreclr_wasm_dbi_dac_create_cordb_object`             | Smoke wrapper around `CreateCordbObject`. |
 | `coreclr_wasm_dbi_dac_probe_breakpoint_control`        | End-to-end probe for the breakpoint facade. |
@@ -553,7 +557,8 @@ A well-behaved host follows this sequence at session start:
 4. Call `acknowledge_protocol(magic, abiVersion, breakingChangeCounter)`
    with the values just read. Receive `0` to unlock gated exports.
 5. Call `dbi_session_create()`.
-6. Call `dbi_connect_runtime(runtimeBase)`; this invalidates the page
+6. Call `dbi_connect_runtime(runtimeBase)`; this must create a real
+   `ICorDebugProcess` through `OpenVirtualProcessImpl` and invalidates the page
    cache so the next reads come from runtime memory.
 7. Issue breakpoints, async-breaks, polls, continues, and step requests
    as needed; each legacy `continue` call and each successful structured

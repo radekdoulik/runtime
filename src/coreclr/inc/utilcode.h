@@ -46,6 +46,15 @@ using std::nothrow;
 #include "random.h"
 #include "cdacdata.h"
 
+// DBI and DAC normally live in separate modules, but the browser-Wasm sidecar
+// links both into one module. Keep their layout-specific collection symbols
+// distinct so each side resolves against the implementation it was built for.
+#if defined(DACCESS_COMPILE) && defined(TARGET_WASM)
+#define CStructArray DacCStructArray
+#define CHashTable DacCHashTable
+#define CClosedHashBase DacCClosedHashBase
+#endif
+
 #define WINDOWS_KERNEL32_DLLNAME_A "kernel32"
 #define WINDOWS_KERNEL32_DLLNAME_W W("kernel32")
 

@@ -31,6 +31,22 @@ EXTERN_C HRESULT STDMETHODCALLTYPE OpenVirtualProcessImpl(
     IUnknown** ppInstance,
     DWORD* pFlagsOut);
 
+typedef void (*WasmManagedStackFrameCallback)(
+    uint32_t frameAddress,
+    uint32_t stackAddress,
+    uint32_t instructionAddress,
+    uint32_t methodToken,
+    uint32_t ilOffset,
+    void* pUserData);
+
+EXTERN_C HRESULT CordbEnumerateWasmManagedStack(
+    ICorDebugProcess* process,
+    uint64_t vmThreadAddress,
+    uint32_t maxFrames,
+    WasmManagedStackFrameCallback callback,
+    void* pUserData,
+    uint32_t* frameCount);
+
 // Minimal facade-side view of IDacDbiInterface, replicating just the leading
 // vtable slots so we can invoke DacSetTargetConsistencyChecks without pulling
 // in the full dacdbiinterface.h dependency chain (which transitively needs
@@ -64,6 +80,8 @@ constexpr uint32_t WasmDebugMaxStackFrames = 64;
 constexpr uint32_t WasmDebugArgumentsRecordMagic = 0x52414457; // 'WDAR' little-endian
 constexpr uint32_t WasmDebugLocalsRecordMagic = 0x524C4457; // 'WDLR' little-endian
 constexpr uint32_t WasmDebugStackRecordMagic = 0x4B534457; // 'WDSK' little-endian
+constexpr uint32_t WasmDebugStackRecordFlagTruncated = 0x1;
+constexpr uint32_t WasmDebugStackFrameFlagInterpreted = 0x1;
 
 // 'WDVB' (Wasm DAC/DBI Version Blob) - stored little-endian so the bytes
 // 'W','D','V','B' appear in that order on every wasm host.
@@ -771,14 +789,10 @@ bool g_connectedToRuntime = false;
 uint32_t g_connectedRuntimeBase = 0;
 uint32_t g_syntheticProcessId = 1;
 // Real V3 ICorDebugProcess obtained from OpenVirtualProcessImpl during
-// dbi_connect_runtime. Held as IUnknown* to avoid pulling the entire
-// ICorDebugProcess vtable header into this façade compilation unit; the
-// only operation we perform on it from the façade is Release(). The
-// sidecar instantiates this in addition to (not in place of) the
-// existing synthetic g_connectedToRuntime / g_syntheticProcessId facade
-// during the Phase 3 transition; once the synthetic facade is fully
-// retired the IUnknown* will become the sole process representation.
-IUnknown* g_realCordbProcess = nullptr;
+// dbi_connect_runtime. Stack enumeration uses this standard DBI process
+// instead of copying a runtime-formatted interpreter stack record.
+ICorDebugProcess* g_realCordbProcess = nullptr;
+uint64_t g_stoppedVmThread = 0;
 uint8_t g_lastRuntimeEvent[MaxTransportMessageBytes];
 uint32_t g_lastRuntimeEventLength = 0;
 WasmDebugEventRecord g_lastRuntimeEventRecord{};
@@ -801,7 +815,6 @@ uint64_t g_cachedStepCompleteEventAddress = 0;
 uint64_t g_cachedModuleLoadEventValidAddress = 0;
 uint64_t g_cachedModuleLoadEventAddress = 0;
 uint64_t g_cachedBreakpointSlotsAddress = 0;
-uint64_t g_cachedStackRecordAddress = 0;
 uint64_t g_cachedArgumentsRecordAddress = 0;
 uint64_t g_cachedLocalsRecordAddress = 0;
 
@@ -815,6 +828,7 @@ void ClearRuntimeConnectionState()
 
     g_connectedToRuntime = false;
     g_connectedRuntimeBase = 0;
+    g_stoppedVmThread = 0;
     g_lastRuntimeEventLength = 0;
     memset(&g_lastRuntimeEventRecord, 0, sizeof(g_lastRuntimeEventRecord));
     memset(&g_lastRuntimeFrameRecord, 0, sizeof(g_lastRuntimeFrameRecord));
@@ -833,7 +847,6 @@ void ClearRuntimeConnectionState()
     g_cachedModuleLoadEventValidAddress = 0;
     g_cachedModuleLoadEventAddress = 0;
     g_cachedBreakpointSlotsAddress = 0;
-    g_cachedStackRecordAddress = 0;
     g_cachedArgumentsRecordAddress = 0;
     g_cachedLocalsRecordAddress = 0;
     InvalidatePageCache();
@@ -3293,66 +3306,71 @@ int32_t coreclr_wasm_dbi_dac_dbi_connect_runtime(uint32_t runtimeBase)
         return S_OK;
     }
 
+    if (g_realCordbProcess == nullptr)
+    {
+        if (PAL_InitializeDLL() != 0)
+        {
+            return E_FAIL;
+        }
+
+        WasmDacDataTarget* dataTarget = new (std::nothrow) WasmDacDataTarget(runtimeBase);
+        if (dataTarget == nullptr)
+        {
+            return E_OUTOFMEMORY;
+        }
+
+        uint64_t descriptorAddress = 0;
+        if (!TryGetSymbol(
+                static_cast<ICorDebugDataTarget*>(dataTarget),
+                runtimeBase,
+                "DotNetRuntimeContractDescriptor",
+                &descriptorAddress) ||
+            descriptorAddress == 0 ||
+            descriptorAddress > UINT32_MAX)
+        {
+            dataTarget->Release();
+            return HostSymbolLookupFailed;
+        }
+
+        struct
+        {
+            WORD wStructVersion;
+            WORD wMajor;
+            WORD wMinor;
+            WORD wBuild;
+            WORD wRevision;
+        } maxDebuggerVersion = { 0, 4, 0, 0, 0 };
+
+        ICorDebugProcess* process = nullptr;
+        DWORD flagsOut = 0;
+        HRESULT openHr = OpenVirtualProcessImpl(
+            descriptorAddress,
+            static_cast<IUnknown*>(static_cast<ICorDebugDataTarget*>(dataTarget)),
+            nullptr,
+            reinterpret_cast<_CLR_DEBUGGING_VERSION*>(&maxDebuggerVersion),
+            __uuidof(ICorDebugProcess),
+            reinterpret_cast<IUnknown**>(&process),
+            &flagsOut);
+        dataTarget->Release();
+        if (FAILED(openHr) || process == nullptr)
+        {
+            if (process != nullptr)
+            {
+                process->Release();
+            }
+            return FAILED(openHr) ? openHr : E_FAIL;
+        }
+
+        g_realCordbProcess = process;
+    }
+
     g_connectedToRuntime = true;
     g_connectedRuntimeBase = runtimeBase;
+    g_stoppedVmThread = 0;
     g_lastRuntimeEventLength = 0;
     memset(&g_lastRuntimeEventRecord, 0, sizeof(g_lastRuntimeEventRecord));
     memset(&g_lastRuntimeFrameRecord, 0, sizeof(g_lastRuntimeFrameRecord));
     InvalidatePageCache();
-
-    // Phase 3: instantiate a real V3 CordbProcess via OpenVirtualProcessImpl
-    // alongside the existing synthetic facade. Failure is non-fatal during
-    // the Phase 3 transition — the synthetic facade carries the smoke
-    // contract until the next slice retires it.
-    if (g_realCordbProcess == nullptr)
-    {
-        // PAL_InitializeDLL is required for CordbProcess::Init's three
-        // CreateEventW calls (process.cpp:1679-1695). The wasm sidecar's
-        // partial PAL usage does not bootstrap g_pObjectManager on its
-        // own; probe_create_events documents the gap. Idempotent on
-        // success (returns 0 if already initialized).
-        if (PAL_InitializeDLL() == 0)
-        {
-            WasmDacDataTarget* dataTarget = new (std::nothrow) WasmDacDataTarget(runtimeBase);
-            if (dataTarget != nullptr)
-            {
-                uint64_t descriptorAddress = 0;
-                if (TryGetSymbol(
-                        static_cast<ICorDebugDataTarget*>(dataTarget),
-                        runtimeBase,
-                        "DotNetRuntimeContractDescriptor",
-                        &descriptorAddress) &&
-                    descriptorAddress != 0 &&
-                    descriptorAddress <= UINT32_MAX)
-                {
-                    struct
-                    {
-                        WORD wStructVersion;
-                        WORD wMajor;
-                        WORD wMinor;
-                        WORD wBuild;
-                        WORD wRevision;
-                    } maxDebuggerVersion = { 0, 4, 0, 0, 0 };
-
-                    IUnknown* pInstance = nullptr;
-                    DWORD flagsOut = 0;
-                    HRESULT openHr = OpenVirtualProcessImpl(
-                        descriptorAddress,
-                        static_cast<IUnknown*>(static_cast<ICorDebugDataTarget*>(dataTarget)),
-                        nullptr,
-                        reinterpret_cast<_CLR_DEBUGGING_VERSION*>(&maxDebuggerVersion),
-                        __uuidof(ICorDebugProcess),
-                        &pInstance,
-                        &flagsOut);
-                    if (SUCCEEDED(openHr) && pInstance != nullptr)
-                    {
-                        g_realCordbProcess = pInstance;
-                    }
-                }
-                dataTarget->Release();
-            }
-        }
-    }
 
     return S_OK;
 }
@@ -3545,8 +3563,13 @@ int32_t coreclr_wasm_dbi_dac_dbi_continue()
     WasmDebugCommandRecord command{};
     command.Magic = WasmDebugCommandRecordMagic;
     command.Kind = static_cast<uint32_t>(WasmDebugCommandKind::Continue);
-    InvalidatePageCache();
-    return SendRuntimeCommandRecord(command);
+    int32_t result = SendRuntimeCommandRecord(command);
+    if (result == Success)
+    {
+        g_stoppedVmThread = 0;
+        InvalidatePageCache();
+    }
+    return result;
 }
 
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_async_break_request)
@@ -3566,6 +3589,7 @@ int32_t coreclr_wasm_dbi_dac_dbi_async_break_request()
     int32_t result = coreclr_wasm_dbi_dac_submit_async_break_request();
     if (result == Success)
     {
+        g_stoppedVmThread = 0;
         InvalidatePageCache();
     }
     return result == Success ? Success : result;
@@ -3599,6 +3623,7 @@ int32_t coreclr_wasm_dbi_dac_dbi_send_ipc_continue_request(uint64_t breakpointTo
         sizeof(request));
     if (result == Success)
     {
+        g_stoppedVmThread = 0;
         InvalidatePageCache();
     }
     return result == Success ? Success : result;
@@ -3640,6 +3665,7 @@ int32_t coreclr_wasm_dbi_dac_dbi_send_ipc_step_into_request(uint64_t breakpointT
         sizeof(request));
     if (result == Success)
     {
+        g_stoppedVmThread = 0;
         InvalidatePageCache();
     }
     return result == Success ? Success : result;
@@ -3773,6 +3799,7 @@ int32_t coreclr_wasm_dbi_dac_dbi_poll_ipc_event(uint32_t bufferAddress, uint32_t
         return HostReadFailed;
     }
 
+    g_stoppedVmThread = payload.VmThread;
     memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bufferAddress)), &payload, sizeof(payload));
     uint32_t written = static_cast<uint32_t>(sizeof(payload));
     memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &written, sizeof(written));
@@ -3869,6 +3896,7 @@ int32_t coreclr_wasm_dbi_dac_dbi_poll_ipc_exception(uint32_t bufferAddress, uint
         return HostReadFailed;
     }
 
+    g_stoppedVmThread = payload.VmThread;
     memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bufferAddress)), &payload, sizeof(payload));
     uint32_t written = static_cast<uint32_t>(sizeof(payload));
     memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &written, sizeof(written));
@@ -3965,6 +3993,7 @@ int32_t coreclr_wasm_dbi_dac_dbi_poll_ipc_async_break_complete(uint32_t bufferAd
         return HostReadFailed;
     }
 
+    g_stoppedVmThread = payload.VmThread;
     memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bufferAddress)), &payload, sizeof(payload));
     uint32_t written = static_cast<uint32_t>(sizeof(payload));
     memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &written, sizeof(written));
@@ -4061,6 +4090,7 @@ int32_t coreclr_wasm_dbi_dac_dbi_poll_ipc_step_complete(uint32_t bufferAddress, 
         return HostReadFailed;
     }
 
+    g_stoppedVmThread = payload.VmThread;
     memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bufferAddress)), &payload, sizeof(payload));
     uint32_t written = static_cast<uint32_t>(sizeof(payload));
     memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)), &written, sizeof(written));
@@ -4581,21 +4611,96 @@ int32_t coreclr_wasm_dbi_dac_dbi_enumerate_arguments(
         WasmDebugMaxArgumentsPerFrame);
 }
 
+HRESULT EnumerateManagedStack(WasmDebugStackRecord* record)
+{
+    memset(record, 0, sizeof(*record));
+    record->Magic = WasmDebugStackRecordMagic;
+    record->Version = 1;
+
+    InvalidatePageCache();
+    uint32_t frameCount = 0;
+    HRESULT hr = CordbEnumerateWasmManagedStack(
+        g_realCordbProcess,
+        g_stoppedVmThread,
+        WasmDebugMaxStackFrames,
+        [](uint32_t frameAddress,
+           uint32_t stackAddress,
+           uint32_t instructionAddress,
+           uint32_t methodToken,
+           uint32_t ilOffset,
+           void* pUserData)
+        {
+            WasmDebugStackRecord* stackRecord = static_cast<WasmDebugStackRecord*>(pUserData);
+            WasmDebugStackFrameRecord& frame = stackRecord->Frames[stackRecord->FrameCount++];
+            frame.MethodToken = methodToken;
+            frame.ILOffset = ilOffset;
+            frame.InterpreterIP = instructionAddress;
+            frame.FrameAddress = frameAddress;
+            frame.StackAddress = stackAddress;
+            frame.Flags = WasmDebugStackFrameFlagInterpreted;
+        },
+        record,
+        &frameCount);
+    if (SUCCEEDED(hr) && frameCount > WasmDebugMaxStackFrames)
+    {
+        record->Flags |= WasmDebugStackRecordFlagTruncated;
+    }
+    return hr;
+}
+
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_enumerate_stack_frames)
 int32_t coreclr_wasm_dbi_dac_dbi_enumerate_stack_frames(
     uint32_t bufferAddress,
     uint32_t bufferLength,
     uint32_t bytesWrittenAddress)
 {
-    return EnumerateFrameVariables<WasmDebugStackRecord>(
-        bufferAddress,
-        bufferLength,
-        bytesWrittenAddress,
-        &g_cachedStackRecordAddress,
-        "g_wasmDebugLastStackRecord",
-        WasmDebugStackRecordMagic,
-        &WasmDebugStackRecord::FrameCount,
-        WasmDebugMaxStackFrames);
+    int32_t gate = EnsureProtocolAcknowledged();
+    if (gate != Success)
+    {
+        return gate;
+    }
+
+    if (g_cordb == nullptr ||
+        !g_connectedToRuntime ||
+        g_realCordbProcess == nullptr ||
+        g_stoppedVmThread == 0)
+    {
+        return E_FAIL;
+    }
+
+    if (bytesWrittenAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    uint32_t recordSize = sizeof(WasmDebugStackRecord);
+    memcpy(
+        reinterpret_cast<void*>(static_cast<uintptr_t>(bytesWrittenAddress)),
+        &recordSize,
+        sizeof(recordSize));
+
+    if (bufferAddress == 0)
+    {
+        return InvalidArgument;
+    }
+
+    if (bufferLength < recordSize)
+    {
+        return BufferTooSmall;
+    }
+
+    WasmDebugStackRecord record{};
+    HRESULT hr = EnumerateManagedStack(&record);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    memcpy(
+        reinterpret_cast<void*>(static_cast<uintptr_t>(bufferAddress)),
+        &record,
+        sizeof(record));
+    return S_OK;
 }
 
 WASM_DBI_DAC_EXPORT(coreclr_wasm_dbi_dac_dbi_enumerate_locals)

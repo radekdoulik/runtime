@@ -2,6 +2,7 @@ set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
 set(WASM_DBI_DAC_SOURCES
   dbi_dac_wasm.cpp
+  ../../utilcode/collections.cpp
 )
 
 set(WASM_DBI_DAC_LINK_LIBS

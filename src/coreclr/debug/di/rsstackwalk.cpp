@@ -931,3 +931,204 @@ HRESULT CordbAsyncStackWalk::GetFrame(ICorDebugFrame ** ppFrame)
     PUBLIC_REENTRANT_API_END(hr);
     return hr;
 }
+
+#if defined(TARGET_WASM)
+
+typedef void (*WasmManagedStackFrameCallback)(
+    uint32_t frameAddress,
+    uint32_t stackAddress,
+    uint32_t instructionAddress,
+    uint32_t methodToken,
+    uint32_t ilOffset,
+    void * pUserData);
+
+static HRESULT MapWasmStackFrameToIL(
+    IDacDbiInterface * pDAC,
+    const Debugger_JITFuncData * pJITFuncData,
+    uint32_t * pILOffset)
+{
+    CallbackAccumulator<ICorDebugInfo::OffsetMapping> sequencePoints;
+    HRESULT hr = pDAC->GetNativeCodeSequencePointsAndVarInfo(
+        pJITFuncData->vmNativeCodeMethodDescToken,
+        pJITFuncData->nativeStartAddressPtr,
+        TRUE,
+        nullptr,
+        nullptr,
+        [](ICorDebugInfo::OffsetMapping * pMapping, void * pUserData)
+        {
+            CallbackAccumulator<ICorDebugInfo::OffsetMapping>::From(pUserData)->Push(*pMapping);
+        },
+        &sequencePoints);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+    if (FAILED(sequencePoints.hrError))
+    {
+        return sequencePoints.hrError;
+    }
+
+    SequencePoints mappings;
+    mappings.InitSequencePoints(static_cast<ULONG32>(sequencePoints.items.Size()));
+    if (sequencePoints.items.Size() != 0)
+    {
+        mappings.CopyAndSortSequencePoints(sequencePoints.items.Ptr());
+    }
+
+    DWORD nativeOffset = static_cast<DWORD>(pJITFuncData->nativeOffset);
+    if (pJITFuncData->justAfterILThrow)
+    {
+        nativeOffset -= STACKWALK_CONTROLPC_ADJUST_OFFSET;
+    }
+
+    CorDebugMappingResult mappingResult = MAPPING_NO_INFO;
+    *pILOffset = mappings.MapNativeOffsetToIL(nativeOffset, &mappingResult);
+    return S_OK;
+}
+
+static HRESULT EnumerateWasmManagedThreadStack(
+    IDacDbiInterface * pDAC,
+    VMPTR_Thread vmThread,
+    uint32_t maxFrames,
+    WasmManagedStackFrameCallback callback,
+    void * pUserData,
+    uint32_t * pFrameCount)
+{
+    DT_CONTEXT context;
+    ZeroMemory(&context, sizeof(context));
+
+    IDacDbiInterface::StackWalkHandle stackWalk = nullptr;
+    HRESULT hr = pDAC->CreateStackWalk(vmThread, &context, &stackWalk);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    uint32_t frameCount = 0;
+    while (true)
+    {
+        Debugger_STRData frameData;
+        ZeroMemory(&frameData, sizeof(frameData));
+        ZeroMemory(&context, sizeof(context));
+        frameData.ctx = &context;
+
+        IDacDbiInterface::FrameType frameType = IDacDbiInterface::kInvalid;
+        hr = pDAC->GetStackWalkCurrentFrameInfo(stackWalk, &frameData, &frameType);
+        if (FAILED(hr))
+        {
+            break;
+        }
+        if (frameType == IDacDbiInterface::kAtEndOfStack)
+        {
+            break;
+        }
+
+        if (frameType == IDacDbiInterface::kManagedStackFrame &&
+            frameData.eType == Debugger_STRData::cMethodFrame &&
+            !frameData.v.fNoMetadata)
+        {
+            uint32_t ilOffset = 0;
+            hr = MapWasmStackFrameToIL(pDAC, &frameData.v.jitFuncData, &ilOffset);
+            if (FAILED(hr))
+            {
+                break;
+            }
+
+            frameCount++;
+            if (frameCount <= maxFrames)
+            {
+                callback(
+                    context.InterpreterSP,
+                    context.InterpreterFP,
+                    context.InterpreterIP,
+                    frameData.v.funcData.funcMetadataToken,
+                    ilOffset,
+                    pUserData);
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        BOOL unwound = FALSE;
+        hr = pDAC->UnwindStackWalkFrame(stackWalk, &unwound);
+        if (FAILED(hr) || !unwound)
+        {
+            break;
+        }
+    }
+
+    HRESULT deleteHr = pDAC->DeleteStackWalk(stackWalk);
+    if (SUCCEEDED(hr) && FAILED(deleteHr))
+    {
+        hr = deleteHr;
+    }
+
+    *pFrameCount = frameCount;
+    return hr;
+}
+
+extern "C" HRESULT CordbEnumerateWasmManagedStack(
+    ICorDebugProcess * pProcess,
+    uint64_t vmThreadAddress,
+    uint32_t maxFrames,
+    WasmManagedStackFrameCallback callback,
+    void * pUserData,
+    uint32_t * pFrameCount)
+{
+    if (pProcess == nullptr ||
+        vmThreadAddress == 0 ||
+        maxFrames == 0 ||
+        callback == nullptr ||
+        pFrameCount == nullptr)
+    {
+        return E_INVALIDARG;
+    }
+
+    *pFrameCount = 0;
+
+    CordbProcess * pCordbProcess = static_cast<CordbProcess *>(pProcess);
+    RSLockHolder lockHolder(pCordbProcess->GetProcessLock());
+    pCordbProcess->ForceDacFlush();
+
+    IDacDbiInterface * pDAC = pCordbProcess->GetDAC();
+    CallbackAccumulator<VMPTR_Thread> threads;
+    HRESULT hr = pDAC->EnumerateThreads(
+        [](VMPTR_Thread vmThread, void * pUserData)
+        {
+            CallbackAccumulator<VMPTR_Thread>::From(pUserData)->Push(vmThread);
+        },
+        &threads);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+    if (FAILED(threads.hrError))
+    {
+        return threads.hrError;
+    }
+
+    for (COUNT_T index = 0; index < threads.items.Size(); index++)
+    {
+        if (static_cast<uint64_t>(VmPtrToCookie(threads.items[index])) != vmThreadAddress)
+        {
+            continue;
+        }
+
+        uint32_t frameCount = 0;
+        HRESULT stackWalkResult = EnumerateWasmManagedThreadStack(
+            pDAC,
+            threads.items[index],
+            maxFrames,
+            callback,
+            pUserData,
+            &frameCount);
+        *pFrameCount = frameCount;
+        return stackWalkResult;
+    }
+
+    return E_FAIL;
+}
+
+#endif // TARGET_WASM

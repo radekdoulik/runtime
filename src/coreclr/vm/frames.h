@@ -877,7 +877,8 @@ public:
     {
         LIMITED_METHOD_DAC_CONTRACT;
 #ifdef TARGET_WASM
-        TransitionBlock* pTransitionBlock = (TransitionBlock*)GetTransitionBlock();
+        DPTR(TransitionBlock) pTransitionBlock =
+            dac_cast<DPTR(TransitionBlock)>(GetTransitionBlock());
         if (pTransitionBlock != NULL)
         {
             if ((pTransitionBlock->m_ReturnAddress != 0) && (pTransitionBlock->m_StackPointer != 0))

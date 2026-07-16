@@ -47,11 +47,20 @@ extern "C" bool CoreClrWasmDebugHandleInterpreterBreakpoint(
     uintptr_t stackAddress,
     int32_t* originalOpcode);
 extern "C" bool CoreClrWasmDebugIsDebuggerConnectedForHooks();
-extern "C" void CoreClrWasmDebugNotifyInterpreterException(MethodDesc* methodDesc, uint32_t ilOffset, const int32_t* ip, OBJECTREF exceptionObj);
+extern "C" void CoreClrWasmDebugNotifyInterpreterException(
+    MethodDesc* methodDesc,
+    uint32_t ilOffset,
+    const int32_t* ip,
+    InterpMethodContextFrame* frame,
+    OBJECTREF exceptionObj);
 extern "C" void CoreClrWasmDebugSetMethodEnterContext(MethodDesc* methodDesc, const int32_t* ip, InterpMethodContextFrame* frame);
 extern "C" void CoreClrWasmDebugClearMethodEnterContext();
 
-static void CoreClrWasmDebugNotifyInterpreterExceptionAtIP(InterpMethod* pMethod, const InterpMethodContextFrame* pFrame, const int32_t* ip, OBJECTREF* pThrowable)
+static void CoreClrWasmDebugNotifyInterpreterExceptionAtIP(
+    InterpMethod* pMethod,
+    InterpMethodContextFrame* pFrame,
+    const int32_t* ip,
+    OBJECTREF* pThrowable)
 {
     CONTRACTL
     {
@@ -78,7 +87,12 @@ static void CoreClrWasmDebugNotifyInterpreterExceptionAtIP(InterpMethod* pMethod
     }
 
     GCPROTECT_BEGIN(*pThrowable);
-    CoreClrWasmDebugNotifyInterpreterException(pMethod->methodHnd, exceptionILOffset, ip, *pThrowable);
+    CoreClrWasmDebugNotifyInterpreterException(
+        pMethod->methodHnd,
+        exceptionILOffset,
+        ip,
+        pFrame,
+        *pThrowable);
     GCPROTECT_END();
 }
 #endif // defined(TARGET_WASM) && defined(FEATURE_WASM_DBI_DAC)

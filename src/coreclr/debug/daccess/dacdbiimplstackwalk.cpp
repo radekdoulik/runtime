@@ -817,7 +817,15 @@ void DacDbiInterfaceImpl::InitFrameData(StackFrameIterator *   pIter,
         // Strictly speaking, we can do this in CordbJITILFrame::Init(), but it's just easier and more
         // efficiently to do it here.  CordbJITILFrame::Init() will initialize the other vararg-related
         // fields.  We don't have the native var info here to fully initialize everything.
+#ifdef FEATURE_INTERPRETER
+        // Vararg methods cannot be interpreted. Avoid loading metadata merely
+        // to compute a value that is always false for interpreter frames.
+        pFrameData->v.fVarArgs = pCF->GetCodeInfo()->IsInterpretedCode()
+            ? false
+            : pMD->IsVarArg();
+#else
         pFrameData->v.fVarArgs = pMD->IsVarArg();
+#endif
 
         // Check if this is a NoMetadata method or if the method should be hidden.
         // These methods should not be visible in the debugger both for convenience and
